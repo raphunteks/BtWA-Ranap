@@ -7,6 +7,7 @@ import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import fs from 'fs';
 import process from 'process';
+import cors from 'cors'; // Ditambahkan untuk bypass blokir Vercel
 
 // Import Handler Logika Bot
 import setupMessageHandler from './src/messageHandler.js';
@@ -17,11 +18,24 @@ const sessionPath = './session';
 // Setup Express & Socket.io
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+
+// Proteksi CORS Ekstra agar web Vercel tidak diblokir
+app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
+app.use(express.json());
+
+const io = new Server(server, { 
+    cors: { 
+        origin: '*',
+        methods: ["GET", "POST"],
+        credentials: true
+    },
+    pingTimeout: 60000 
+});
+
 const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('WhatsApp Bot API & Engine is Running Successfully!');
+    res.send('<h2>✅ WhatsApp Bot API & Engine is Running Successfully!</h2>');
 });
 
 // Penanganan Error agar Server Tidak Crash
@@ -48,14 +62,19 @@ function clearZombieSession() {
     }
 }
 
+// ==========================================
+// STATE MANAGEMENT (SUPER UPGRADE)
+// ==========================================
 let sock;
 let currentQR = null;
+let isConnected = false; // Pelacak status asli anti-bug loading
 
 // Handle koneksi Web (Socket.io)
 io.on('connection', (socket) => {
-    console.log('🌐 Web client terhubung ke Socket.io');
+    console.log('🌐 Web client terhubung ke Socket.io:', socket.id);
     
-    if (sock?.authState?.creds?.registered) {
+    // Cek akurat menggunakan flag boolean
+    if (isConnected) {
         socket.emit('wa_status', 'connected');
     } else if (currentQR) {
         socket.emit('qr', currentQR);
@@ -64,15 +83,23 @@ io.on('connection', (socket) => {
     // Mendengarkan permintaan Pairing Code dari Web
     socket.on('request_pairing', async (phoneNumber) => {
         console.log(`📱 Meminta Pairing Code untuk nomor: ${phoneNumber}`);
-        if (sock && !sock.authState.creds.registered) {
-            try {
-                const code = await sock.requestPairingCode(phoneNumber);
-                socket.emit('pairing_code', code);
-            } catch (error) {
-                console.error('❌ Gagal menghasilkan pairing code:', error);
-            }
-        } else if (sock?.authState?.creds?.registered) {
+        if (sock && !isConnected) {
+            // Berikan jeda sebentar agar engine WA siap memproses pairing
+            setTimeout(async () => {
+                try {
+                    let code = await sock.requestPairingCode(phoneNumber);
+                    // Format kode agar rapi (cth: ABCD-EFGH)
+                    code = code?.match(/.{1,4}/g)?.join("-") || code; 
+                    socket.emit('pairing_code', code);
+                } catch (error) {
+                    console.error('❌ Gagal menghasilkan pairing code:', error);
+                    socket.emit('error', 'Gagal generate kode. Pastikan nomor benar.');
+                }
+            }, 2000);
+        } else if (isConnected) {
             socket.emit('wa_status', 'connected');
+        } else {
+            socket.emit('error', 'WA Engine belum siap, tunggu sebentar.');
         }
     });
 });
@@ -85,7 +112,7 @@ async function connectToWhatsApp() {
     sock = makeWASocket({
         version, 
         logger, 
-        printQRInTerminal: true, // Tetap print di terminal sbg fallback
+        printQRInTerminal: true, 
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
         browser: Browsers.ubuntu('Chrome'), 
         markOnlineOnConnect: true,
@@ -95,7 +122,7 @@ async function connectToWhatsApp() {
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
         
-        // Handle QR Code untuk dikirim ke Web
+        // Handle QR Code
         if (qr) {
             QRCode.toDataURL(qr, (err, url) => {
                 if (!err) {
@@ -107,6 +134,9 @@ async function connectToWhatsApp() {
 
         if (connection === 'close') {
             currentQR = null;
+            isConnected = false; // Matikan status connected
+            io.emit('wa_status', 'disconnected'); // Lempar sinyal putus ke UI
+            
             const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
             if (statusCode !== DisconnectReason.loggedOut) {
                 setTimeout(() => connectToWhatsApp(), 3000);
@@ -116,8 +146,9 @@ async function connectToWhatsApp() {
             }
         } else if (connection === 'open') {
             currentQR = null;
+            isConnected = true; // Kunci status connected
             console.log('✅ Bot berhasil terhubung ke WhatsApp!');
-            io.emit('wa_status', 'connected');
+            io.emit('wa_status', 'connected'); // Lempar sinyal tersambung ke UI
         }
     });
 
