@@ -102,6 +102,23 @@ io.on('connection', (socket) => {
             socket.emit('error', 'WA Engine belum siap, tunggu sebentar.');
         }
     });
+
+    // Mendengarkan permintaan LOGOUT dari Web
+    socket.on('logout', async () => {
+        console.log('🚪 Menerima instruksi LOGOUT dari Web Portal');
+        if (sock && isConnected) {
+            try {
+                // Memanggil fungsi logout bawaan Baileys
+                await sock.logout();
+                isConnected = false;
+                currentQR = null;
+                // UI tidak perlu dipaksa update di sini, karena sock.logout() akan 
+                // memicu event connection.update = 'close' di bawah yang mengurus sisanya
+            } catch (err) {
+                console.error('❌ Gagal melakukan proses logout:', err);
+            }
+        }
+    });
 });
 
 async function connectToWhatsApp() {
@@ -112,7 +129,6 @@ async function connectToWhatsApp() {
     sock = makeWASocket({
         version, 
         logger, 
-        printQRInTerminal: true, 
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
         browser: Browsers.ubuntu('Chrome'), 
         markOnlineOnConnect: true,
