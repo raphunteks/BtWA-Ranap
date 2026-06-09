@@ -89,7 +89,7 @@ let lastRanapData = null;
 let lastRajalEndoData = null;
 let lastRajalBMData = null;
 let lastRajalPerioData = null; 
-let lastRajalUmumData = null; // Tambahan untuk Klinik Gigi/Umum
+let lastRajalUmumData = null; 
 
 function getDifferences(oldList, newList) {
     const makeKey = (p) => `${p.no_rm}_${p.nama_pasien}`;
@@ -102,21 +102,22 @@ function getDifferences(oldList, newList) {
     return { added, removed };
 }
 
-// Helper untuk format list Rajal sesuai prompt (Nomor urut, label BARU / SELESAI, penempatan teratur)
+// Fungsi Upgrade Logic Rawat Jalan (List bersambung & Teratur)
 function formatKlinikList(namaKlinik, iconKlinik, diffData) {
     let resultTxt = `${iconKlinik} *Klinik ${namaKlinik}*:\n`;
     let countBaru = diffData.added.length;
     let countSelesai = diffData.removed.length;
 
     let combinedList = [];
-    // Masukkan data lama/selesai terlebih dahulu
+    // 1. Masukkan data Selesai/Batal terlebih dahulu di urutan atas
     diffData.removed.forEach(p => combinedList.push(`${p.nama_pasien} *(SELESAI / BATAL)*`));
-    // Masukkan data baru (terbaru otomatis di posisi paling bawah array)
+    // 2. Masukkan data Baru di urutan bawah (Pasien Baru selalu di bawah)
     diffData.added.forEach(p => combinedList.push(`${p.nama_pasien} *(BARU)*`));
 
     if (combinedList.length === 0) {
-        resultTxt += `_(Daftar Pasien Rawat Jalan Klinik ${namaKlinik} saat ini Tidak Ada)_\n\n`;
+        resultTxt += `_(Tidak ada perubahan)_\n\n`;
     } else {
+        // Penomoran teratur (1, 2, 3...)
         combinedList.forEach((item, index) => {
             resultTxt += `${index + 1}. ${item}\n`;
         });
@@ -194,18 +195,18 @@ async function checkApiUpdates(sock) {
                 const hasPerioDiff = diffPerio.added.length > 0 || diffPerio.removed.length > 0;
                 const hasUmumDiff = diffUmum.added.length > 0 || diffUmum.removed.length > 0;
 
-                // Jika ada salah satu klinik yang berubah, kirim report lengkap
+                // Jika ada salah satu klinik yang berubah, kirim report lengkap dalam 1 Format Teks
                 if (hasEndoDiff || hasBMDiff || hasPerioDiff || hasUmumDiff) {
                     let msg = `🏥 *AUTO INFO: RAWAT JALAN*\n_Perubahan antrean tanggal ${dateWITA}._\n\n`;
                     
                     const formatEndo = formatKlinikList("ENDODONSI", "🦷", diffEndo);
-                    const formatBM = formatKlinikList("Bedah Mulut", "💉", diffBM);
                     const formatPerio = formatKlinikList("PERIODONSIA", "🩺", diffPerio);
+                    const formatBM = formatKlinikList("Bedah Mulut", "💉", diffBM);
                     const formatUmum = formatKlinikList("Gigi/Umum", "🪥", diffUmum);
 
                     msg += formatEndo.txt;
-                    msg += formatBM.txt;
                     msg += formatPerio.txt;
+                    msg += formatBM.txt;
                     msg += formatUmum.txt;
 
                     msg += `📊 *Total Antrean (BARU: BELUM DIKERJA):* Endo (${formatEndo.baru}), BM (${formatBM.baru}), Perio (${formatPerio.baru}), Umum (${formatUmum.baru})\n`;
