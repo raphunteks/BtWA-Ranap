@@ -131,8 +131,8 @@ async function connectToWhatsApp() {
         logger, 
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
         browser: Browsers.ubuntu('Chrome'), 
-        markOnlineOnConnect: true,
-        getMessage: async () => ({ conversation: 'Bot is running' })
+        markOnlineOnConnect: true
+        // FIX BUG: getMessage dihilangkan agar WA Bot tidak mengirim spam "Bot is running" saat merespon request sinkronisasi WA
     });
 
     sock.ev.on('connection.update', async (update) => {
