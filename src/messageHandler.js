@@ -99,23 +99,64 @@ function getDifferences(oldList, newList) {
     const added = newList.filter(p => !oldMap.has(makeKey(p)));
     const removed = oldList.filter(p => !newMap.has(makeKey(p)));
     
-    return { added, removed };
+    // Cek jika ada perubahan Text Status menjadi PULANG / SELESAI / BATAL / ASUHAN KEPERAWATAN di dalam antrean
+    const changed = newList.filter(p => {
+        if (oldMap.has(makeKey(p))) {
+            const oldP = oldMap.get(makeKey(p));
+            const oldStatus = (oldP.status || "").toUpperCase();
+            const newStatus = (p.status || "").toUpperCase();
+            if (oldStatus !== newStatus) return true;
+        }
+        return false;
+    });
+    
+    return { 
+        added, 
+        removed, 
+        changed, 
+        hasDiff: added.length > 0 || removed.length > 0 || changed.length > 0 
+    };
 }
 
-// Fungsi Upgrade Logic Rawat Jalan (List bersambung & Teratur)
-function formatKlinikList(namaKlinik, iconKlinik, diffData) {
+// Fungsi Upgrade Logic Rawat Jalan (List bersambung & Teratur berdasarkan Status)
+function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     let resultTxt = `${iconKlinik} *Klinik ${namaKlinik}*:\n`;
-    let countBaru = diffData.added.length;
-    let countSelesai = diffData.removed.length;
+    let countBaru = 0;
+    let countSelesai = 0;
 
-    let combinedList = [];
-    // 1. Masukkan data Selesai/Batal terlebih dahulu di urutan atas
-    diffData.removed.forEach(p => combinedList.push(`${p.nama_pasien} *(SELESAI / BATAL)*`));
-    // 2. Masukkan data Baru di urutan bawah (Pasien Baru selalu di bawah)
-    diffData.added.forEach(p => combinedList.push(`${p.nama_pasien} *(BARU)*`));
+    let listSelesai = [];
+    let listBaru = [];
+
+    // 1. Masukkan pasien yang terhapus/hilang dari server (Otomatis dianggap Selesai)
+    if (removedList && removedList.length > 0) {
+        removedList.forEach(p => {
+            listSelesai.push(`${p.nama_pasien} *(SELESAI / BATAL)*`);
+            countSelesai++;
+        });
+    }
+
+    // 2. Filter list saat ini, Cek Trigger dari tulisan status
+    currentList.forEach(p => {
+        const st = (p.status || "").toUpperCase();
+        
+        if (st.includes("PULANG") || st.includes("BATAL") || st.includes("SELESAI")) {
+            listSelesai.push(`${p.nama_pasien} *(SELESAI / BATAL)*`);
+            countSelesai++;
+        } else if (st.includes("ASUHAN KEPERAWATAN")) {
+            // Eksplisit dimasukkan ke BARU sesuai permintaan
+            listBaru.push(`${p.nama_pasien} *(BARU)*`);
+            countBaru++;
+        } else {
+            // Default jika status lain (antri/kosong) tetap masuk ke BARU
+            listBaru.push(`${p.nama_pasien} *(BARU)*`);
+            countBaru++;
+        }
+    });
+
+    let combinedList = [...listSelesai, ...listBaru];
 
     if (combinedList.length === 0) {
-        resultTxt += `_(Tidak ada perubahan)_\n\n`;
+        resultTxt += `_(Tidak ada pasien)_\n\n`;
     } else {
         // Penomoran teratur (1, 2, 3...)
         combinedList.forEach((item, index) => {
@@ -125,6 +166,73 @@ function formatKlinikList(namaKlinik, iconKlinik, diffData) {
     }
 
     return { txt: resultTxt, baru: countBaru, selesai: countSelesai };
+}
+
+// ==========================================
+// FUNGSI PENGIRIMAN DATA PRIMER (SAAT ON)
+// ==========================================
+async function forceSendRanapPrimer(sock, jid) {
+    try {
+        await sock.sendMessage(jid, { text: `⏳ _Menyiapkan Data Primer Rawat Inap..._` });
+        const dataRanap = await fetchWithFallback('Ranap');
+        if (dataRanap.status) {
+            const currentRanap = dataRanap.data || [];
+            lastRanapData = currentRanap; 
+            let msg = `🏥 *AUTO INFO: RAWAT INAP (DATA PRIMER)*\n_Berikut adalah baseline pasien saat ini._\n\n`;
+            if (currentRanap.length > 0) {
+                currentRanap.forEach((p, i) => msg += `${i+1}. ${p.nama_pasien}\n   🛏️ ${p.ruangan}\n`);
+            } else {
+                msg += `_(Tidak ada pasien rawat inap saat ini)_\n`;
+            }
+            msg += `\n📊 *Total Saat Ini:* ${currentRanap.length} Pasien`;
+            await sock.sendMessage(jid, { text: msg });
+        }
+    } catch (e) {
+        console.error("Gagal load primer Ranap:", e);
+    }
+}
+
+async function forceSendRajalPrimer(sock, jid) {
+    try {
+        await sock.sendMessage(jid, { text: `⏳ _Menyiapkan Data Primer Rawat Jalan..._` });
+        const dateWITA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
+        
+        const [dataEndo, dataBM, dataPerio, dataUmum] = await Promise.all([
+            fetchWithFallback('RajalEndo_AntrianPx', `tanggal=${dateWITA}`),
+            fetchWithFallback('RajalBM_AntrianPx', `tanggal=${dateWITA}`),
+            fetchWithFallback('RajalPerio_AntrianPx', `tanggal=${dateWITA}`),
+            fetchWithFallback('RajalUmum_AntrianPx', `tanggal=${dateWITA}`)
+        ]);
+
+        const currentEndo = dataEndo.data || [];
+        const currentBM = dataBM.data || [];
+        const currentPerio = dataPerio.data || [];
+        const currentUmum = dataUmum.data || [];
+
+        lastRajalEndoData = currentEndo;
+        lastRajalBMData = currentBM;
+        lastRajalPerioData = currentPerio;
+        lastRajalUmumData = currentUmum;
+
+        let msg = `🏥 *AUTO INFO: RAWAT JALAN (DATA PRIMER)*\n_Baseline antrean tanggal ${dateWITA}._\n\n`;
+        
+        const formatEndo = formatKlinikList("ENDODONSI", "🦷", currentEndo, []);
+        const formatPerio = formatKlinikList("PERIODONSIA", "🩺", currentPerio, []);
+        const formatBM = formatKlinikList("Bedah Mulut", "💉", currentBM, []);
+        const formatUmum = formatKlinikList("Gigi/Umum", "🪥", currentUmum, []);
+
+        msg += formatEndo.txt;
+        msg += formatPerio.txt;
+        msg += formatBM.txt;
+        msg += formatUmum.txt;
+
+        msg += `📊 *Total Antrean (BARU: BELUM DIKERJA):* Endo (${formatEndo.baru}), BM (${formatBM.baru}), Perio (${formatPerio.baru}), Umum (${formatUmum.baru})\n`;
+        msg += `📊 *Total Antrean (SELESAI: SUDAH DIKERJA):* Endo (${formatEndo.selesai}), BM (${formatBM.selesai}), Perio (${formatPerio.selesai}), Umum (${formatUmum.selesai})`;
+        
+        await sock.sendMessage(jid, { text: msg });
+    } catch (e) {
+        console.error("Gagal load primer Rajal:", e);
+    }
 }
 
 async function checkApiUpdates(sock) {
@@ -190,19 +298,14 @@ async function checkApiUpdates(sock) {
                 const diffPerio = getDifferences(lastRajalPerioData, currentPerio);
                 const diffUmum = getDifferences(lastRajalUmumData, currentUmum);
                 
-                const hasEndoDiff = diffEndo.added.length > 0 || diffEndo.removed.length > 0;
-                const hasBMDiff = diffBM.added.length > 0 || diffBM.removed.length > 0;
-                const hasPerioDiff = diffPerio.added.length > 0 || diffPerio.removed.length > 0;
-                const hasUmumDiff = diffUmum.added.length > 0 || diffUmum.removed.length > 0;
-
-                // Jika ada salah satu klinik yang berubah, kirim report lengkap dalam 1 Format Teks
-                if (hasEndoDiff || hasBMDiff || hasPerioDiff || hasUmumDiff) {
+                // Jika ada pasien bertambah, berkurang, ATAU ada status yang diubah ke PULANG/ASUHAN KEPERAWATAN dll
+                if (diffEndo.hasDiff || diffBM.hasDiff || diffPerio.hasDiff || diffUmum.hasDiff) {
                     let msg = `🏥 *AUTO INFO: RAWAT JALAN*\n_Perubahan antrean tanggal ${dateWITA}._\n\n`;
                     
-                    const formatEndo = formatKlinikList("ENDODONSI", "🦷", diffEndo);
-                    const formatPerio = formatKlinikList("PERIODONSIA", "🩺", diffPerio);
-                    const formatBM = formatKlinikList("Bedah Mulut", "💉", diffBM);
-                    const formatUmum = formatKlinikList("Gigi/Umum", "🪥", diffUmum);
+                    const formatEndo = formatKlinikList("ENDODONSI", "🦷", currentEndo, diffEndo.removed);
+                    const formatPerio = formatKlinikList("PERIODONSIA", "🩺", currentPerio, diffPerio.removed);
+                    const formatBM = formatKlinikList("Bedah Mulut", "💉", currentBM, diffBM.removed);
+                    const formatUmum = formatKlinikList("Gigi/Umum", "🪥", currentUmum, diffUmum.removed);
 
                     msg += formatEndo.txt;
                     msg += formatPerio.txt;
@@ -372,6 +475,10 @@ export default function setupMessageHandler(sock) {
                         if (!botSettings.autoRanap.includes(sender)) botSettings.autoRanap.push(sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '✅ *Auto Info Rawat Inap AKTIF* di obrolan ini.\nBot akan otomatis mengirim pesan laporan jika mendeteksi ada pasien yang masuk atau keluar (pulang).' }, { quoted: msg });
+                        
+                        // Men-trigger pengiriman Data Primer secara instan
+                        await forceSendRanapPrimer(sock, sender);
+
                     } else if (args[0] === 'off') {
                         botSettings.autoRanap = botSettings.autoRanap.filter(jid => jid !== sender);
                         saveSettings();
@@ -386,6 +493,10 @@ export default function setupMessageHandler(sock) {
                         if (!botSettings.autoRajal.includes(sender)) botSettings.autoRajal.push(sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '✅ *Auto Info Rawat Jalan AKTIF* di obrolan ini.\nBot akan otomatis mengirim laporan ke obrolan ini setiap kali antrean Klinik bertambah atau berkurang pada hari ini.' }, { quoted: msg });
+                        
+                        // Men-trigger pengiriman Data Primer secara instan
+                        await forceSendRajalPrimer(sock, sender);
+
                     } else if (args[0] === 'off') {
                         botSettings.autoRajal = botSettings.autoRajal.filter(jid => jid !== sender);
                         saveSettings();
