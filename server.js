@@ -7,6 +7,8 @@ import pino from 'pino';
 import fs from 'fs';
 import process from 'process';
 import cors from 'cors';
+import path from 'path'; // Diperlukan untuk resolusi path absolut
+import { pathToFileURL } from 'url'; // Diperlukan untuk konversi path ESM yang aman di Railway/Docker
 
 const logger = pino({ level: 'silent' });
 const sessionsPath = './sessions'; // Folder jama untuk multi-session
@@ -169,13 +171,20 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Dynamic Script Loading (Menggunakan cache buster timestamp agar membaca file terbaru)
+    // ==========================================
+    // FIXED DYNAMIC MODULE RESOLUTION (RAILWAY BYPASS)
+    // ==========================================
     try {
-        if (fs.existsSync(`${scriptsPath}/${scriptName}`)) {
-            const handlerModule = await import(`../${scriptsPath}/${scriptName}?t=${Date.now()}`);
-            if (handlerModule.default) handlerModule.default(sock); // Menyesuaikan logic handler Anda
+        const absoluteScriptPath = path.resolve(scriptsPath, scriptName);
+        if (fs.existsSync(absoluteScriptPath)) {
+            // Gunakan pathToFileURL untuk mengonversi path lokal absolut Linux menjadi format file:/// URI yang valid di ES Module
+            const fileUrl = pathToFileURL(absoluteScriptPath).href + `?t=${Date.now()}`;
+            const handlerModule = await import(fileUrl);
+            if (handlerModule.default) {
+                handlerModule.default(sock); 
+            }
         } else {
-            console.warn(`⚠️ Script ${scriptName} tidak ditemukan untuk bot ${botId}`);
+            console.warn(`⚠️ Script ${scriptName} tidak ditemukan di sistem lokal: ${absoluteScriptPath}`);
         }
     } catch (err) {
         console.error(`❌ Gagal meload script ${scriptName} untuk bot ${botId}:`, err);
