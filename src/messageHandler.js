@@ -91,16 +91,6 @@ let lastRajalBMData = null;
 let lastRajalPerioData = null; 
 let lastRajalUmumData = null; 
 
-// Menggabungkan API Antrian dan API Riwayat agar data tidak hilang saat pasien selesai
-function mergeAntrianAndRiwayat(antrianList, riwayatList) {
-    const map = new Map();
-    // Masukkan data antrian
-    (antrianList || []).forEach(p => map.set(`${p.no_rm}_${p.nama_pasien}`, p));
-    // Timpa/tambahkan dengan data riwayat (Riwayat adalah final state/Selesai)
-    (riwayatList || []).forEach(p => map.set(`${p.no_rm}_${p.nama_pasien}`, { ...p, is_riwayat: true }));
-    return Array.from(map.values());
-}
-
 // Mengunci urutan lama, pasien baru selalu ditaruh PALING BAWAH
 function sortChronologically(oldList, newList) {
     const makeKey = (p) => `${p.no_rm}_${p.nama_pasien}`;
@@ -130,8 +120,7 @@ function getDifferences(oldList, newList) {
             const oldP = oldMap.get(makeKey(p));
             const oldStatus = (oldP.status || "").toUpperCase();
             const newStatus = (p.status || "").toUpperCase();
-            // Jika status teks berubah atau dia pindah dari antrian ke riwayat
-            if (oldStatus !== newStatus || (!oldP.is_riwayat && p.is_riwayat)) return true;
+            if (oldStatus !== newStatus) return true;
         }
         return false;
     });
@@ -150,7 +139,7 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     let listSelesai = [];
     let listBaru = [];
 
-    // 1. Masukkan pasien yang terhapus dari server (Otomatis dianggap Selesai/Batal)
+    // 1. Masukkan pasien yang terhapus dari server (Otomatis dianggap Selesai)
     if (removedList && removedList.length > 0) {
         removedList.forEach(p => {
             listSelesai.push(`${p.nama_pasien} *(SELESAI)*`);
@@ -162,15 +151,15 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     currentList.forEach(p => {
         const st = (p.status || "").toUpperCase();
         
-        // Deteksi trigger text atau status dari Riwayat
+        // Deteksi trigger text spesifik
         if (st.includes("BATAL")) {
             listSelesai.push(`${p.nama_pasien} *(BATAL)*`);
             countSelesai++;
-        } else if (p.is_riwayat || st.includes("PULANG") || st.includes("SELESAI") || st.includes("DIPULANGKAN") || st.includes("SATUSEHAT")) {
+        } else if (st.includes("PULANG") || st.includes("SELESAI") || st.includes("DIPULANGKAN") || st.includes("SATUSEHAT")) {
             listSelesai.push(`${p.nama_pasien} *(SELESAI)*`);
             countSelesai++;
         } else {
-            // Semua status lainnya (masih di antrean) termasuk "ASUHAN KEPERAWATAN" masuk ke BARU
+            // Semua status lainnya termasuk "ASUHAN KEPERAWATAN" masuk ke BARU
             listBaru.push(`${p.nama_pasien} *(BARU)*`);
             countBaru++;
         }
@@ -219,23 +208,18 @@ async function forceSendRajalPrimer(sock, jid) {
         await sock.sendMessage(jid, { text: `⏳ _Menyiapkan Data Primer Rawat Jalan..._` });
         const dateWITA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
         
-        // Fetch ke 8 API sekaligus (Antrian dan Riwayat)
-        const [dataEndo, dataBM, dataPerio, dataUmum, riwayatEndo, riwayatBM, riwayatPerio, riwayatUmum] = await Promise.all([
-            fetchWithFallback('RajalEndo_AntrianPx', `tanggal=${dateWITA}`),
-            fetchWithFallback('RajalBM_AntrianPx', `tanggal=${dateWITA}`),
-            fetchWithFallback('RajalPerio_AntrianPx', `tanggal=${dateWITA}`),
-            fetchWithFallback('RajalUmum_AntrianPx', `tanggal=${dateWITA}`),
+        // HANYA FETCH DARI API RIWAYAT SESUAI PERMINTAAN (Menghindari Duplikat)
+        const [dataEndo, dataBM, dataPerio, dataUmum] = await Promise.all([
             fetchWithFallback('RajalEndo_RiwayatAntrianPx', `tanggal=${dateWITA}`),
             fetchWithFallback('RajalBM_RiwayatAntrianPx', `tanggal=${dateWITA}`),
             fetchWithFallback('RajalPerio_RiwayatAntrianPx', `tanggal=${dateWITA}`),
             fetchWithFallback('RajalUmum_RiwayatAntrianPx', `tanggal=${dateWITA}`)
         ]);
 
-        // Merge Data Antrian & Riwayat
-        const currentEndoRaw = mergeAntrianAndRiwayat(dataEndo.data, riwayatEndo.data);
-        const currentBMRaw = mergeAntrianAndRiwayat(dataBM.data, riwayatBM.data);
-        const currentPerioRaw = mergeAntrianAndRiwayat(dataPerio.data, riwayatPerio.data);
-        const currentUmumRaw = mergeAntrianAndRiwayat(dataUmum.data, riwayatUmum.data);
+        const currentEndoRaw = dataEndo.data || [];
+        const currentBMRaw = dataBM.data || [];
+        const currentPerioRaw = dataPerio.data || [];
+        const currentUmumRaw = dataUmum.data || [];
 
         // Sortir kronologis meskipun ini data primer, untuk baseline
         const currentEndo = sortChronologically(lastRajalEndoData || [], currentEndoRaw);
@@ -317,23 +301,18 @@ async function checkApiUpdates(sock) {
         if (botSettings.autoRajal.length > 0) {
             const dateWITA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
             
-            // Fetch ke 8 API sekaligus (Antrian dan Riwayat)
-            const [dataEndo, dataBM, dataPerio, dataUmum, riwayatEndo, riwayatBM, riwayatPerio, riwayatUmum] = await Promise.all([
-                fetchWithFallback('RajalEndo_AntrianPx', `tanggal=${dateWITA}`),
-                fetchWithFallback('RajalBM_AntrianPx', `tanggal=${dateWITA}`),
-                fetchWithFallback('RajalPerio_AntrianPx', `tanggal=${dateWITA}`),
-                fetchWithFallback('RajalUmum_AntrianPx', `tanggal=${dateWITA}`),
+            // HANYA FETCH DARI API RIWAYAT SESUAI PERMINTAAN (Menghindari Duplikat)
+            const [dataEndo, dataBM, dataPerio, dataUmum] = await Promise.all([
                 fetchWithFallback('RajalEndo_RiwayatAntrianPx', `tanggal=${dateWITA}`),
                 fetchWithFallback('RajalBM_RiwayatAntrianPx', `tanggal=${dateWITA}`),
                 fetchWithFallback('RajalPerio_RiwayatAntrianPx', `tanggal=${dateWITA}`),
                 fetchWithFallback('RajalUmum_RiwayatAntrianPx', `tanggal=${dateWITA}`)
             ]);
 
-            // Merge Data Antrian & Riwayat
-            const currentEndoRaw = mergeAntrianAndRiwayat(dataEndo.data, riwayatEndo.data);
-            const currentBMRaw = mergeAntrianAndRiwayat(dataBM.data, riwayatBM.data);
-            const currentPerioRaw = mergeAntrianAndRiwayat(dataPerio.data, riwayatPerio.data);
-            const currentUmumRaw = mergeAntrianAndRiwayat(dataUmum.data, riwayatUmum.data);
+            const currentEndoRaw = dataEndo.data || [];
+            const currentBMRaw = dataBM.data || [];
+            const currentPerioRaw = dataPerio.data || [];
+            const currentUmumRaw = dataUmum.data || [];
 
             // Urutkan kronologis: Pertahankan urutan lama, pasien baru selalu jatuh ke paling bawah
             const currentEndo = sortChronologically(lastRajalEndoData || [], currentEndoRaw);
