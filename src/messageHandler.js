@@ -151,10 +151,11 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     currentList.forEach(p => {
         const st = (p.status || "").toUpperCase();
         
+        // Deteksi trigger text yang spesifik
         if (st.includes("BATAL")) {
             listSelesai.push(`${p.nama_pasien} *(BATAL)*`);
             countSelesai++;
-        } else if (st.includes("PULANG") || st.includes("SELESAI")) {
+        } else if (st.includes("PULANG") || st.includes("SELESAI") || st.includes("DIPULANGKAN") || st.includes("SATUSEHAT")) {
             listSelesai.push(`${p.nama_pasien} *(SELESAI)*`);
             countSelesai++;
         } else {
