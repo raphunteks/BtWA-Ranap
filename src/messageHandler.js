@@ -151,15 +151,23 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     currentList.forEach(p => {
         const st = (p.status || "").toUpperCase();
         
-        // Deteksi trigger text spesifik
+        // PRIORITAS 1: Cek Batal
         if (st.includes("BATAL")) {
             listSelesai.push(`${p.nama_pasien} *(BATAL)*`);
             countSelesai++;
-        } else if (st.includes("PULANG") || st.includes("SELESAI") || st.includes("DIPULANGKAN") || st.includes("SATUSEHAT")) {
+        } 
+        // PRIORITAS 2: Cek Asuhan Keperawatan (Mendahului SATUSEHAT agar tidak salah deteksi sebagai selesai)
+        else if (st.includes("ASUHAN KEPERAWATAN")) {
+            listBaru.push(`${p.nama_pasien} *(BARU)*`);
+            countBaru++;
+        } 
+        // PRIORITAS 3: Cek Selesai / Pulang
+        else if (st.includes("PULANG") || st.includes("SELESAI") || st.includes("DIPULANGKAN") || st.includes("SATUSEHAT")) {
             listSelesai.push(`${p.nama_pasien} *(SELESAI)*`);
             countSelesai++;
-        } else {
-            // Semua status lainnya termasuk "ASUHAN KEPERAWATAN" masuk ke BARU
+        } 
+        // LAINNYA: Otomatis masuk ke Baru
+        else {
             listBaru.push(`${p.nama_pasien} *(BARU)*`);
             countBaru++;
         }
