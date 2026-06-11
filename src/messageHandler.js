@@ -9,7 +9,7 @@ import handleStickerCommand from './commands/sticker.js';
 // ==========================================
 const ownerNumber = "6285256739684@s.whatsapp.net";
 // Menghindari suffix multi-device (seperti :1@s.whatsapp.net) yang bikin settings error
-const ownerPureJid = ownerNumber.split(':')[0]; 
+const ownerPureJid = ownerNumber.includes(':') ? ownerNumber.split(':')[0] + '@s.whatsapp.net' : ownerNumber; 
 const GAS_URL = "https://script.google.com/macros/s/AKfycbzhDou1e-e4QXDILWfM_mkyagViYOvcpLLv7xL-kJ6cVhpR_R5_bVICdnUYxp0AA90/exec";
 const botStartTime = new Date(); 
 
@@ -676,14 +676,14 @@ export default function setupMessageHandler(sock) {
             const args = text.slice(prefix.length).trim().split(/ +/);
             const command = args.shift().toLowerCase();
             
-            // NORMALISASI JID: Perbaikan utama agar Multi-Device tidak gagal memverifikasi status owner di !settings
-            let rawSender = msg.key.remoteJid;
-            let sender = rawSender;
-            if (!sender.includes('@g.us') && sender.includes(':')) {
-                sender = sender.split(':')[0] + '@s.whatsapp.net';
-            }
+            // --- PERBAIKAN BUG E2E WA (Menunggu pesan ini / Waiting for this message) ---
+            // JANGAN mengubah `sender` aslinya. Biarkan utuh sesuai `msg.key.remoteJid` agar saat membalas (reply) enkripsinya tidak rusak.
+            const sender = msg.key.remoteJid;
+            
+            // Gunakan pureSender KHUSUS untuk menyimpan nomor/grup ke database pengaturan saja.
+            const pureSender = sender.includes('@g.us') ? sender : (sender.includes(':') ? sender.split(':')[0] + '@s.whatsapp.net' : sender);
 
-            console.log(`[COMMAND] ${command} dari ${sender}`);
+            console.log(`[COMMAND] ${command} dari ${sender} (Pure: ${pureSender})`);
 
             const isRajal = command.startsWith('cekrajal');
 
@@ -802,10 +802,10 @@ export default function setupMessageHandler(sock) {
                     break;
 
                 case 'settings':
-                    const ranapActive = botSettings.autoRanap.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
-                    const rajalActive = botSettings.autoRajal.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
-                    const sholatActive = botSettings.autoSholat.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
-                    const weatherActive = botSettings.autoWeather.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const ranapActive = botSettings.autoRanap.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const rajalActive = botSettings.autoRajal.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const sholatActive = botSettings.autoSholat.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const weatherActive = botSettings.autoWeather.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
                     
                     let setsMsg = `⚙️ *PENGATURAN BOT DI CHAT/GRUP INI*\n\n` +
                                   `🏥 *Auto Info Rawat Inap:* ${ranapActive}\n` +
@@ -813,7 +813,7 @@ export default function setupMessageHandler(sock) {
                                   `🕌 *Auto Info Sholat (Kendari):* ${sholatActive}\n` +
                                   `🌤️ *Auto Info Cuaca (Kendari):* ${weatherActive}\n\n`;
                     
-                    if (sender === ownerNumber || sender === ownerPureJid) {
+                    if (pureSender === ownerNumber || pureSender === ownerPureJid) {
                         setsMsg += `👑 *STATISTIK GLOBAL (KHUSUS OWNER):*\n` +
                                    `👥 Berlangganan Sholat: ${botSettings.autoSholat.length} User/Grup\n` +
                                    `👥 Berlangganan Cuaca: ${botSettings.autoWeather.length} User/Grup\n` +
@@ -826,11 +826,11 @@ export default function setupMessageHandler(sock) {
 
                 case 'autoinfosholat':
                     if (args[0] === 'on') {
-                        if (!botSettings.autoSholat.includes(sender)) botSettings.autoSholat.push(sender);
+                        if (!botSettings.autoSholat.includes(pureSender)) botSettings.autoSholat.push(pureSender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '✅ *Auto Info & Pengingat Sholat AKTIF* di obrolan ini.\nBot otomatis mengirim jadwal di pagi hari dan mengingatkan waktu sholat.' }, { quoted: msg });
                     } else if (args[0] === 'off') {
-                        botSettings.autoSholat = botSettings.autoSholat.filter(jid => jid !== sender);
+                        botSettings.autoSholat = botSettings.autoSholat.filter(jid => jid !== pureSender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '❌ *Auto Info & Pengingat Sholat NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else { await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoinfosholat on/off*' }, { quoted: msg }); }
@@ -838,11 +838,11 @@ export default function setupMessageHandler(sock) {
 
                 case 'autoweather':
                     if (args[0] === 'on') {
-                        if (!botSettings.autoWeather.includes(sender)) botSettings.autoWeather.push(sender);
+                        if (!botSettings.autoWeather.includes(pureSender)) botSettings.autoWeather.push(pureSender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '✅ *Auto Prakiraan Cuaca AKTIF* di obrolan ini.\nBot otomatis mengirim cuaca Kendari setiap jam 06:00 WITA.' }, { quoted: msg });
                     } else if (args[0] === 'off') {
-                        botSettings.autoWeather = botSettings.autoWeather.filter(jid => jid !== sender);
+                        botSettings.autoWeather = botSettings.autoWeather.filter(jid => jid !== pureSender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '❌ *Auto Prakiraan Cuaca NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else { await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoweather on/off*' }, { quoted: msg }); }
@@ -995,12 +995,12 @@ export default function setupMessageHandler(sock) {
 
                 case 'autoranap':
                     if (args[0] === 'on') {
-                        if (!botSettings.autoRanap.includes(sender)) botSettings.autoRanap.push(sender);
+                        if (!botSettings.autoRanap.includes(pureSender)) botSettings.autoRanap.push(pureSender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '✅ *Auto Info Rawat Inap AKTIF* di obrolan ini.\nBot akan otomatis mengirim pesan laporan jika mendeteksi ada pasien yang masuk atau keluar (pulang).' }, { quoted: msg });
                         await forceSendRanapPrimer(sock, sender);
                     } else if (args[0] === 'off') {
-                        botSettings.autoRanap = botSettings.autoRanap.filter(jid => jid !== sender);
+                        botSettings.autoRanap = botSettings.autoRanap.filter(jid => jid !== pureSender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '❌ *Auto Info Rawat Inap NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else {
@@ -1010,12 +1010,12 @@ export default function setupMessageHandler(sock) {
 
                 case 'autorajal':
                     if (args[0] === 'on') {
-                        if (!botSettings.autoRajal.includes(sender)) botSettings.autoRajal.push(sender);
+                        if (!botSettings.autoRajal.includes(pureSender)) botSettings.autoRajal.push(pureSender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '✅ *Auto Info Rawat Jalan AKTIF* di obrolan ini.\nBot akan otomatis mengirim laporan ke obrolan ini setiap kali antrean Klinik bertambah atau berkurang pada hari ini.' }, { quoted: msg });
                         await forceSendRajalPrimer(sock, sender);
                     } else if (args[0] === 'off') {
-                        botSettings.autoRajal = botSettings.autoRajal.filter(jid => jid !== sender);
+                        botSettings.autoRajal = botSettings.autoRajal.filter(jid => jid !== pureSender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '❌ *Auto Info Rawat Jalan NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else {
