@@ -20,7 +20,6 @@ const settingsFile = `${sessionPath}/settings.json`;
 if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
 
 let botSchedules = [];
-// Menambahkan autoWeather dan autoSholat ke state botSettings
 let botSettings = { autoRanap: [], autoRajal: [], autoSholat: [], autoWeather: [] };
 
 if (fs.existsSync(schedulesFile)) {
@@ -35,13 +34,13 @@ if (!botSettings.autoSholat) botSettings.autoSholat = [];
 if (!botSettings.autoWeather) botSettings.autoWeather = [];
 
 let configChanged = false;
-// Memastikan Owner terdaftar tanpa suffix JID yang bisa membuat bug status !settings
+// Memastikan Owner terdaftar tanpa suffix JID
 if (!botSettings.autoSholat.includes(ownerPureJid) && !botSettings.autoSholat.includes(ownerNumber)) {
-    botSettings.autoSholat.push(ownerNumber);
+    botSettings.autoSholat.push(ownerPureJid);
     configChanged = true;
 }
 if (!botSettings.autoWeather.includes(ownerPureJid) && !botSettings.autoWeather.includes(ownerNumber)) {
-    botSettings.autoWeather.push(ownerNumber);
+    botSettings.autoWeather.push(ownerPureJid);
     configChanged = true;
 }
 if (configChanged) saveSettings();
@@ -98,7 +97,6 @@ function getWeatherDesc(code) {
 
 async function fetchWeatherKendari() {
     try {
-        // Koordinat Kota Kendari (-3.945, 122.4989)
         const res = await fetch("https://api.open-meteo.com/v1/forecast?latitude=-3.945&longitude=122.4989&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum&current_weather=true&timezone=Asia%2FMakassar");
         const data = await res.json();
         
@@ -123,12 +121,10 @@ async function fetchWeatherKendari() {
     }
 }
 
-// NLP Parser Tanggal untuk Advanced Weather Cuaca
 function parseWeatherQuery(query) {
     if (!query) return null;
     query = query.toLowerCase().trim();
     
-    // Fitur Cepat Hari Ini/Besok/Lusa
     if (query === 'besok') {
         let t = new Date(); t.setDate(t.getDate() + 1);
         let d = t.toISOString().split('T')[0];
@@ -140,7 +136,6 @@ function parseWeatherQuery(query) {
         return { start: d, end: d, label: 'Lusa' };
     }
 
-    // RegEx Patterns untuk membaca "15 Jan 2026" atau "01 - 20 Januari 2026"
     const rangeMatch = query.match(/(\d{1,2})\s*-\s*(\d{1,2})\s+([a-z]+)\s+(\d{4})/);
     const singleMatch = query.match(/(\d{1,2})\s+([a-z]+)\s+(\d{4})/);
     const strictRange = query.match(/(\d{1,2})-(\d{1,2})-(\d{4})\s*s\/?d\s*(\d{1,2})-(\d{1,2})-(\d{4})/); 
@@ -169,11 +164,9 @@ function parseWeatherQuery(query) {
     return null;
 }
 
-// Fetch Advanced Forecast / Archive Weather
 async function fetchAdvancedWeather(startDate, endDate, label) {
     try {
         const now = new Date(); const end = new Date(endDate);
-        // Gunakan archive-api bila tanggal terakhir dicari lebih dari 5 hari ke masa lalu
         const isArchive = end < now && (now - end) > (1000 * 60 * 60 * 24 * 5);
         let baseUrl = isArchive ? "https://archive-api.open-meteo.com/v1/archive" : "https://api.open-meteo.com/v1/forecast";
 
@@ -276,7 +269,6 @@ let lastRajalBMData = null;
 let lastRajalPerioData = null; 
 let lastRajalUmumData = null; 
 
-// Mengunci urutan lama, pasien baru selalu ditaruh PALING BAWAH
 function sortChronologically(oldList, newList) {
     const makeKey = (p) => `${p.no_rm}_${p.nama_pasien}`;
     const oldMap = new Map(oldList.map((p, index) => [makeKey(p), index]));
@@ -286,8 +278,8 @@ function sortChronologically(oldList, newList) {
         const idxB = oldMap.has(makeKey(b)) ? oldMap.get(makeKey(b)) : Infinity;
         
         if (idxA !== Infinity && idxB !== Infinity) return idxA - idxB;
-        else if (idxA === Infinity && idxB !== Infinity) return 1; // A baru -> Bawah
-        else if (idxA !== Infinity && idxB === Infinity) return -1; // B baru -> Bawah
+        else if (idxA === Infinity && idxB !== Infinity) return 1; 
+        else if (idxA !== Infinity && idxB === Infinity) return -1; 
         else return 0;
     });
 }
@@ -314,7 +306,7 @@ function getDifferences(oldList, newList) {
 }
 
 // ==========================================
-// FORMATTING LIST RAJAL (Selesai/Batal di atas, Baru berurutan di bawah)
+// FORMATTING LIST RAJAL
 // ==========================================
 function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     let resultTxt = `${iconKlinik} *Klinik ${namaKlinik}*:\n`;
@@ -324,7 +316,6 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     let listSelesai = [];
     let listBaru = [];
 
-    // 1. Masukkan pasien yang terhapus dari server (Otomatis dianggap Selesai)
     if (removedList && removedList.length > 0) {
         removedList.forEach(p => {
             listSelesai.push(`${p.nama_pasien} *(SELESAI)*`);
@@ -332,26 +323,21 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
         });
     }
 
-    // 2. Filter list saat ini (Sudah ter-sortir kronologis, yg terbaru pasti di urutan paling bawah)
     currentList.forEach(p => {
         const st = (p.status || "").toUpperCase();
         
-        // PRIORITAS 1: Cek Batal
         if (st.includes("BATAL")) {
             listSelesai.push(`${p.nama_pasien} *(BATAL)*`);
             countSelesai++;
         } 
-        // PRIORITAS 2: Cek Asuhan Keperawatan (Mendahului SATUSEHAT agar tidak salah deteksi sebagai selesai)
         else if (st.includes("ASUHAN KEPERAWATAN")) {
             listBaru.push(`${p.nama_pasien} *(BARU)*`);
             countBaru++;
         } 
-        // PRIORITAS 3: Cek Selesai / Pulang
         else if (st.includes("PULANG") || st.includes("SELESAI") || st.includes("DIPULANGKAN") || st.includes("SATUSEHAT")) {
             listSelesai.push(`${p.nama_pasien} *(SELESAI)*`);
             countSelesai++;
         } 
-        // LAINNYA: Otomatis masuk ke Baru
         else {
             listBaru.push(`${p.nama_pasien} *(BARU)*`);
             countBaru++;
@@ -401,7 +387,6 @@ async function forceSendRajalPrimer(sock, jid) {
         await sock.sendMessage(jid, { text: `⏳ _Menyiapkan Data Primer Rawat Jalan..._` });
         const dateWITA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
         
-        // HANYA FETCH DARI API RIWAYAT SESUAI PERMINTAAN (Menghindari Duplikat)
         const [dataEndo, dataBM, dataPerio, dataUmum] = await Promise.all([
             fetchWithFallback('RajalEndo_RiwayatAntrianPx', `tanggal=${dateWITA}`),
             fetchWithFallback('RajalBM_RiwayatAntrianPx', `tanggal=${dateWITA}`),
@@ -414,7 +399,6 @@ async function forceSendRajalPrimer(sock, jid) {
         const currentPerioRaw = dataPerio.data || [];
         const currentUmumRaw = dataUmum.data || [];
 
-        // Sortir kronologis meskipun ini data primer, untuk baseline
         const currentEndo = sortChronologically(lastRajalEndoData || [], currentEndoRaw);
         const currentBM = sortChronologically(lastRajalBMData || [], currentBMRaw);
         const currentPerio = sortChronologically(lastRajalPerioData || [], currentPerioRaw);
@@ -455,7 +439,7 @@ async function checkApiUpdates(sock) {
         const resTrigger = await fetch('https://ishiprsud.vercel.app/api/trigger');
         const dataTrigger = await resTrigger.json();
         if (dataTrigger.notify && dataTrigger.notify.trim() !== "") {
-            await sock.sendMessage(ownerNumber, { text: dataTrigger.notify });
+            await sock.sendMessage(ownerPureJid, { text: dataTrigger.notify });
         }
 
         // =======================================
@@ -494,7 +478,6 @@ async function checkApiUpdates(sock) {
         if (botSettings.autoRajal.length > 0) {
             const dateWITA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
             
-            // HANYA FETCH DARI API RIWAYAT SESUAI PERMINTAAN (Menghindari Duplikat)
             const [dataEndo, dataBM, dataPerio, dataUmum] = await Promise.all([
                 fetchWithFallback('RajalEndo_RiwayatAntrianPx', `tanggal=${dateWITA}`),
                 fetchWithFallback('RajalBM_RiwayatAntrianPx', `tanggal=${dateWITA}`),
@@ -507,7 +490,6 @@ async function checkApiUpdates(sock) {
             const currentPerioRaw = dataPerio.data || [];
             const currentUmumRaw = dataUmum.data || [];
 
-            // Urutkan kronologis: Pertahankan urutan lama, pasien baru selalu jatuh ke paling bawah
             const currentEndo = sortChronologically(lastRajalEndoData || [], currentEndoRaw);
             const currentBM = sortChronologically(lastRajalBMData || [], currentBMRaw);
             const currentPerio = sortChronologically(lastRajalPerioData || [], currentPerioRaw);
@@ -519,7 +501,6 @@ async function checkApiUpdates(sock) {
                 const diffPerio = getDifferences(lastRajalPerioData, currentPerio);
                 const diffUmum = getDifferences(lastRajalUmumData, currentUmum);
                 
-                // Jika ada update data apa pun di salah satu klinik
                 if (diffEndo.hasDiff || diffBM.hasDiff || diffPerio.hasDiff || diffUmum.hasDiff) {
                     let msg = `🏥 *AUTO INFO: RAWAT JALAN*\n_Perubahan antrean tanggal ${dateWITA}._\n\n`;
                     
@@ -559,13 +540,11 @@ async function checkSholatAndWeather(sock) {
         // 1. CEK WAKTU & INFO SHOLAT
         // ==============================
         if (botSettings.autoSholat.length > 0) {
-            // Reset state jika berganti hari
             if (notifiedPrayers.date !== dateWITA) {
                 notifiedPrayers = { Fajr: false, Dhuhr: false, Asr: false, Maghrib: false, Isha: false, date: dateWITA };
                 todaySholatTimes = await fetchSholatKendari();
             }
 
-            // Broadcast Daily Jam 00:01 (Atau saat bot baru restart di hari tsb)
             if (lastDailySholatSent !== dateWITA && todaySholatTimes) {
                 const sholatMsg = `🕌 *JADWAL SHOLAT KENDARI & SEKITARNYA*\n🗓️ *Tanggal:* ${dateWITA}\n\n` +
                                   `🌅 Imsak: ${todaySholatTimes.Imsak} WITA\n` +
@@ -583,7 +562,6 @@ async function checkSholatAndWeather(sock) {
                 lastDailySholatSent = dateWITA;
             }
 
-            // Pengecekan Waktu Masuk Sholat (Real-time)
             if (todaySholatTimes) {
                 const prayersToCheck = [
                     { id: 'Fajr', name: 'Subuh', emoji: '🌄' },
@@ -612,7 +590,6 @@ async function checkSholatAndWeather(sock) {
         // 2. CEK INFO CUACA HARIAN
         // ==============================
         if (botSettings.autoWeather.length > 0) {
-            // Akan ter-trigger jika belum pernah dikirim hari ini, DAN jam sudah melewati / pas jam 06:00 WITA.
             const currentHour = parseInt(timeWITA.split(':')[0]);
             
             if (lastDailyWeatherSent !== dateWITA && currentHour >= 6) {
@@ -677,14 +654,13 @@ export default function setupMessageHandler(sock) {
             const args = text.slice(prefix.length).trim().split(/ +/);
             const command = args.shift().toLowerCase();
             
-            // --- PERBAIKAN BUG E2E WA (Menunggu pesan ini / Waiting for this message) ---
-            // JANGAN mengubah `sender` aslinya. Biarkan utuh sesuai `msg.key.remoteJid` agar saat membalas (reply) enkripsinya tidak rusak.
-            const sender = msg.key.remoteJid;
-            
-            // Gunakan pureSender KHUSUS untuk menyimpan nomor/grup ke database pengaturan saja.
-            const pureSender = sender.includes('@g.us') ? sender : (sender.includes(':') ? sender.split(':')[0] + '@s.whatsapp.net' : sender);
+            // --- PERBAIKAN FINAL BUG E2E WA (Menunggu pesan ini / Waiting for this message) ---
+            // WAJIB MENGGUNAKAN BASE JID UNTUK MENGIRIM PESAN.
+            // Jika msg.key.remoteJid mengandung :1 atau :5, itu adalah Device ID yang membuat enkripsi nyangkut/error di HP Utama.
+            const rawSender = msg.key.remoteJid;
+            const sender = rawSender.includes('@g.us') ? rawSender : rawSender.split(':')[0] + '@s.whatsapp.net';
 
-            console.log(`[COMMAND] ${command} dari ${sender} (Pure: ${pureSender})`);
+            console.log(`[COMMAND] ${command} dari ${sender}`);
 
             const isRajal = command.startsWith('cekrajal');
 
@@ -803,10 +779,10 @@ export default function setupMessageHandler(sock) {
                     break;
 
                 case 'settings':
-                    const ranapActive = botSettings.autoRanap.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
-                    const rajalActive = botSettings.autoRajal.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
-                    const sholatActive = botSettings.autoSholat.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
-                    const weatherActive = botSettings.autoWeather.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const ranapActive = botSettings.autoRanap.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const rajalActive = botSettings.autoRajal.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const sholatActive = botSettings.autoSholat.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const weatherActive = botSettings.autoWeather.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
                     
                     let setsMsg = `⚙️ *PENGATURAN BOT DI CHAT/GRUP INI*\n\n` +
                                   `🏥 *Auto Info Rawat Inap:* ${ranapActive}\n` +
@@ -814,7 +790,7 @@ export default function setupMessageHandler(sock) {
                                   `🕌 *Auto Info Sholat (Kendari):* ${sholatActive}\n` +
                                   `🌤️ *Auto Info Cuaca (Kendari):* ${weatherActive}\n\n`;
                     
-                    if (pureSender === ownerNumber || pureSender === ownerPureJid) {
+                    if (sender === ownerNumber || sender === ownerPureJid) {
                         setsMsg += `👑 *STATISTIK GLOBAL (KHUSUS OWNER):*\n` +
                                    `👥 Berlangganan Sholat: ${botSettings.autoSholat.length} User/Grup\n` +
                                    `👥 Berlangganan Cuaca: ${botSettings.autoWeather.length} User/Grup\n` +
@@ -827,11 +803,11 @@ export default function setupMessageHandler(sock) {
 
                 case 'autoinfosholat':
                     if (args[0] === 'on') {
-                        if (!botSettings.autoSholat.includes(pureSender)) botSettings.autoSholat.push(pureSender);
+                        if (!botSettings.autoSholat.includes(sender)) botSettings.autoSholat.push(sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '✅ *Auto Info & Pengingat Sholat AKTIF* di obrolan ini.\nBot otomatis mengirim jadwal di pagi hari dan mengingatkan waktu sholat.' }, { quoted: msg });
                     } else if (args[0] === 'off') {
-                        botSettings.autoSholat = botSettings.autoSholat.filter(jid => jid !== pureSender);
+                        botSettings.autoSholat = botSettings.autoSholat.filter(jid => jid !== sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '❌ *Auto Info & Pengingat Sholat NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else { await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoinfosholat on/off*' }, { quoted: msg }); }
@@ -839,11 +815,11 @@ export default function setupMessageHandler(sock) {
 
                 case 'autoweather':
                     if (args[0] === 'on') {
-                        if (!botSettings.autoWeather.includes(pureSender)) botSettings.autoWeather.push(pureSender);
+                        if (!botSettings.autoWeather.includes(sender)) botSettings.autoWeather.push(sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '✅ *Auto Prakiraan Cuaca AKTIF* di obrolan ini.\nBot otomatis mengirim cuaca Kendari setiap jam 06:00 WITA.' }, { quoted: msg });
                     } else if (args[0] === 'off') {
-                        botSettings.autoWeather = botSettings.autoWeather.filter(jid => jid !== pureSender);
+                        botSettings.autoWeather = botSettings.autoWeather.filter(jid => jid !== sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '❌ *Auto Prakiraan Cuaca NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else { await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoweather on/off*' }, { quoted: msg }); }
@@ -996,12 +972,12 @@ export default function setupMessageHandler(sock) {
 
                 case 'autoranap':
                     if (args[0] === 'on') {
-                        if (!botSettings.autoRanap.includes(pureSender)) botSettings.autoRanap.push(pureSender);
+                        if (!botSettings.autoRanap.includes(sender)) botSettings.autoRanap.push(sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '✅ *Auto Info Rawat Inap AKTIF* di obrolan ini.\nBot akan otomatis mengirim pesan laporan jika mendeteksi ada pasien yang masuk atau keluar (pulang).' }, { quoted: msg });
                         await forceSendRanapPrimer(sock, sender);
                     } else if (args[0] === 'off') {
-                        botSettings.autoRanap = botSettings.autoRanap.filter(jid => jid !== pureSender);
+                        botSettings.autoRanap = botSettings.autoRanap.filter(jid => jid !== sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '❌ *Auto Info Rawat Inap NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else {
@@ -1011,12 +987,12 @@ export default function setupMessageHandler(sock) {
 
                 case 'autorajal':
                     if (args[0] === 'on') {
-                        if (!botSettings.autoRajal.includes(pureSender)) botSettings.autoRajal.push(pureSender);
+                        if (!botSettings.autoRajal.includes(sender)) botSettings.autoRajal.push(sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '✅ *Auto Info Rawat Jalan AKTIF* di obrolan ini.\nBot akan otomatis mengirim laporan ke obrolan ini setiap kali antrean Klinik bertambah atau berkurang pada hari ini.' }, { quoted: msg });
                         await forceSendRajalPrimer(sock, sender);
                     } else if (args[0] === 'off') {
-                        botSettings.autoRajal = botSettings.autoRajal.filter(jid => jid !== pureSender);
+                        botSettings.autoRajal = botSettings.autoRajal.filter(jid => jid !== sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '❌ *Auto Info Rawat Jalan NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else {
