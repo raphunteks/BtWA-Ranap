@@ -20,7 +20,6 @@ const settingsFile = `${sessionPath}/settings.json`;
 if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
 
 let botSchedules = [];
-// Menambahkan autoWeather dan autoSholat ke state botSettings
 let botSettings = { autoRanap: [], autoRajal: [], autoSholat: [], autoWeather: [] };
 
 if (fs.existsSync(schedulesFile)) {
@@ -35,7 +34,6 @@ if (!botSettings.autoSholat) botSettings.autoSholat = [];
 if (!botSettings.autoWeather) botSettings.autoWeather = [];
 
 let configChanged = false;
-
 // Memastikan Owner terdaftar tanpa suffix JID yang bisa membuat bug status !settings
 if (!botSettings.autoSholat.includes(ownerPureJid) && !botSettings.autoSholat.includes(ownerNumber)) {
     botSettings.autoSholat.push(ownerNumber);
@@ -277,6 +275,7 @@ let lastRajalBMData = null;
 let lastRajalPerioData = null; 
 let lastRajalUmumData = null; 
 
+// Mengunci urutan lama, pasien baru selalu ditaruh PALING BAWAH
 function sortChronologically(oldList, newList) {
     const makeKey = (p) => `${p.no_rm}_${p.nama_pasien}`;
     const oldMap = new Map(oldList.map((p, index) => [makeKey(p), index]));
@@ -286,8 +285,8 @@ function sortChronologically(oldList, newList) {
         const idxB = oldMap.has(makeKey(b)) ? oldMap.get(makeKey(b)) : Infinity;
         
         if (idxA !== Infinity && idxB !== Infinity) return idxA - idxB;
-        else if (idxA === Infinity && idxB !== Infinity) return 1; 
-        else if (idxA !== Infinity && idxB === Infinity) return -1;
+        else if (idxA === Infinity && idxB !== Infinity) return 1; // A baru -> Bawah
+        else if (idxA !== Infinity && idxB === Infinity) return -1; // B baru -> Bawah
         else return 0;
     });
 }
@@ -314,7 +313,7 @@ function getDifferences(oldList, newList) {
 }
 
 // ==========================================
-// FORMATTING LIST RAJAL
+// FORMATTING LIST RAJAL (Selesai/Batal di atas, Baru berurutan di bawah)
 // ==========================================
 function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     let resultTxt = `${iconKlinik} *Klinik ${namaKlinik}*:\n`;
@@ -324,6 +323,7 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     let listSelesai = [];
     let listBaru = [];
 
+    // 1. Masukkan pasien yang terhapus dari server (Otomatis dianggap Selesai)
     if (removedList && removedList.length > 0) {
         removedList.forEach(p => {
             listSelesai.push(`${p.nama_pasien} *(SELESAI)*`);
@@ -331,21 +331,26 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
         });
     }
 
+    // 2. Filter list saat ini (Sudah ter-sortir kronologis, yg terbaru pasti di urutan paling bawah)
     currentList.forEach(p => {
         const st = (p.status || "").toUpperCase();
         
+        // PRIORITAS 1: Cek Batal
         if (st.includes("BATAL")) {
             listSelesai.push(`${p.nama_pasien} *(BATAL)*`);
             countSelesai++;
         } 
+        // PRIORITAS 2: Cek Asuhan Keperawatan (Mendahului SATUSEHAT agar tidak salah deteksi sebagai selesai)
         else if (st.includes("ASUHAN KEPERAWATAN")) {
             listBaru.push(`${p.nama_pasien} *(BARU)*`);
             countBaru++;
         } 
+        // PRIORITAS 3: Cek Selesai / Pulang
         else if (st.includes("PULANG") || st.includes("SELESAI") || st.includes("DIPULANGKAN") || st.includes("SATUSEHAT")) {
             listSelesai.push(`${p.nama_pasien} *(SELESAI)*`);
             countSelesai++;
         } 
+        // LAINNYA: Otomatis masuk ke Baru
         else {
             listBaru.push(`${p.nama_pasien} *(BARU)*`);
             countBaru++;
@@ -385,7 +390,9 @@ async function forceSendRanapPrimer(sock, jid) {
             msg += `\n📊 *Total Saat Ini:* ${currentRanap.length} Pasien`;
             await sock.sendMessage(jid, { text: msg });
         }
-    } catch (e) { console.error("Gagal load primer Ranap:", e); }
+    } catch (e) {
+        console.error("Gagal load primer Ranap:", e);
+    }
 }
 
 async function forceSendRajalPrimer(sock, jid) {
@@ -393,6 +400,7 @@ async function forceSendRajalPrimer(sock, jid) {
         await sock.sendMessage(jid, { text: `⏳ _Menyiapkan Data Primer Rawat Jalan..._` });
         const dateWITA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
         
+        // HANYA FETCH DARI API RIWAYAT SESUAI PERMINTAAN (Menghindari Duplikat)
         const [dataEndo, dataBM, dataPerio, dataUmum] = await Promise.all([
             fetchWithFallback('RajalEndo_RiwayatAntrianPx', `tanggal=${dateWITA}`),
             fetchWithFallback('RajalBM_RiwayatAntrianPx', `tanggal=${dateWITA}`),
@@ -405,6 +413,7 @@ async function forceSendRajalPrimer(sock, jid) {
         const currentPerioRaw = dataPerio.data || [];
         const currentUmumRaw = dataUmum.data || [];
 
+        // Sortir kronologis meskipun ini data primer, untuk baseline
         const currentEndo = sortChronologically(lastRajalEndoData || [], currentEndoRaw);
         const currentBM = sortChronologically(lastRajalBMData || [], currentBMRaw);
         const currentPerio = sortChronologically(lastRajalPerioData || [], currentPerioRaw);
@@ -431,11 +440,13 @@ async function forceSendRajalPrimer(sock, jid) {
         msg += `📊 *Total Antrean (SELESAI/BATAL):* Endo (${formatEndo.selesai}), BM (${formatBM.selesai}), Perio (${formatPerio.selesai}), Umum (${formatUmum.selesai})`;
         
         await sock.sendMessage(jid, { text: msg });
-    } catch (e) { console.error("Gagal load primer Rajal:", e); }
+    } catch (e) {
+        console.error("Gagal load primer Rajal:", e);
+    }
 }
 
 // ==========================================
-// POLLING API AUTO-UPDATE & WAKTU (RSUD, SHOLAT, CUACA)
+// POLLING API AUTO-UPDATE
 // ==========================================
 async function checkApiUpdates(sock) {
     if (!sock) return;
@@ -457,6 +468,7 @@ async function checkApiUpdates(sock) {
                     const { added, removed } = getDifferences(lastRanapData, currentRanap);
                     if (added.length > 0 || removed.length > 0) {
                         let msg = `🏥 *AUTO INFO: RAWAT INAP*\n_Mendeteksi perubahan data manifest._\n\n`;
+                        
                         if (added.length > 0) {
                             msg += `🟢 *PASIEN MASUK/BARU (${added.length}):*\n`;
                             added.forEach((p, i) => msg += `${i+1}. ${p.nama_pasien} *(BARU)*\n   🛏️ ${p.ruangan}\n`);
@@ -480,6 +492,8 @@ async function checkApiUpdates(sock) {
         // =======================================
         if (botSettings.autoRajal.length > 0) {
             const dateWITA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
+            
+            // HANYA FETCH DARI API RIWAYAT SESUAI PERMINTAAN (Menghindari Duplikat)
             const [dataEndo, dataBM, dataPerio, dataUmum] = await Promise.all([
                 fetchWithFallback('RajalEndo_RiwayatAntrianPx', `tanggal=${dateWITA}`),
                 fetchWithFallback('RajalBM_RiwayatAntrianPx', `tanggal=${dateWITA}`),
@@ -492,6 +506,7 @@ async function checkApiUpdates(sock) {
             const currentPerioRaw = dataPerio.data || [];
             const currentUmumRaw = dataUmum.data || [];
 
+            // Urutkan kronologis: Pertahankan urutan lama, pasien baru selalu jatuh ke paling bawah
             const currentEndo = sortChronologically(lastRajalEndoData || [], currentEndoRaw);
             const currentBM = sortChronologically(lastRajalBMData || [], currentBMRaw);
             const currentPerio = sortChronologically(lastRajalPerioData || [], currentPerioRaw);
@@ -503,8 +518,10 @@ async function checkApiUpdates(sock) {
                 const diffPerio = getDifferences(lastRajalPerioData, currentPerio);
                 const diffUmum = getDifferences(lastRajalUmumData, currentUmum);
                 
+                // Jika ada update data apa pun di salah satu klinik
                 if (diffEndo.hasDiff || diffBM.hasDiff || diffPerio.hasDiff || diffUmum.hasDiff) {
                     let msg = `🏥 *AUTO INFO: RAWAT JALAN*\n_Perubahan antrean tanggal ${dateWITA}._\n\n`;
+                    
                     const formatEndo = formatKlinikList("ENDODONSI", "🦷", currentEndo, diffEndo.removed);
                     const formatPerio = formatKlinikList("PERIODONSIA", "🩺", currentPerio, diffPerio.removed);
                     const formatBM = formatKlinikList("Bedah Mulut", "💉", currentBM, diffBM.removed);
@@ -560,7 +577,7 @@ async function checkSholatAndWeather(sock) {
                                   `_Bot akan memberikan notifikasi saat memasuki waktu sholat._`;
                 
                 for (const jid of botSettings.autoSholat) {
-                    await sock.sendMessage(jid, { text: sholatMsg });
+                    try { await sock.sendMessage(jid, { text: sholatMsg }); } catch(e){}
                 }
                 lastDailySholatSent = dateWITA;
             }
@@ -582,7 +599,7 @@ async function checkSholatAndWeather(sock) {
                                          `_Mari sejenak hentikan aktivitas dan laksanakan sholat._`;
                         
                         for (const jid of botSettings.autoSholat) {
-                            await sock.sendMessage(jid, { text: alertMsg });
+                            try { await sock.sendMessage(jid, { text: alertMsg }); } catch(e){}
                         }
                         notifiedPrayers[prayer.id] = true; 
                     }
@@ -602,7 +619,7 @@ async function checkSholatAndWeather(sock) {
                 if (wMsg) {
                     const finalWeatherMsg = `🌅 *SELAMAT PAGI*\nBerikut prakiraan cuaca hari ini:\n\n${wMsg}`;
                     for (const jid of botSettings.autoWeather) {
-                        await sock.sendMessage(jid, { text: finalWeatherMsg });
+                        try { await sock.sendMessage(jid, { text: finalWeatherMsg }); } catch(e){}
                     }
                     lastDailyWeatherSent = dateWITA;
                 }
@@ -624,35 +641,23 @@ export default function setupMessageHandler(sock) {
     currentSock = sock; 
 
     if (!isIntervalStarted) {
-        // Interval Tugas Tertunda (30s)
         setInterval(async () => {
             if (!currentSock) return;
             const now = Date.now(); let hasChanges = false;
             for (let i = 0; i < botSchedules.length; i++) {
                 const jadwal = botSchedules[i];
                 if (jadwal.status === 'pending' && now >= jadwal.timestamp) {
-                    try { 
-                        await currentSock.sendMessage(jadwal.target, { text: jadwal.pesan }); 
-                        jadwal.status = 'sent'; 
-                        hasChanges = true; 
-                    } catch (err) { 
-                        jadwal.status = 'failed'; 
-                        hasChanges = true; 
-                    }
+                    try { await currentSock.sendMessage(jadwal.target, { text: jadwal.pesan }); jadwal.status = 'sent'; hasChanges = true; } 
+                    catch (err) { jadwal.status = 'failed'; hasChanges = true; }
                 }
             }
-            if (hasChanges) { 
-                botSchedules = botSchedules.filter(s => s.status === 'pending'); 
-                saveSchedules(); 
-            }
+            if (hasChanges) { botSchedules = botSchedules.filter(s => s.status === 'pending'); saveSchedules(); }
         }, 30000); 
 
-        // Interval Cek RSUD (60s)
         setInterval(() => {
             if (currentSock) checkApiUpdates(currentSock);
         }, 60000);
 
-        // Interval Cek Sholat & Cuaca (30s)
         setInterval(() => {
             if (currentSock) checkSholatAndWeather(currentSock);
         }, 30000);
@@ -742,10 +747,27 @@ export default function setupMessageHandler(sock) {
             switch (command) {
                 case 'menu':
                 case 'help':
-                    const menuText = `*🤖 BOT MENU 🤖*\n\n` +
+                    const menuText = `*🤖 BOT MENU SUPER UPGRADE 🤖*\n\n` +
                                      `*🏥 DAFTAR PERINTAH KLINIK:*\n` +
-                                     `* !jadwalranap* - Cek pasien Rawat Inap\n` +
-                                     `* !cekrajal...* - Cek Pasien Rawat Jalan\n\n` +
+                                     `* !jadwalranap* - Cek pasien Rawat Inap\n\n` +
+                                     `*(HARI INI)*\n` +
+                                     `* !cekrajalriwayatendo*\n` +
+                                     `* !cekrajalantrianpxendo*\n` +
+                                     `* !cekrajalriwayatbm*\n` +
+                                     `* !cekrajalantrianpxbm*\n` +
+                                     `* !cekrajalriwayatperio*\n` +
+                                     `* !cekrajalantrianpxperio*\n` +
+                                     `* !cekrajalriwayatumum*\n` +
+                                     `* !cekrajalantrianpxumum*\n\n` +
+                                     `*(BESOK)*\n` +
+                                     `* !cekrajalriwayatendobsk*\n` +
+                                     `* !cekrajalantrianpxendobsk*\n` +
+                                     `* !cekrajalriwayatbmbsk*\n` +
+                                     `* !cekrajalantrianpxbmbsk*\n` +
+                                     `* !cekrajalriwayatperiobsk*\n` +
+                                     `* !cekrajalantrianpxperiobsk*\n` +
+                                     `* !cekrajalriwayatumumbsk*\n` +
+                                     `* !cekrajalantrianpxumumbsk*\n\n` +
                                      `*🔔 AUTO INFO KENDARI (GROUP/CHAT):*\n` +
                                      `* !autoranap on/off* - Notif Otomatis Ranap\n` +
                                      `* !autorajal on/off* - Notif Otomatis Rajal\n` +
@@ -757,18 +779,16 @@ export default function setupMessageHandler(sock) {
                                      `* !cuaca besok* - Prakiraan besok\n` +
                                      `* !cuaca 15 Jan 2026* - Cuaca tgl spesifik\n` +
                                      `* !cuaca 01 - 20 Jan 2026* - Rentang cuaca\n\n` +
-                                     `*📖 AL-QURAN & ISLAMI:*\n` +
-                                     `* !listsurah* - Menampilkan daftar ke-114 Surah\n` +
+                                     `*📖 AL-QURAN CLOUD API (AUDIO & TEKS):*\n` +
+                                     `* !listsurah* - Menampilkan daftar 114 Surah\n` +
                                      `* !surah <nomor>* - Info spesifik Surah\n` +
                                      `* !ayat <surah> <ayat>* - Teks 1 Ayat + Audio Murottal\n` +
-                                     `* !ayat <surah> <aw>-<ak>* - Rentang Ayat Teks Penuh\n` +
+                                     `* !ayat <surah> <aw>-<ak>* - Teks Ayat Rentang Penuh\n` +
                                      `* !ayat <surah> full* - Seluruh Ayat dlm Surah\n\n` +
-                                     `*⚙️ PENGELOLAAN TARGET NOTIFIKASI:*\n` +
-                                     `* !addsholat <nomor>* - Tambah target Sholat\n` +
-                                     `* !delsholat <nomor>* - Hapus target Sholat\n` +
-                                     `* !addweather <nomor>* - Tambah target Cuaca\n` +
-                                     `* !delweather <nomor>* - Hapus target Cuaca\n\n` +
-                                     `*⚙️ SISTEM & LAINNYA:*\n` +
+                                     `*⚙️ KELOLA DAFTAR PENERIMA SHOLAT & CUACA:*\n` +
+                                     `* !addsholat / !delsholat <nomor>* - Kelola Sholat\n` +
+                                     `* !addweather / !delweather <nomor>* - Kelola Cuaca\n\n` +
+                                     `*⚙️ SISTEM & UTILITAS:*\n` +
                                      `* !settings* - Lihat info langganan yg diaktifkan\n` +
                                      `* !calc <hitungan>* - Kalkulator pintar\n` +
                                      `* !refresh* - 🔄 Paksa Ekstensi Scrape!\n` +
@@ -800,9 +820,7 @@ export default function setupMessageHandler(sock) {
                                    `🏥 Berlangganan Ranap: ${botSettings.autoRanap.length} User/Grup\n` +
                                    `🏥 Berlangganan Rajal: ${botSettings.autoRajal.length} User/Grup\n\n`;
                     }
-                    
                     setsMsg += `_Gunakan command *!autoranap on*, *!autoinfosholat on*, dsb untuk mengaktifkan._`;
-                    
                     await sock.sendMessage(sender, { text: setsMsg }, { quoted: msg });
                     break;
 
@@ -815,83 +833,55 @@ export default function setupMessageHandler(sock) {
                         botSettings.autoSholat = botSettings.autoSholat.filter(jid => jid !== sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '❌ *Auto Info & Pengingat Sholat NONAKTIF* di obrolan ini.' }, { quoted: msg });
-                    } else {
-                        await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoinfosholat on* atau *!autoinfosholat off*' }, { quoted: msg });
-                    }
+                    } else { await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoinfosholat on/off*' }, { quoted: msg }); }
                     break;
 
                 case 'autoweather':
                     if (args[0] === 'on') {
                         if (!botSettings.autoWeather.includes(sender)) botSettings.autoWeather.push(sender);
                         saveSettings();
-                        await sock.sendMessage(sender, { text: '✅ *Auto Prakiraan Cuaca AKTIF* di obrolan ini.\nBot akan otomatis mengirim prakiraan cuaca wilayah Kendari setiap jam 06:00 WITA Pagi.' }, { quoted: msg });
+                        await sock.sendMessage(sender, { text: '✅ *Auto Prakiraan Cuaca AKTIF* di obrolan ini.\nBot otomatis mengirim cuaca Kendari setiap jam 06:00 WITA.' }, { quoted: msg });
                     } else if (args[0] === 'off') {
                         botSettings.autoWeather = botSettings.autoWeather.filter(jid => jid !== sender);
                         saveSettings();
                         await sock.sendMessage(sender, { text: '❌ *Auto Prakiraan Cuaca NONAKTIF* di obrolan ini.' }, { quoted: msg });
-                    } else {
-                        await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoweather on* atau *!autoweather off*' }, { quoted: msg });
-                    }
+                    } else { await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoweather on/off*' }, { quoted: msg }); }
                     break;
 
                 case 'addsholat':
-                    if (!args[0]) {
-                        await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!addsholat 6281234567890*' }, { quoted: msg });
-                        return;
-                    }
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor!*\nContoh: !addsholat 6281234567890' }, { quoted: msg });
                     let targetAddS = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (!botSettings.autoSholat.includes(targetAddS)) {
-                        botSettings.autoSholat.push(targetAddS);
-                        saveSettings();
-                        await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} berhasil ditambahkan ke daftar penerima Jadwal Sholat.` }, { quoted: msg });
-                    } else {
-                        await sock.sendMessage(sender, { text: `⚠️ Nomor tersebut sudah ada di daftar penerima Sholat.` }, { quoted: msg });
-                    }
+                        botSettings.autoSholat.push(targetAddS); saveSettings();
+                        await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} ditambahkan ke Auto Sholat.` }, { quoted: msg });
+                    } else { await sock.sendMessage(sender, { text: `⚠️ Nomor sudah ada.` }, { quoted: msg }); }
                     break;
 
                 case 'delsholat':
-                    if (!args[0]) {
-                        await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!delsholat 6281234567890*' }, { quoted: msg });
-                        return;
-                    }
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor!*\nContoh: !delsholat 6281234567890' }, { quoted: msg });
                     let targetDelS = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (botSettings.autoSholat.includes(targetDelS)) {
-                        botSettings.autoSholat = botSettings.autoSholat.filter(n => n !== targetDelS);
-                        saveSettings();
-                        await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} berhasil dihapus dari daftar penerima Jadwal Sholat.` }, { quoted: msg });
-                    } else {
-                        await sock.sendMessage(sender, { text: `⚠️ Nomor tersebut tidak ditemukan di daftar.` }, { quoted: msg });
-                    }
+                        botSettings.autoSholat = botSettings.autoSholat.filter(n => n !== targetDelS); saveSettings();
+                        await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} dihapus dari Auto Sholat.` }, { quoted: msg });
+                    } else { await sock.sendMessage(sender, { text: `⚠️ Nomor tidak ditemukan.` }, { quoted: msg }); }
                     break;
 
                 case 'addweather':
-                    if (!args[0]) {
-                        await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!addweather 6281234567890*' }, { quoted: msg });
-                        return;
-                    }
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor!*\nContoh: !addweather 6281234567890' }, { quoted: msg });
                     let targetAddW = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (!botSettings.autoWeather.includes(targetAddW)) {
-                        botSettings.autoWeather.push(targetAddW);
-                        saveSettings();
-                        await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} berhasil ditambahkan ke daftar penerima Prakiraan Cuaca Harian.` }, { quoted: msg });
-                    } else {
-                        await sock.sendMessage(sender, { text: `⚠️ Nomor tersebut sudah ada di daftar penerima Cuaca.` }, { quoted: msg });
-                    }
+                        botSettings.autoWeather.push(targetAddW); saveSettings();
+                        await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} ditambahkan ke Auto Cuaca.` }, { quoted: msg });
+                    } else { await sock.sendMessage(sender, { text: `⚠️ Nomor sudah ada.` }, { quoted: msg }); }
                     break;
 
                 case 'delweather':
-                    if (!args[0]) {
-                        await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!delweather 6281234567890*' }, { quoted: msg });
-                        return;
-                    }
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor!*\nContoh: !delweather 6281234567890' }, { quoted: msg });
                     let targetDelW = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (botSettings.autoWeather.includes(targetDelW)) {
-                        botSettings.autoWeather = botSettings.autoWeather.filter(n => n !== targetDelW);
-                        saveSettings();
-                        await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} berhasil dihapus dari daftar penerima Cuaca.` }, { quoted: msg });
-                    } else {
-                        await sock.sendMessage(sender, { text: `⚠️ Nomor tersebut tidak ditemukan di daftar.` }, { quoted: msg });
-                    }
+                        botSettings.autoWeather = botSettings.autoWeather.filter(n => n !== targetDelW); saveSettings();
+                        await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} dihapus dari Auto Cuaca.` }, { quoted: msg });
+                    } else { await sock.sendMessage(sender, { text: `⚠️ Nomor tidak ditemukan.` }, { quoted: msg }); }
                     break;
 
                 case 'cuaca':
@@ -909,11 +899,8 @@ export default function setupMessageHandler(sock) {
                     } else {
                         await sock.sendMessage(sender, { text: '⏳ _Mengambil data cuaca Kendari saat ini..._' }, { quoted: msg });
                         const cuacaData = await fetchWeatherKendari();
-                        if (cuacaData) {
-                            await sock.sendMessage(sender, { text: `☁️ *INFO CUACA KENDARI*\n\n${cuacaData}` }, { quoted: msg });
-                        } else {
-                            await sock.sendMessage(sender, { text: '❌ *Gagal mengambil API Cuaca Open-Meteo.*' }, { quoted: msg });
-                        }
+                        if (cuacaData) await sock.sendMessage(sender, { text: `☁️ *INFO CUACA KENDARI*\n\n${cuacaData}` }, { quoted: msg });
+                        else await sock.sendMessage(sender, { text: '❌ *Gagal mengambil API Cuaca Open-Meteo.*' }, { quoted: msg });
                     }
                     break;
 
@@ -922,13 +909,10 @@ export default function setupMessageHandler(sock) {
                     const infoGempa = await fetchGempa();
                     await sock.sendMessage(sender, { text: infoGempa }, { quoted: msg });
                     break;
-
+                
                 case 'calc':
                 case 'kalkulator':
-                    if (args.length === 0) {
-                        await sock.sendMessage(sender, { text: '⚠️ Masukkan operasi matematika.\nContoh: `!calc (50 * 2) - 10`' }, { quoted: msg });
-                        return;
-                    }
+                    if (args.length === 0) return await sock.sendMessage(sender, { text: '⚠️ Masukkan operasi matematika.\nContoh: `!calc (50 * 2) - 10`' }, { quoted: msg });
                     const calcStr = args.join(' ');
                     try {
                         if (/^[0-9+\-*/().\s]+$/.test(calcStr)) {
@@ -937,9 +921,76 @@ export default function setupMessageHandler(sock) {
                         } else {
                             await sock.sendMessage(sender, { text: `⚠️ Format matematika tidak valid. Gunakan angka dan operator + - * / ( )` }, { quoted: msg });
                         }
-                    } catch(e) { 
-                        await sock.sendMessage(sender, { text: `❌ Ekspresi tidak dapat dihitung.` }, { quoted: msg }); 
-                    }
+                    } catch(e) { await sock.sendMessage(sender, { text: `❌ Ekspresi tidak dapat dihitung.` }, { quoted: msg }); }
+                    break;
+
+                case 'listsurah':
+                    await sock.sendMessage(sender, { text: '⏳ _Mengambil daftar Surah..._' }, { quoted: msg });
+                    try {
+                        const res = await fetch("http://api.alquran.cloud/v1/surah"); const json = await res.json();
+                        let reply = `📖 *DAFTAR 114 SURAH AL-QURAN*\n\n`;
+                        json.data.forEach(s => { reply += `*${s.number}. ${s.englishName}* (${s.name}) - ${s.numberOfAyahs} Ayat\n`; });
+                        reply += `\n_Ketik *!surah <nomor>* untuk detail info Surah._\n_Ketik *!ayat <nomor_surah> full* untuk isi seluruh surah._`;
+                        await sock.sendMessage(sender, { text: reply }, { quoted: msg });
+                    } catch (e) { await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); }
+                    break;
+
+                case 'surah':
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Sertakan nomor surah!*\nContoh: !surah 1 (Untuk Al-Fatihah)' }, { quoted: msg });
+                    try {
+                        const num = parseInt(args[0]);
+                        const res = await fetch(`http://api.alquran.cloud/v1/surah/${num}`);
+                        const json = await res.json();
+                        if (json.code !== 200) return await sock.sendMessage(sender, { text: `❌ Surah tidak ditemukan.` });
+                        const s = json.data;
+                        const info = `📖 *INFORMASI SURAH*\n\n🔢 *Nomor:* ${s.number}\n📜 *Nama:* ${s.englishName} (${s.name})\n📝 *Arti:* ${s.englishNameTranslation}\n📍 *Turun di:* ${s.revelationType === 'Meccan' ? 'Makkah' : 'Madinah'}\n📏 *Jumlah Ayat:* ${s.numberOfAyahs} Ayat\n\n_Gunakan *!ayat ${s.number} full* untuk melihat teks penuh & link audio._`;
+                        await sock.sendMessage(sender, { text: info }, { quoted: msg });
+                    } catch (e) { await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); }
+                    break;
+
+                case 'ayat':
+                    if (args.length < 2) return await sock.sendMessage(sender, { text: '⚠️ *Format Salah!*\nGunakan:\n*!ayat <surah> <ayat>* (Info 1 Ayat + Audio)\n*!ayat <surah> <awal>-<akhir>* (Rentang Ayat)\n*!ayat <surah> full* (Satu Surah Penuh)\n\nContoh:\n*!ayat 1 2*\n*!ayat 2 1-10*\n*!ayat 36 full*' }, { quoted: msg });
+                    await sock.sendMessage(sender, { text: '⏳ _Mengambil Data Al-Quran..._' }, { quoted: msg });
+                    try {
+                        const surahNum = args[0]; const ayatParam = args[1].toLowerCase();
+                        let startAyat = -1, endAyat = -1, isFull = false;
+                        
+                        if (ayatParam === 'full') { isFull = true; } 
+                        else if (ayatParam.includes('-')) {
+                            const parts = ayatParam.split('-'); startAyat = parseInt(parts[0]); endAyat = parseInt(parts[1]);
+                        } else { startAyat = parseInt(ayatParam); endAyat = startAyat; }
+                        
+                        const res = await fetch(`http://api.alquran.cloud/v1/surah/${surahNum}/editions/quran-uthmani,id.indonesian,ar.alafasy`);
+                        const json = await res.json();
+                        if (json.code !== 200) return await sock.sendMessage(sender, { text: `❌ Gagal mengambil data. Pastikan nomor valid.` }, { quoted: msg });
+
+                        const arabicSurah = json.data[0]; const indoSurah = json.data[1]; const audioSurah = json.data[2];
+                        if (isFull) { startAyat = 1; endAyat = arabicSurah.numberOfAyahs; }
+                        if (startAyat < 1 || endAyat > arabicSurah.numberOfAyahs || startAyat > endAyat) {
+                            return await sock.sendMessage(sender, { text: `❌ Range tidak valid. Surah ini memiliki ${arabicSurah.numberOfAyahs} ayat.` }, { quoted: msg });
+                        }
+                        
+                        let replyTexts = []; let currentChunk = `📖 *Surah ${arabicSurah.englishName}* (${arabicSurah.name})\nAyat: ${startAyat} - ${endAyat}\n\n`;
+                        
+                        for (let i = startAyat - 1; i < endAyat; i++) {
+                            const ayatString = `*[ Ayat ${i + 1} ]*\n${arabicSurah.ayahs[i].text}\n_Arti: ${indoSurah.ayahs[i].text}_\n\n`;
+                            if (currentChunk.length + ayatString.length > 3500) {
+                                replyTexts.push(currentChunk); currentChunk = `_(Lanjutan Surah ${arabicSurah.englishName}...)_\n\n` + ayatString;
+                            } else { currentChunk += ayatString; }
+                        }
+                        if (currentChunk.trim().length > 0) replyTexts.push(currentChunk);
+                        
+                        for (const txt of replyTexts) await sock.sendMessage(sender, { text: txt });
+                        
+                        if (startAyat === endAyat) {
+                            const audioUrl = audioSurah.ayahs[startAyat - 1].audio;
+                            await sock.sendMessage(sender, { text: `🎧 _Mengirim audio murottal Syeikh Mishary Rasyid..._` });
+                            await sock.sendMessage(sender, { audio: { url: audioUrl }, mimetype: 'audio/mp4', ptt: false }, { quoted: msg });
+                        } else if (isFull) {
+                            const fullAudioUrl = `https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/${surahNum}.mp3`;
+                            await sock.sendMessage(sender, { text: `🎧 _Audio Full Surah Murottal Syeikh Mishary Rasyid (1 File):\n${fullAudioUrl}` }, { quoted: msg });
+                        }
+                    } catch (e) { await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); }
                     break;
 
                 case 'autoranap':
@@ -969,143 +1020,6 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(sender, { text: '❌ *Auto Info Rawat Jalan NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else {
                         await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autorajal on* atau *!autorajal off*' }, { quoted: msg });
-                    }
-                    break;
-
-                case 'listsurah':
-                    await sock.sendMessage(sender, { text: '⏳ _Mengambil daftar Surah..._' }, { quoted: msg });
-                    try {
-                        const res = await fetch("http://api.alquran.cloud/v1/surah");
-                        const json = await res.json();
-                        let reply = `📖 *DAFTAR 114 SURAH AL-QURAN*\n\n`;
-                        json.data.forEach(s => {
-                            reply += `*${s.number}. ${s.englishName}* (${s.name}) - ${s.numberOfAyahs} Ayat\n`;
-                        });
-                        reply += `\n_Ketik *!surah <nomor>* untuk detail info Surah._\n_Ketik *!ayat <nomor_surah> full* untuk isi seluruh surah._`;
-                        await sock.sendMessage(sender, { text: reply }, { quoted: msg });
-                    } catch (e) { 
-                        await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); 
-                    }
-                    break;
-
-                case 'surah':
-                    if (!args[0]) {
-                        await sock.sendMessage(sender, { text: '⚠️ *Sertakan nomor surah!*\nContoh: !surah 1 (Untuk Al-Fatihah)' }, { quoted: msg });
-                        return;
-                    }
-                    try {
-                        const num = parseInt(args[0]);
-                        const res = await fetch(`http://api.alquran.cloud/v1/surah/${num}`);
-                        const json = await res.json();
-                        if (json.code !== 200) {
-                            await sock.sendMessage(sender, { text: `❌ Surah tidak ditemukan.` });
-                            return;
-                        }
-                        
-                        const s = json.data;
-                        const info = `📖 *INFORMASI SURAH*\n\n` +
-                                     `🔢 *Nomor:* ${s.number}\n` +
-                                     `📜 *Nama:* ${s.englishName} (${s.name})\n` +
-                                     `📝 *Arti:* ${s.englishNameTranslation}\n` +
-                                     `📍 *Turun di:* ${s.revelationType === 'Meccan' ? 'Makkah' : 'Madinah'}\n` +
-                                     `📏 *Jumlah Ayat:* ${s.numberOfAyahs} Ayat\n\n` +
-                                     `_Gunakan *!ayat ${s.number} full* untuk melihat teks penuh & link audio._`;
-                        await sock.sendMessage(sender, { text: info }, { quoted: msg });
-                    } catch (e) { 
-                        await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); 
-                    }
-                    break;
-
-                case 'ayat':
-                    if (args.length < 2) {
-                        await sock.sendMessage(sender, { text: '⚠️ *Format Salah!*\nGunakan:\n*!ayat <surah> <ayat>* (Info 1 Ayat + Audio)\n*!ayat <surah> <awal>-<akhir>* (Rentang Ayat)\n*!ayat <surah> full* (Satu Surah Penuh)\n\nContoh:\n*!ayat 1 2* (Al-Fatihah Ayat 2)\n*!ayat 2 1-10* (Al-Baqarah ayat 1 s.d 10)\n*!ayat 36 full* (Yasin full)' }, { quoted: msg });
-                        return;
-                    }
-                    await sock.sendMessage(sender, { text: '⏳ _Mengambil Data Al-Quran..._' }, { quoted: msg });
-                    try {
-                        const surahNum = args[0];
-                        const ayatParam = args[1].toLowerCase();
-                        
-                        let startAyat = -1, endAyat = -1, isFull = false;
-                        
-                        if (ayatParam === 'full') {
-                            isFull = true;
-                        } else if (ayatParam.includes('-')) {
-                            const parts = ayatParam.split('-');
-                            startAyat = parseInt(parts[0]);
-                            endAyat = parseInt(parts[1]);
-                        } else {
-                            startAyat = parseInt(ayatParam);
-                            endAyat = startAyat;
-                        }
-                        
-                        // Fetching 3 edisi: Arabic, Indo, Audio Murottal (Untuk 1 surah full)
-                        const res = await fetch(`http://api.alquran.cloud/v1/surah/${surahNum}/editions/quran-uthmani,id.indonesian,ar.alafasy`);
-                        const json = await res.json();
-                        
-                        if (json.code !== 200) {
-                            await sock.sendMessage(sender, { text: `❌ Gagal mengambil data. Pastikan nomor Surah valid.` }, { quoted: msg });
-                            return;
-                        }
-
-                        const arabicSurah = json.data[0];
-                        const indoSurah = json.data[1];
-                        const audioSurah = json.data[2];
-                        
-                        if (isFull) {
-                            startAyat = 1;
-                            endAyat = arabicSurah.numberOfAyahs;
-                        }
-                        
-                        if (startAyat < 1 || endAyat > arabicSurah.numberOfAyahs || startAyat > endAyat) {
-                            await sock.sendMessage(sender, { text: `❌ Range tidak valid. Surah ${arabicSurah.englishName} hanya memiliki ${arabicSurah.numberOfAyahs} ayat.` }, { quoted: msg });
-                            return;
-                        }
-                        
-                        let replyTexts = [];
-                        let currentChunk = `📖 *Surah ${arabicSurah.englishName}* (${arabicSurah.name})\nAyat: ${startAyat} - ${endAyat}\n\n`;
-                        
-                        // Algoritma Split Text (Mencegah Limit Karakter WA)
-                        for (let i = startAyat - 1; i < endAyat; i++) {
-                            const arabicText = arabicSurah.ayahs[i].text;
-                            const indoText = indoSurah.ayahs[i].text;
-                            const num = i + 1;
-                            
-                            const ayatString = `*[ Ayat ${num} ]*\n${arabicText}\n_Arti: ${indoText}_\n\n`;
-                            
-                            // Potong jika mencapai 3500 Karakter (Maks WA sekitar 65k, tapi 3500 lebih aman dibaca di Chat)
-                            if (currentChunk.length + ayatString.length > 3500) {
-                                replyTexts.push(currentChunk);
-                                currentChunk = `_(Lanjutan Surah ${arabicSurah.englishName}...)_\n\n` + ayatString;
-                            } else {
-                                currentChunk += ayatString;
-                            }
-                        }
-                        if (currentChunk.trim().length > 0) replyTexts.push(currentChunk);
-                        
-                        // Send Text Chunks berurutan
-                        for (const txt of replyTexts) {
-                            await sock.sendMessage(sender, { text: txt });
-                        }
-                        
-                        // Kirim File Audio hanya jika request 1 ayat saja
-                        if (startAyat === endAyat) {
-                            const audioUrl = audioSurah.ayahs[startAyat - 1].audio;
-                            await sock.sendMessage(sender, { text: `🎧 _Mengirimkan audio murottal Syeikh Mishary Rasyid Al-Afasy..._` });
-                            await sock.sendMessage(sender, { 
-                                audio: { url: audioUrl }, 
-                                mimetype: 'audio/mp4', 
-                                ptt: false 
-                            }, { quoted: msg });
-                        } else if (isFull) {
-                            // Kirim tautan mp3 satu file utuh
-                            const fullAudioUrl = `https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/${surahNum}.mp3`;
-                            await sock.sendMessage(sender, { text: `🎧 _Audio Full Surah Murottal Syeikh Mishary Rasyid dapat diunduh/didengar di sini:_\n${fullAudioUrl}` }, { quoted: msg });
-                        }
-                        
-                    } catch (e) { 
-                        console.error("Error Quran:", e);
-                        await sock.sendMessage(sender, { text: '❌ *Gagal memuat atau mengirim dari API Al-Quran.*' }); 
                     }
                     break;
 
