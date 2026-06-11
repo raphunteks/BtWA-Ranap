@@ -8,8 +8,8 @@ import handleStickerCommand from './commands/sticker.js';
 // KONFIGURASI GLOBAL & STATE
 // ==========================================
 const ownerNumber = "6285256739684@s.whatsapp.net";
-// Menghindari suffix multi-device (seperti :1@s.whatsapp.net) yang bikin settings error
 const ownerPureJid = ownerNumber.includes(':') ? ownerNumber.split(':')[0] + '@s.whatsapp.net' : ownerNumber; 
+
 const GAS_URL = "https://script.google.com/macros/s/AKfycbzhDou1e-e4QXDILWfM_mkyagViYOvcpLLv7xL-kJ6cVhpR_R5_bVICdnUYxp0AA90/exec";
 const botStartTime = new Date(); 
 
@@ -20,6 +20,7 @@ const settingsFile = `${sessionPath}/settings.json`;
 if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
 
 let botSchedules = [];
+// Menambahkan autoWeather dan autoSholat ke state botSettings
 let botSettings = { autoRanap: [], autoRajal: [], autoSholat: [], autoWeather: [] };
 
 if (fs.existsSync(schedulesFile)) {
@@ -1235,8 +1236,6 @@ export default function setupMessageHandler(sock) {
                     await handleStickerCommand(sock, msg); 
                     break;
             }
-        } catch (error) { 
-            console.error('Error proses pesan:', error); 
-        }
+        } catch (error) { console.error('Error proses pesan:', error); }
     });
 }
