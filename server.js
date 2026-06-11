@@ -13,7 +13,6 @@ import { pathToFileURL } from 'url';
 // ==========================================
 // LOGGER & TERMINAL INTERCEPTOR
 // ==========================================
-// Kita simpan log ke dalam array maksimal 100 baris agar bisa dikirim ke client baru yg connect
 const MAX_LOG_HISTORY = 100;
 const logHistory = [];
 
@@ -137,14 +136,36 @@ const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => { res.send('<h2>✅ Multi-Device WhatsApp Bot API is Running!</h2>'); });
 
+// ==========================================
+// ANTI-CRASH & GRACEFUL SHUTDOWN (RAILWAY FIX)
+// ==========================================
 process.on('uncaughtException', err => {
     if (String(err).includes('conflict') || String(err).includes('EADDRINUSE')) return;
-    console.error('Caught exception: ', err);
+    console.error('Caught exception: ', err.message || err);
 });
 process.on('unhandledRejection', reason => {
     if (String(reason).includes('conflict') || String(reason).includes('EADDRINUSE')) return;
-    console.error('Unhandled Rejection: ', reason);
+    console.error('Unhandled Rejection: ', reason.message || reason);
 });
+
+// Menangkap sinyal SIGTERM dari Railway (saat restart/redeploy) agar tidak dianggap error oleh NPM
+const gracefulShutdown = () => {
+    console.log('🛑 Sinyal SIGTERM/SIGINT diterima dari Railway. Mematikan server secara aman...');
+    server.close(() => {
+        console.log('✅ Server HTTP ditutup.');
+        process.exit(0);
+    });
+    
+    // Paksa mati jika proses tersangkut lebih dari 10 detik
+    setTimeout(() => {
+        console.error('⚠️ Force shutdown karena timeout.');
+        process.exit(1);
+    }, 10000);
+};
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+
 
 // ==========================================
 // ENGINE WA (MULTI-INSTANCE) FIXED FOR BAD MAC
@@ -163,16 +184,16 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
         browser: Browsers.ubuntu('Chrome'), 
         markOnlineOnConnect: true,
-        syncFullHistory: false, // Mencegah crash memori
+        generateHighQualityLinkPreview: false, // Hemat RAM
+        syncFullHistory: false, // Mencegah crash memori saat inisialisasi awal
         getMessage: async (key) => {
-            // WAJIB ADA: Mencegah 'Failed to decrypt message' (Bad MAC) saat melakukan reply chat.
+            // WAJIB ADA: Mencegah error 'Failed to decrypt message' (Bad MAC) saat melakukan reply
             return {
                 conversation: 'Pesan referensi untuk bot.'
             };
         }
     });
 
-    // MENGGUNAKAN UPTIME PROCESS NODE.JS AGAR SINKRON DENGAN WA (!runtime)
     const serverStartTime = Date.now() - Math.floor(process.uptime() * 1000);
     const botState = { id: botId, script: scriptName, sock, qr: null, status: 'connecting', startTime: serverStartTime };
     bots.set(botId, botState);
@@ -209,7 +230,6 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
         } else if (connection === 'open') {
             botState.qr = null;
             botState.status = 'connected';
-            // startTime TIDAK DI-RESET di sini agar tetap sesuai dengan waktu hidup Node.js (seperti di WA !runtime)
             console.log(`✅ Bot ${botId} Berhasil Terhubung dan Siap Digunakan!`);
             io.emit('bot_updated', getSafeBotState(botId));
         }
@@ -229,7 +249,7 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
             console.warn(`⚠️ Peringatan: Script '${scriptName}' tidak ditemukan di sistem lokal (${absoluteScriptPath}). Bot mungkin tidak bisa memproses command sebelum script tersedia.`);
         }
     } catch (err) {
-        console.error(`❌ Gagal meload script '${scriptName}' untuk bot ${botId}:`, err);
+        console.error(`❌ Gagal meload script '${scriptName}' untuk bot ${botId}:`, err.message || err);
     }
 }
 
@@ -239,7 +259,6 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
 io.on('connection', (socket) => {
     console.log('🌐 Web client terhubung:', socket.id);
     
-    // Kirim state awal & log history
     socket.emit('init_state', {
         bots: Array.from(bots.values()).map(b => getSafeBotState(b.id)),
         scripts: getAvailableScripts()
@@ -264,7 +283,7 @@ io.on('connection', (socket) => {
                     socket.emit('pairing_code', { botId, code });
                     console.log(`🔑 Pairing Code diminta untuk nomor ${phoneNumber}`);
                 } catch (error) {
-                    console.error('Pairing error:', error);
+                    console.error('Pairing error:', error.message || error);
                     socket.emit('error', 'Gagal generate kode. Pastikan nomor benar tanpa tanda + atau 0 di depan (contoh 62812...).');
                 }
             }, 2000);
@@ -300,7 +319,7 @@ io.on('connection', (socket) => {
                 scripts: getAvailableScripts()
             });
         } catch (err) {
-            console.error('Upload Error:', err);
+            console.error('Upload Error:', err.message || err);
             socket.emit('error', 'Gagal menyimpan script');
         }
     });
@@ -326,7 +345,8 @@ async function initializeSystem() {
     }
 }
 
-server.listen(port, () => {
-    console.log(`🌐 Server Berjalan! Membuka port ${port}...`);
+// BINDING PORT 0.0.0.0 - MENCEGAH RAILWAY TIMEOUT/CRASH
+server.listen(port, '0.0.0.0', () => {
+    console.log(`🌐 Server Berjalan! Membuka port ${port} (0.0.0.0)...`);
     initializeSystem();
 });
