@@ -224,10 +224,10 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
                 handlerModule.default(sock); 
             }
         } else {
-            console.warn(`⚠️ Script ${scriptName} tidak ditemukan di sistem lokal: ${absoluteScriptPath}`);
+            console.warn(`⚠️ Peringatan: Script '${scriptName}' tidak ditemukan di sistem lokal (${absoluteScriptPath}). Bot mungkin tidak bisa memproses command sebelum script tersedia.`);
         }
     } catch (err) {
-        console.error(`❌ Gagal meload script ${scriptName} untuk bot ${botId}:`, err);
+        console.error(`❌ Gagal meload script '${scriptName}' untuk bot ${botId}:`, err);
     }
 }
 
