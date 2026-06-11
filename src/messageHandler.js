@@ -648,25 +648,20 @@ export default function setupMessageHandler(sock) {
             const msg = m.messages[0];
             if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
-            // --- PERBAIKAN FATAL BUG "BAD MAC ERROR / WAITING FOR MESSAGE" ---
-            // WhatsApp Multi-Device menambahkan suffix (contoh :5) pada JID pengirim/participant.
-            // Jika kita membalas (quoted) pesan dengan suffix tersebut, libsignal akan gagal
-            // menemukan kunci sesi dan menyebabkan "Bad MAC Error" (gagal dekripsi).
-            // SOLUSI: Sanitasi msg.key secara langsung SEBELUM di-quote.
-            if (msg.key.participant && msg.key.participant.includes(':')) {
-                msg.key.participant = msg.key.participant.split(':')[0] + '@s.whatsapp.net';
-            }
-            if (msg.key.remoteJid && msg.key.remoteJid.includes(':') && !msg.key.remoteJid.includes('@g.us')) {
-                msg.key.remoteJid = msg.key.remoteJid.split(':')[0] + '@s.whatsapp.net';
-            }
-
+            // KITA TIDAK BOLEH MENGUBAH msg.key ASLI KARENA AKAN MERUSAK ENKRIPSI (BAD MAC)
+            // msg.key dibiarkan utuh 100% untuk kebutuhan reply { quoted: msg }
+            
             const text = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || msg.message.videoMessage?.caption || '';
             const prefix = '!'; if (!text.startsWith(prefix)) return;
 
             const args = text.slice(prefix.length).trim().split(/ +/);
             const command = args.shift().toLowerCase();
             
-            const sender = msg.key.remoteJid;
+            // Ekstrak JID pengirim untuk pengiriman pesan balasan (sock.sendMessage)
+            const rawSender = msg.key.remoteJid;
+            const sender = rawSender.includes('@g.us') ? rawSender : rawSender.split(':')[0] + '@s.whatsapp.net';
+            
+            // Simpan pureSender ke config jika dibutuhkan
             const pureSender = sender;
 
             console.log(`[COMMAND] ${command} dari ${sender}`);
