@@ -111,7 +111,7 @@ process.on('unhandledRejection', reason => {
 });
 
 // ==========================================
-// ENGINE WA (MULTI-INSTANCE)
+// ENGINE WA (MULTI-INSTANCE) FIXED FOR BAD MAC
 // ==========================================
 async function startBot(botId, scriptName = 'messageHandler.js') {
     if (bots.has(botId) && bots.get(botId).status === 'connected') return;
@@ -126,7 +126,15 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
         logger, 
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
         browser: Browsers.ubuntu('Chrome'), 
-        markOnlineOnConnect: true
+        markOnlineOnConnect: true,
+        // PENAMBAHAN FIX: Mencegah error Bad MAC dan crash memori
+        syncFullHistory: false, 
+        getMessage: async (key) => {
+            // Ini WAJIB untuk mencegah "Failed to decrypt message" saat mereply pesan
+            return {
+                conversation: 'Pesan referensi untuk bot.'
+            };
+        }
     });
 
     const botState = { id: botId, script: scriptName, sock, qr: null, status: 'connecting', startTime: null };
