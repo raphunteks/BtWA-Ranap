@@ -172,7 +172,9 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
         }
     });
 
-    const botState = { id: botId, script: scriptName, sock, qr: null, status: 'connecting', startTime: null };
+    // MENGGUNAKAN UPTIME PROCESS NODE.JS AGAR SINKRON DENGAN WA (!runtime)
+    const serverStartTime = Date.now() - Math.floor(process.uptime() * 1000);
+    const botState = { id: botId, script: scriptName, sock, qr: null, status: 'connecting', startTime: serverStartTime };
     bots.set(botId, botState);
     io.emit('bot_updated', getSafeBotState(botId));
 
@@ -207,7 +209,7 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
         } else if (connection === 'open') {
             botState.qr = null;
             botState.status = 'connected';
-            botState.startTime = Date.now();
+            // startTime TIDAK DI-RESET di sini agar tetap sesuai dengan waktu hidup Node.js (seperti di WA !runtime)
             console.log(`✅ Bot ${botId} Berhasil Terhubung dan Siap Digunakan!`);
             io.emit('bot_updated', getSafeBotState(botId));
         }
