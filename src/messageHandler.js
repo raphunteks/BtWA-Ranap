@@ -8,6 +8,8 @@ import handleStickerCommand from './commands/sticker.js';
 // KONFIGURASI GLOBAL & STATE
 // ==========================================
 const ownerNumber = "6285256739684@s.whatsapp.net";
+// Menghindari suffix multi-device (seperti :1@s.whatsapp.net) yang bikin settings error
+const ownerPureJid = ownerNumber.split(':')[0]; 
 const GAS_URL = "https://script.google.com/macros/s/AKfycbzhDou1e-e4QXDILWfM_mkyagViYOvcpLLv7xL-kJ6cVhpR_R5_bVICdnUYxp0AA90/exec";
 const botStartTime = new Date(); 
 
@@ -33,11 +35,13 @@ if (!botSettings.autoSholat) botSettings.autoSholat = [];
 if (!botSettings.autoWeather) botSettings.autoWeather = [];
 
 let configChanged = false;
-if (!botSettings.autoSholat.includes(ownerNumber)) {
+
+// Memastikan Owner terdaftar tanpa suffix JID yang bisa membuat bug status !settings
+if (!botSettings.autoSholat.includes(ownerPureJid) && !botSettings.autoSholat.includes(ownerNumber)) {
     botSettings.autoSholat.push(ownerNumber);
     configChanged = true;
 }
-if (!botSettings.autoWeather.includes(ownerNumber)) {
+if (!botSettings.autoWeather.includes(ownerPureJid) && !botSettings.autoWeather.includes(ownerNumber)) {
     botSettings.autoWeather.push(ownerNumber);
     configChanged = true;
 }
@@ -117,6 +121,108 @@ async function fetchWeatherKendari() {
     } catch (e) {
         console.error("Gagal fetch cuaca:", e);
         return null;
+    }
+}
+
+// NLP Parser Tanggal untuk Advanced Weather Cuaca
+function parseWeatherQuery(query) {
+    if (!query) return null;
+    query = query.toLowerCase().trim();
+    
+    // Fitur Cepat Hari Ini/Besok/Lusa
+    if (query === 'besok') {
+        let t = new Date(); t.setDate(t.getDate() + 1);
+        let d = t.toISOString().split('T')[0];
+        return { start: d, end: d, label: 'Besok' };
+    }
+    if (query === 'lusa') {
+        let t = new Date(); t.setDate(t.getDate() + 2);
+        let d = t.toISOString().split('T')[0];
+        return { start: d, end: d, label: 'Lusa' };
+    }
+
+    // RegEx Patterns untuk membaca "15 Jan 2026" atau "01 - 20 Januari 2026"
+    const rangeMatch = query.match(/(\d{1,2})\s*-\s*(\d{1,2})\s+([a-z]+)\s+(\d{4})/);
+    const singleMatch = query.match(/(\d{1,2})\s+([a-z]+)\s+(\d{4})/);
+    const strictRange = query.match(/(\d{1,2})-(\d{1,2})-(\d{4})\s*s\/?d\s*(\d{1,2})-(\d{1,2})-(\d{4})/); 
+    const strictSingle = query.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
+
+    const months = { 'januari': '01', 'jan': '01', 'februari': '02', 'feb': '02', 'maret': '03', 'mar': '03', 'april': '04', 'apr': '04', 'mei': '05', 'juni': '06', 'jun': '06', 'juli': '07', 'jul': '07', 'agustus': '08', 'agu': '08', 'september': '09', 'sep': '09', 'oktober': '10', 'okt': '10', 'november': '11', 'nov': '11', 'desember': '12', 'des': '12' };
+
+    if (rangeMatch) {
+        let startD = rangeMatch[1].padStart(2, '0'); let endD = rangeMatch[2].padStart(2, '0');
+        let m = months[rangeMatch[3]]; let y = rangeMatch[4];
+        if (m) return { start: `${y}-${m}-${startD}`, end: `${y}-${m}-${endD}`, label: `${startD} s/d ${endD} ${rangeMatch[3]} ${y}` };
+    }
+    if (singleMatch) {
+        let d = singleMatch[1].padStart(2, '0'); let m = months[singleMatch[2]]; let y = singleMatch[3];
+        if (m) return { start: `${y}-${m}-${d}`, end: `${y}-${m}-${d}`, label: `${d} ${singleMatch[2]} ${y}` };
+    }
+    if (strictRange) {
+        let sD = strictRange[1].padStart(2, '0'), sM = strictRange[2].padStart(2, '0'), sY = strictRange[3];
+        let eD = strictRange[4].padStart(2, '0'), eM = strictRange[5].padStart(2, '0'), eY = strictRange[6];
+        return { start: `${sY}-${sM}-${sD}`, end: `${eY}-${eM}-${eD}`, label: `${sD}/${sM}/${sY} s/d ${eD}/${eM}/${eY}` };
+    }
+    if (strictSingle) {
+        let d = strictSingle[1].padStart(2, '0'); let m = strictSingle[2].padStart(2, '0'); let y = strictSingle[3];
+        return { start: `${y}-${m}-${d}`, end: `${y}-${m}-${d}`, label: `${d}/${m}/${y}` };
+    }
+    return null;
+}
+
+// Fetch Advanced Forecast / Archive Weather
+async function fetchAdvancedWeather(startDate, endDate, label) {
+    try {
+        const now = new Date(); const end = new Date(endDate);
+        // Gunakan archive-api bila tanggal terakhir dicari lebih dari 5 hari ke masa lalu
+        const isArchive = end < now && (now - end) > (1000 * 60 * 60 * 24 * 5);
+        let baseUrl = isArchive ? "https://archive-api.open-meteo.com/v1/archive" : "https://api.open-meteo.com/v1/forecast";
+
+        const url = `${baseUrl}?latitude=-3.945&longitude=122.4989&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Asia%2FMakassar&start_date=${startDate}&end_date=${endDate}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (!data.daily || !data.daily.time) return `❌ Data cuaca untuk tanggal tersebut tidak tersedia. Pastikan jarak tanggal tidak lebih dari masa berlaku API (maksimal -/+ 3 bulan).`;
+
+        let msg = `☁️ *DATA CUACA KENDARI*\n📅 *Periode:* ${label}\n\n`;
+        for (let i = 0; i < data.daily.time.length; i++) {
+            msg += `*${data.daily.time[i]}*\n`;
+            msg += `🌡️ Suhu: ${data.daily.temperature_2m_min[i]}°C - ${data.daily.temperature_2m_max[i]}°C\n`;
+            msg += `🌧️ Hujan: ${data.daily.precipitation_sum[i]} mm\n`;
+            msg += `📝 Kondisi: ${getWeatherDesc(data.daily.weathercode[i])}\n\n`;
+            
+            if (i >= 30) {
+                msg += `_... dan seterusnya (Dibatasi 31 hari laporan)._\n`; break;
+            }
+        }
+        msg += `_Sumber Data: Open-Meteo ${isArchive ? 'Archive' : 'Forecast'} API_`;
+        return msg;
+    } catch (e) {
+        console.error("Advanced weather error:", e);
+        return `❌ *Gagal mengambil data dari server Open-Meteo.*`;
+    }
+}
+
+// ==========================================
+// FUNGSI EXTRA: GEMPA BMKG TERKINI
+// ==========================================
+async function fetchGempa() {
+    try {
+        const res = await fetch('https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json');
+        const json = await res.json();
+        const g = json.Infogempa.gempa;
+        let msg = `🚨 *INFO GEMPA TERKINI (BMKG)* 🚨\n\n`;
+        msg += `📅 *Waktu:* ${g.Tanggal} | ${g.Jam}\n`;
+        msg += `📍 *Koordinat:* ${g.Coordinates}\n`;
+        msg += `📊 *Magnitudo:* ${g.Magnitude} SR\n`;
+        msg += `🌊 *Kedalaman:* ${g.Kedalaman}\n`;
+        msg += `🗺️ *Wilayah:* ${g.Wilayah}\n`;
+        msg += `🛑 *Potensi Tsunami:* ${g.Potensi}\n`;
+        msg += `👀 *Dirasakan:* ${g.Dirasakan}\n\n`;
+        msg += `_Tetap waspada dan ikuti arahan keselamatan setempat._`;
+        return msg;
+    } catch (e) {
+        return `❌ *Gagal mengambil data gempa dari server BMKG.*`;
     }
 }
 
@@ -404,7 +510,11 @@ async function checkApiUpdates(sock) {
                     const formatBM = formatKlinikList("Bedah Mulut", "💉", currentBM, diffBM.removed);
                     const formatUmum = formatKlinikList("Gigi/Umum", "🪥", currentUmum, diffUmum.removed);
 
-                    msg += formatEndo.txt + formatPerio.txt + formatBM.txt + formatUmum.txt;
+                    msg += formatEndo.txt;
+                    msg += formatPerio.txt;
+                    msg += formatBM.txt;
+                    msg += formatUmum.txt;
+
                     msg += `📊 *Total Antrean (BARU: BELUM DIKERJA):* Endo (${formatEndo.baru}), BM (${formatBM.baru}), Perio (${formatPerio.baru}), Umum (${formatUmum.baru})\n`;
                     msg += `📊 *Total Antrean (SELESAI/BATAL):* Endo (${formatEndo.selesai}), BM (${formatBM.selesai}), Perio (${formatPerio.selesai}), Umum (${formatUmum.selesai})`;
                     
@@ -521,11 +631,20 @@ export default function setupMessageHandler(sock) {
             for (let i = 0; i < botSchedules.length; i++) {
                 const jadwal = botSchedules[i];
                 if (jadwal.status === 'pending' && now >= jadwal.timestamp) {
-                    try { await currentSock.sendMessage(jadwal.target, { text: jadwal.pesan }); jadwal.status = 'sent'; hasChanges = true; } 
-                    catch (err) { jadwal.status = 'failed'; hasChanges = true; }
+                    try { 
+                        await currentSock.sendMessage(jadwal.target, { text: jadwal.pesan }); 
+                        jadwal.status = 'sent'; 
+                        hasChanges = true; 
+                    } catch (err) { 
+                        jadwal.status = 'failed'; 
+                        hasChanges = true; 
+                    }
                 }
             }
-            if (hasChanges) { botSchedules = botSchedules.filter(s => s.status === 'pending'); saveSchedules(); }
+            if (hasChanges) { 
+                botSchedules = botSchedules.filter(s => s.status === 'pending'); 
+                saveSchedules(); 
+            }
         }, 30000); 
 
         // Interval Cek RSUD (60s)
@@ -551,7 +670,13 @@ export default function setupMessageHandler(sock) {
 
             const args = text.slice(prefix.length).trim().split(/ +/);
             const command = args.shift().toLowerCase();
-            const sender = msg.key.remoteJid;
+            
+            // NORMALISASI JID: Perbaikan utama agar Multi-Device tidak gagal memverifikasi status owner di !settings
+            let rawSender = msg.key.remoteJid;
+            let sender = rawSender;
+            if (!sender.includes('@g.us') && sender.includes(':')) {
+                sender = sender.split(':')[0] + '@s.whatsapp.net';
+            }
 
             console.log(`[COMMAND] ${command} dari ${sender}`);
 
@@ -626,14 +751,18 @@ export default function setupMessageHandler(sock) {
                                      `* !autorajal on/off* - Notif Otomatis Rajal\n` +
                                      `* !autoinfosholat on/off* - Pengingat Waktu Sholat\n` +
                                      `* !autoweather on/off* - Prakiraan Cuaca Harian\n\n` +
+                                     `*☁️ INFO CUACA & GEMPA (BARU):*\n` +
+                                     `* !gempa* - Info Gempa BMKG Terkini\n` +
+                                     `* !cuaca* - Cuaca Kendari saat ini\n` +
+                                     `* !cuaca besok* - Prakiraan besok\n` +
+                                     `* !cuaca 15 Jan 2026* - Cuaca tgl spesifik\n` +
+                                     `* !cuaca 01 - 20 Jan 2026* - Rentang cuaca\n\n` +
                                      `*📖 AL-QURAN & ISLAMI:*\n` +
                                      `* !listsurah* - Menampilkan daftar ke-114 Surah\n` +
                                      `* !surah <nomor>* - Info spesifik Surah\n` +
                                      `* !ayat <surah> <ayat>* - Teks 1 Ayat + Audio Murottal\n` +
                                      `* !ayat <surah> <aw>-<ak>* - Rentang Ayat Teks Penuh\n` +
                                      `* !ayat <surah> full* - Seluruh Ayat dlm Surah\n\n` +
-                                     `*☁️ INFO CUACA HARIAN:*\n` +
-                                     `* !cuaca / !weather* - Cek cuaca Kendari saat ini\n\n` +
                                      `*⚙️ PENGELOLAAN TARGET NOTIFIKASI:*\n` +
                                      `* !addsholat <nomor>* - Tambah target Sholat\n` +
                                      `* !delsholat <nomor>* - Hapus target Sholat\n` +
@@ -641,6 +770,7 @@ export default function setupMessageHandler(sock) {
                                      `* !delweather <nomor>* - Hapus target Cuaca\n\n` +
                                      `*⚙️ SISTEM & LAINNYA:*\n` +
                                      `* !settings* - Lihat info langganan yg diaktifkan\n` +
+                                     `* !calc <hitungan>* - Kalkulator pintar\n` +
                                      `* !refresh* - 🔄 Paksa Ekstensi Scrape!\n` +
                                      `* !addjadwal* - Tambah auto-send\n` +
                                      `* !listjadwal* - Lihat auto-send\n` +
@@ -663,7 +793,7 @@ export default function setupMessageHandler(sock) {
                                   `🕌 *Auto Info Sholat (Kendari):* ${sholatActive}\n` +
                                   `🌤️ *Auto Info Cuaca (Kendari):* ${weatherActive}\n\n`;
                     
-                    if (sender === ownerNumber) {
+                    if (sender === ownerNumber || sender === ownerPureJid) {
                         setsMsg += `👑 *STATISTIK GLOBAL (KHUSUS OWNER):*\n` +
                                    `👥 Berlangganan Sholat: ${botSettings.autoSholat.length} User/Grup\n` +
                                    `👥 Berlangganan Cuaca: ${botSettings.autoWeather.length} User/Grup\n` +
@@ -705,7 +835,10 @@ export default function setupMessageHandler(sock) {
                     break;
 
                 case 'addsholat':
-                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!addsholat 6281234567890*' }, { quoted: msg });
+                    if (!args[0]) {
+                        await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!addsholat 6281234567890*' }, { quoted: msg });
+                        return;
+                    }
                     let targetAddS = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (!botSettings.autoSholat.includes(targetAddS)) {
                         botSettings.autoSholat.push(targetAddS);
@@ -717,7 +850,10 @@ export default function setupMessageHandler(sock) {
                     break;
 
                 case 'delsholat':
-                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!delsholat 6281234567890*' }, { quoted: msg });
+                    if (!args[0]) {
+                        await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!delsholat 6281234567890*' }, { quoted: msg });
+                        return;
+                    }
                     let targetDelS = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (botSettings.autoSholat.includes(targetDelS)) {
                         botSettings.autoSholat = botSettings.autoSholat.filter(n => n !== targetDelS);
@@ -729,7 +865,10 @@ export default function setupMessageHandler(sock) {
                     break;
 
                 case 'addweather':
-                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!addweather 6281234567890*' }, { quoted: msg });
+                    if (!args[0]) {
+                        await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!addweather 6281234567890*' }, { quoted: msg });
+                        return;
+                    }
                     let targetAddW = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (!botSettings.autoWeather.includes(targetAddW)) {
                         botSettings.autoWeather.push(targetAddW);
@@ -741,7 +880,10 @@ export default function setupMessageHandler(sock) {
                     break;
 
                 case 'delweather':
-                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!delweather 6281234567890*' }, { quoted: msg });
+                    if (!args[0]) {
+                        await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor tujuan!*\nContoh: *!delweather 6281234567890*' }, { quoted: msg });
+                        return;
+                    }
                     let targetDelW = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (botSettings.autoWeather.includes(targetDelW)) {
                         botSettings.autoWeather = botSettings.autoWeather.filter(n => n !== targetDelW);
@@ -754,12 +896,49 @@ export default function setupMessageHandler(sock) {
 
                 case 'cuaca':
                 case 'weather':
-                    await sock.sendMessage(sender, { text: '⏳ _Mengambil data cuaca Kendari saat ini..._' }, { quoted: msg });
-                    const cuacaData = await fetchWeatherKendari();
-                    if (cuacaData) {
-                        await sock.sendMessage(sender, { text: `☁️ *INFO CUACA KENDARI*\n\n${cuacaData}` }, { quoted: msg });
+                    if (args.length > 0) {
+                        const queryStr = args.join(' ');
+                        const parsedDates = parseWeatherQuery(queryStr);
+                        if (parsedDates) {
+                            await sock.sendMessage(sender, { text: `⏳ _Mengambil data cuaca untuk periode: ${parsedDates.label}..._` }, { quoted: msg });
+                            const advWeather = await fetchAdvancedWeather(parsedDates.start, parsedDates.end, parsedDates.label);
+                            await sock.sendMessage(sender, { text: advWeather }, { quoted: msg });
+                        } else {
+                            await sock.sendMessage(sender, { text: `⚠️ *Format tanggal tidak dikenali.*\nContoh:\n- !cuaca besok\n- !cuaca lusa\n- !cuaca 15 Januari 2026\n- !cuaca 01 - 20 Januari 2026\n- !cuaca 15-01-2026` }, { quoted: msg });
+                        }
                     } else {
-                        await sock.sendMessage(sender, { text: '❌ *Gagal mengambil API Cuaca Open-Meteo.*' }, { quoted: msg });
+                        await sock.sendMessage(sender, { text: '⏳ _Mengambil data cuaca Kendari saat ini..._' }, { quoted: msg });
+                        const cuacaData = await fetchWeatherKendari();
+                        if (cuacaData) {
+                            await sock.sendMessage(sender, { text: `☁️ *INFO CUACA KENDARI*\n\n${cuacaData}` }, { quoted: msg });
+                        } else {
+                            await sock.sendMessage(sender, { text: '❌ *Gagal mengambil API Cuaca Open-Meteo.*' }, { quoted: msg });
+                        }
+                    }
+                    break;
+
+                case 'gempa':
+                    await sock.sendMessage(sender, { text: '⏳ _Mengambil informasi BMKG gempa terbaru..._' }, { quoted: msg });
+                    const infoGempa = await fetchGempa();
+                    await sock.sendMessage(sender, { text: infoGempa }, { quoted: msg });
+                    break;
+
+                case 'calc':
+                case 'kalkulator':
+                    if (args.length === 0) {
+                        await sock.sendMessage(sender, { text: '⚠️ Masukkan operasi matematika.\nContoh: `!calc (50 * 2) - 10`' }, { quoted: msg });
+                        return;
+                    }
+                    const calcStr = args.join(' ');
+                    try {
+                        if (/^[0-9+\-*/().\s]+$/.test(calcStr)) {
+                            const result = new Function(`return ${calcStr}`)();
+                            await sock.sendMessage(sender, { text: `🧮 *Kalkulator Pintar*\n\nEkspresi: ${calcStr}\nHasil: *${result}*` }, { quoted: msg });
+                        } else {
+                            await sock.sendMessage(sender, { text: `⚠️ Format matematika tidak valid. Gunakan angka dan operator + - * / ( )` }, { quoted: msg });
+                        }
+                    } catch(e) { 
+                        await sock.sendMessage(sender, { text: `❌ Ekspresi tidak dapat dihitung.` }, { quoted: msg }); 
                     }
                     break;
 
@@ -804,16 +983,24 @@ export default function setupMessageHandler(sock) {
                         });
                         reply += `\n_Ketik *!surah <nomor>* untuk detail info Surah._\n_Ketik *!ayat <nomor_surah> full* untuk isi seluruh surah._`;
                         await sock.sendMessage(sender, { text: reply }, { quoted: msg });
-                    } catch (e) { await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); }
+                    } catch (e) { 
+                        await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); 
+                    }
                     break;
 
                 case 'surah':
-                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Sertakan nomor surah!*\nContoh: !surah 1 (Untuk Al-Fatihah)' }, { quoted: msg });
+                    if (!args[0]) {
+                        await sock.sendMessage(sender, { text: '⚠️ *Sertakan nomor surah!*\nContoh: !surah 1 (Untuk Al-Fatihah)' }, { quoted: msg });
+                        return;
+                    }
                     try {
                         const num = parseInt(args[0]);
                         const res = await fetch(`http://api.alquran.cloud/v1/surah/${num}`);
                         const json = await res.json();
-                        if (json.code !== 200) return await sock.sendMessage(sender, { text: `❌ Surah tidak ditemukan.` });
+                        if (json.code !== 200) {
+                            await sock.sendMessage(sender, { text: `❌ Surah tidak ditemukan.` });
+                            return;
+                        }
                         
                         const s = json.data;
                         const info = `📖 *INFORMASI SURAH*\n\n` +
@@ -824,11 +1011,16 @@ export default function setupMessageHandler(sock) {
                                      `📏 *Jumlah Ayat:* ${s.numberOfAyahs} Ayat\n\n` +
                                      `_Gunakan *!ayat ${s.number} full* untuk melihat teks penuh & link audio._`;
                         await sock.sendMessage(sender, { text: info }, { quoted: msg });
-                    } catch (e) { await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); }
+                    } catch (e) { 
+                        await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); 
+                    }
                     break;
 
                 case 'ayat':
-                    if (args.length < 2) return await sock.sendMessage(sender, { text: '⚠️ *Format Salah!*\nGunakan:\n*!ayat <surah> <ayat>* (Info 1 Ayat + Audio)\n*!ayat <surah> <awal>-<akhir>* (Rentang Ayat)\n*!ayat <surah> full* (Satu Surah Penuh)\n\nContoh:\n*!ayat 1 2* (Al-Fatihah Ayat 2)\n*!ayat 2 1-10* (Al-Baqarah ayat 1 s.d 10)\n*!ayat 36 full* (Yasin full)' }, { quoted: msg });
+                    if (args.length < 2) {
+                        await sock.sendMessage(sender, { text: '⚠️ *Format Salah!*\nGunakan:\n*!ayat <surah> <ayat>* (Info 1 Ayat + Audio)\n*!ayat <surah> <awal>-<akhir>* (Rentang Ayat)\n*!ayat <surah> full* (Satu Surah Penuh)\n\nContoh:\n*!ayat 1 2* (Al-Fatihah Ayat 2)\n*!ayat 2 1-10* (Al-Baqarah ayat 1 s.d 10)\n*!ayat 36 full* (Yasin full)' }, { quoted: msg });
+                        return;
+                    }
                     await sock.sendMessage(sender, { text: '⏳ _Mengambil Data Al-Quran..._' }, { quoted: msg });
                     try {
                         const surahNum = args[0];
@@ -851,7 +1043,10 @@ export default function setupMessageHandler(sock) {
                         const res = await fetch(`http://api.alquran.cloud/v1/surah/${surahNum}/editions/quran-uthmani,id.indonesian,ar.alafasy`);
                         const json = await res.json();
                         
-                        if (json.code !== 200) return await sock.sendMessage(sender, { text: `❌ Gagal mengambil data. Pastikan nomor Surah valid.` }, { quoted: msg });
+                        if (json.code !== 200) {
+                            await sock.sendMessage(sender, { text: `❌ Gagal mengambil data. Pastikan nomor Surah valid.` }, { quoted: msg });
+                            return;
+                        }
 
                         const arabicSurah = json.data[0];
                         const indoSurah = json.data[1];
@@ -863,7 +1058,8 @@ export default function setupMessageHandler(sock) {
                         }
                         
                         if (startAyat < 1 || endAyat > arabicSurah.numberOfAyahs || startAyat > endAyat) {
-                            return await sock.sendMessage(sender, { text: `❌ Range tidak valid. Surah ${arabicSurah.englishName} hanya memiliki ${arabicSurah.numberOfAyahs} ayat.` }, { quoted: msg });
+                            await sock.sendMessage(sender, { text: `❌ Range tidak valid. Surah ${arabicSurah.englishName} hanya memiliki ${arabicSurah.numberOfAyahs} ayat.` }, { quoted: msg });
+                            return;
                         }
                         
                         let replyTexts = [];
@@ -892,7 +1088,7 @@ export default function setupMessageHandler(sock) {
                             await sock.sendMessage(sender, { text: txt });
                         }
                         
-                        // Kirim File Audio hanya jika request 1 ayat saja (agar tidak spam 100 audio jika meminta full)
+                        // Kirim File Audio hanya jika request 1 ayat saja
                         if (startAyat === endAyat) {
                             const audioUrl = audioSurah.ayahs[startAyat - 1].audio;
                             await sock.sendMessage(sender, { text: `🎧 _Mengirimkan audio murottal Syeikh Mishary Rasyid Al-Afasy..._` });
@@ -947,7 +1143,9 @@ export default function setupMessageHandler(sock) {
 
                         replyTxt += `*_Data disinkronkan otomatis dari Web RSUD Kendari._*`;
                         await sock.sendMessage(sender, { text: replyTxt }, { quoted: msg });
-                    } catch (error) { await sock.sendMessage(sender, { text: '❌ *Gagal menghubungkan ke Server API Vercel maupun Google Sheets.*\nPastikan Ekstensi di PC menyala.' }, { quoted: msg }); }
+                    } catch (error) { 
+                        await sock.sendMessage(sender, { text: '❌ *Gagal menghubungkan ke Server API Vercel maupun Google Sheets.*\nPastikan Ekstensi di PC menyala.' }, { quoted: msg }); 
+                    }
                     break;
                     
                 case 'addjadwal':
@@ -1123,6 +1321,8 @@ export default function setupMessageHandler(sock) {
                     await handleStickerCommand(sock, msg); 
                     break;
             }
-        } catch (error) { console.error('Error proses pesan:', error); }
+        } catch (error) { 
+            console.error('Error proses pesan:', error); 
+        }
     });
 }
