@@ -7,11 +7,61 @@ import pino from 'pino';
 import fs from 'fs';
 import process from 'process';
 import cors from 'cors';
-import path from 'path'; // Diperlukan untuk resolusi path absolut
-import { pathToFileURL } from 'url'; // Diperlukan untuk konversi path ESM yang aman di Railway/Docker
+import path from 'path';
+import { pathToFileURL } from 'url';
+
+// ==========================================
+// LOGGER & TERMINAL INTERCEPTOR
+// ==========================================
+// Kita simpan log ke dalam array maksimal 100 baris agar bisa dikirim ke client baru yg connect
+const MAX_LOG_HISTORY = 100;
+const logHistory = [];
+
+const app = express();
+const server = http.createServer(app);
+
+app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
+app.use(express.json({ limit: '10mb' }));
+
+const io = new Server(server, { 
+    cors: { origin: '*', methods: ["GET", "POST"], credentials: true },
+    pingTimeout: 60000 
+});
+
+function broadcastLog(message, type = 'info') {
+    const logEntry = {
+        time: new Date().toLocaleTimeString('id-ID', { hour12: false }),
+        message: String(message).trim(),
+        type: type
+    };
+    if (!logEntry.message) return;
+    
+    logHistory.push(logEntry);
+    if (logHistory.length > MAX_LOG_HISTORY) logHistory.shift();
+    
+    io.emit('terminal_log', logEntry);
+}
+
+// Menyadap console standard Node.js
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+
+console.log = function (...args) {
+    broadcastLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), 'info');
+    originalLog.apply(console, args);
+};
+console.error = function (...args) {
+    broadcastLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), 'error');
+    originalError.apply(console, args);
+};
+console.warn = function (...args) {
+    broadcastLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), 'warn');
+    originalWarn.apply(console, args);
+};
 
 const logger = pino({ level: 'silent' });
-const sessionsPath = './sessions'; // Folder jama untuk multi-session
+const sessionsPath = './sessions';
 const scriptsPath = './src';
 
 if (!fs.existsSync(sessionsPath)) fs.mkdirSync(sessionsPath, { recursive: true });
@@ -58,7 +108,7 @@ async function redisDelete(key) {
 // ==========================================
 // STATE MANAGEMENT (MULTI-BOT)
 // ==========================================
-const bots = new Map(); // Menyimpan state semua bot
+const bots = new Map();
 
 function getSafeBotState(botId) {
     const bot = bots.get(botId);
@@ -83,31 +133,17 @@ function getAvailableScripts() {
     } catch (e) { return ['messageHandler.js']; }
 }
 
-// ==========================================
-// SETUP EXPRESS & SOCKET.IO
-// ==========================================
-const app = express();
-const server = http.createServer(app);
-
-app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
-app.use(express.json({ limit: '10mb' }));
-
-const io = new Server(server, { 
-    cors: { origin: '*', methods: ["GET", "POST"], credentials: true },
-    pingTimeout: 60000 
-});
-
 const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => { res.send('<h2>✅ Multi-Device WhatsApp Bot API is Running!</h2>'); });
 
 process.on('uncaughtException', err => {
     if (String(err).includes('conflict') || String(err).includes('EADDRINUSE')) return;
-    console.log('Caught exception: ', err);
+    console.error('Caught exception: ', err);
 });
 process.on('unhandledRejection', reason => {
     if (String(reason).includes('conflict') || String(reason).includes('EADDRINUSE')) return;
-    console.log('Unhandled Rejection: ', reason);
+    console.error('Unhandled Rejection: ', reason);
 });
 
 // ==========================================
@@ -127,10 +163,9 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
         browser: Browsers.ubuntu('Chrome'), 
         markOnlineOnConnect: true,
-        // PENAMBAHAN FIX: Mencegah error Bad MAC dan crash memori
-        syncFullHistory: false, 
+        syncFullHistory: false, // Mencegah crash memori
         getMessage: async (key) => {
-            // Ini WAJIB untuk mencegah "Failed to decrypt message" saat mereply pesan
+            // WAJIB ADA: Mencegah 'Failed to decrypt message' (Bad MAC) saat melakukan reply chat.
             return {
                 conversation: 'Pesan referensi untuk bot.'
             };
@@ -161,9 +196,10 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
             
             const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
             if (statusCode !== DisconnectReason.loggedOut) {
+                console.warn(`🔄 Koneksi terputus. Mencoba reconnect bot ${botId}...`);
                 setTimeout(() => startBot(botId, scriptName), 5000);
             } else { 
-                console.log(`🚪 Bot ${botId} Logged Out!`);
+                console.log(`🚪 Bot ${botId} Logged Out secara manual!`);
                 botState.status = 'logged_out';
                 io.emit('bot_updated', getSafeBotState(botId));
                 try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e){}
@@ -172,20 +208,16 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
             botState.qr = null;
             botState.status = 'connected';
             botState.startTime = Date.now();
-            console.log(`✅ Bot ${botId} Berhasil Terhubung!`);
+            console.log(`✅ Bot ${botId} Berhasil Terhubung dan Siap Digunakan!`);
             io.emit('bot_updated', getSafeBotState(botId));
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    // ==========================================
-    // FIXED DYNAMIC MODULE RESOLUTION (RAILWAY BYPASS)
-    // ==========================================
     try {
         const absoluteScriptPath = path.resolve(scriptsPath, scriptName);
         if (fs.existsSync(absoluteScriptPath)) {
-            // Gunakan pathToFileURL untuk mengonversi path lokal absolut Linux menjadi format file:/// URI yang valid di ES Module
             const fileUrl = pathToFileURL(absoluteScriptPath).href + `?t=${Date.now()}`;
             const handlerModule = await import(fileUrl);
             if (handlerModule.default) {
@@ -200,18 +232,18 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
 }
 
 // ==========================================
-// SOCKET.IO EVENT HANDLER (MULTI-DEVICE)
+// SOCKET.IO EVENT HANDLER
 // ==========================================
 io.on('connection', (socket) => {
     console.log('🌐 Web client terhubung:', socket.id);
     
-    // Kirim state awal
+    // Kirim state awal & log history
     socket.emit('init_state', {
         bots: Array.from(bots.values()).map(b => getSafeBotState(b.id)),
         scripts: getAvailableScripts()
     });
+    socket.emit('init_logs', logHistory);
 
-    // Request buat bot baru
     socket.on('create_bot', async ({ botId, scriptName }) => {
         if (!botId || botId.trim() === '') return socket.emit('error', 'Nama Bot tidak boleh kosong!');
         if (bots.has(botId)) return socket.emit('error', 'Bot dengan nama tersebut sudah ada!');
@@ -220,7 +252,6 @@ io.on('connection', (socket) => {
         await saveBotsConfig();
     });
 
-    // Request Pairing Code Spesifik Bot
     socket.on('request_pairing', async ({ botId, phoneNumber }) => {
         const bot = bots.get(botId);
         if (bot && bot.sock && bot.status !== 'connected') {
@@ -229,8 +260,10 @@ io.on('connection', (socket) => {
                     let code = await bot.sock.requestPairingCode(phoneNumber);
                     code = code?.match(/.{1,4}/g)?.join("-") || code; 
                     socket.emit('pairing_code', { botId, code });
+                    console.log(`🔑 Pairing Code diminta untuk nomor ${phoneNumber}`);
                 } catch (error) {
-                    socket.emit('error', 'Gagal generate kode. Pastikan nomor benar.');
+                    console.error('Pairing error:', error);
+                    socket.emit('error', 'Gagal generate kode. Pastikan nomor benar tanpa tanda + atau 0 di depan (contoh 62812...).');
                 }
             }, 2000);
         } else {
@@ -238,10 +271,10 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Hapus dan Logout Bot
     socket.on('delete_bot', async ({ botId }) => {
         const bot = bots.get(botId);
         if (bot) {
+            console.log(`🗑️ Menghapus dan Melogout bot ${botId}...`);
             if (bot.status === 'connected' && bot.sock) {
                 try { await bot.sock.logout(); } catch(e){}
             }
@@ -252,13 +285,11 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Upload Script Handler Baru
     socket.on('upload_script', async ({ fileName, content }) => {
         if (!fileName.endsWith('.js')) return socket.emit('error', 'Hanya file .js yang diperbolehkan');
         try {
-            // Simpan ke local storage backend
+            console.log(`📥 Menerima upload script baru: ${fileName}`);
             fs.writeFileSync(`${scriptsPath}/${fileName}`, content);
-            // Backup ke Upstash Redis
             await redisSet(`script:${fileName}`, JSON.stringify(content));
             
             socket.emit('script_uploaded', fileName);
@@ -267,18 +298,14 @@ io.on('connection', (socket) => {
                 scripts: getAvailableScripts()
             });
         } catch (err) {
+            console.error('Upload Error:', err);
             socket.emit('error', 'Gagal menyimpan script');
         }
     });
 });
 
-// ==========================================
-// INISIALISASI STARTUP (SYNC REDIS)
-// ==========================================
 async function initializeSystem() {
     console.log('🔄 Sinkronisasi dengan Upstash Redis...');
-    
-    // 1. Sync Scripts
     const scriptKeys = await redisKeys('script:*');
     for (const key of scriptKeys) {
         const contentStr = await redisGet(key);
@@ -289,7 +316,6 @@ async function initializeSystem() {
         }
     }
 
-    // 2. Sync Bots Configuration
     const configs = await redisGet('bots_config') || [];
     console.log(`🤖 Ditemukan ${configs.length} konfigurasi bot.`);
     
@@ -299,6 +325,6 @@ async function initializeSystem() {
 }
 
 server.listen(port, () => {
-    console.log(`🌐 Multi-Device Bot Server berjalan di port ${port}`);
+    console.log(`🌐 Server Berjalan! Membuka port ${port}...`);
     initializeSystem();
 });
