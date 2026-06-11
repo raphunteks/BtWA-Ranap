@@ -5,7 +5,7 @@ import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
 // ==========================================
-// KONFIGURASI GLOBAL
+// KONFIGURASI GLOBAL & STATE
 // ==========================================
 const ownerNumber = "6285256739684@s.whatsapp.net";
 const GAS_URL = "https://script.google.com/macros/s/AKfycbzhDou1e-e4QXDILWfM_mkyagViYOvcpLLv7xL-kJ6cVhpR_R5_bVICdnUYxp0AA90/exec";
@@ -18,13 +18,20 @@ const settingsFile = `${sessionPath}/settings.json`;
 if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
 
 let botSchedules = [];
-let botSettings = { autoRanap: [], autoRajal: [] };
+// Menambahkan autoSholat ke botSettings
+let botSettings = { autoRanap: [], autoRajal: [], autoSholat: [] };
 
 if (fs.existsSync(schedulesFile)) {
     try { botSchedules = JSON.parse(fs.readFileSync(schedulesFile, 'utf-8')); } catch (e) { }
 }
 if (fs.existsSync(settingsFile)) {
     try { botSettings = { ...botSettings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf-8')) }; } catch (e) { }
+}
+
+// DEFAULT ON UNTUK OWNER (JIKA KOSONG)
+if (!botSettings.autoSholat.includes(ownerNumber)) {
+    botSettings.autoSholat.push(ownerNumber);
+    saveSettings();
 }
 
 function saveSchedules() { fs.writeFileSync(schedulesFile, JSON.stringify(botSchedules, null, 2)); }
@@ -38,6 +45,25 @@ function getRelativeTime(seconds) {
 
 function formatWITA(dateObj) {
     return new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Makassar', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: true }).format(dateObj);
+}
+
+// ==========================================
+// STATE & FUNGSI JADWAL SHOLAT KENDARI
+// ==========================================
+let todaySholatTimes = null;
+let lastDailySholatSent = null; 
+let notifiedPrayers = { Fajr: false, Dhuhr: false, Asr: false, Maghrib: false, Isha: false, date: null };
+
+async function fetchSholatKendari() {
+    try {
+        const res = await fetch("https://api.aladhan.com/v1/timingsByCity?city=Kendari&country=Indonesia&method=20");
+        const json = await res.json();
+        if (json.code === 200) return json.data.timings;
+        return null;
+    } catch (e) {
+        console.error("Gagal fetch API Sholat:", e);
+        return null;
+    }
 }
 
 // ==========================================
@@ -91,7 +117,6 @@ let lastRajalBMData = null;
 let lastRajalPerioData = null; 
 let lastRajalUmumData = null; 
 
-// Mengunci urutan lama, pasien baru selalu ditaruh PALING BAWAH
 function sortChronologically(oldList, newList) {
     const makeKey = (p) => `${p.no_rm}_${p.nama_pasien}`;
     const oldMap = new Map(oldList.map((p, index) => [makeKey(p), index]));
@@ -101,8 +126,8 @@ function sortChronologically(oldList, newList) {
         const idxB = oldMap.has(makeKey(b)) ? oldMap.get(makeKey(b)) : Infinity;
         
         if (idxA !== Infinity && idxB !== Infinity) return idxA - idxB;
-        else if (idxA === Infinity && idxB !== Infinity) return 1; // A baru -> Bawah
-        else if (idxA !== Infinity && idxB === Infinity) return -1; // B baru -> Bawah
+        else if (idxA === Infinity && idxB !== Infinity) return 1; 
+        else if (idxA !== Infinity && idxB === Infinity) return -1;
         else return 0;
     });
 }
@@ -139,7 +164,6 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     let listSelesai = [];
     let listBaru = [];
 
-    // 1. Masukkan pasien yang terhapus dari server (Otomatis dianggap Selesai)
     if (removedList && removedList.length > 0) {
         removedList.forEach(p => {
             listSelesai.push(`${p.nama_pasien} *(SELESAI)*`);
@@ -147,26 +171,21 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
         });
     }
 
-    // 2. Filter list saat ini (Sudah ter-sortir kronologis, yg terbaru pasti di urutan paling bawah)
     currentList.forEach(p => {
         const st = (p.status || "").toUpperCase();
         
-        // PRIORITAS 1: Cek Batal
         if (st.includes("BATAL")) {
             listSelesai.push(`${p.nama_pasien} *(BATAL)*`);
             countSelesai++;
         } 
-        // PRIORITAS 2: Cek Asuhan Keperawatan (Mendahului SATUSEHAT agar tidak salah deteksi sebagai selesai)
         else if (st.includes("ASUHAN KEPERAWATAN")) {
             listBaru.push(`${p.nama_pasien} *(BARU)*`);
             countBaru++;
         } 
-        // PRIORITAS 3: Cek Selesai / Pulang
         else if (st.includes("PULANG") || st.includes("SELESAI") || st.includes("DIPULANGKAN") || st.includes("SATUSEHAT")) {
             listSelesai.push(`${p.nama_pasien} *(SELESAI)*`);
             countSelesai++;
         } 
-        // LAINNYA: Otomatis masuk ke Baru
         else {
             listBaru.push(`${p.nama_pasien} *(BARU)*`);
             countBaru++;
@@ -206,9 +225,7 @@ async function forceSendRanapPrimer(sock, jid) {
             msg += `\n📊 *Total Saat Ini:* ${currentRanap.length} Pasien`;
             await sock.sendMessage(jid, { text: msg });
         }
-    } catch (e) {
-        console.error("Gagal load primer Ranap:", e);
-    }
+    } catch (e) { console.error("Gagal load primer Ranap:", e); }
 }
 
 async function forceSendRajalPrimer(sock, jid) {
@@ -216,7 +233,6 @@ async function forceSendRajalPrimer(sock, jid) {
         await sock.sendMessage(jid, { text: `⏳ _Menyiapkan Data Primer Rawat Jalan..._` });
         const dateWITA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
         
-        // HANYA FETCH DARI API RIWAYAT SESUAI PERMINTAAN (Menghindari Duplikat)
         const [dataEndo, dataBM, dataPerio, dataUmum] = await Promise.all([
             fetchWithFallback('RajalEndo_RiwayatAntrianPx', `tanggal=${dateWITA}`),
             fetchWithFallback('RajalBM_RiwayatAntrianPx', `tanggal=${dateWITA}`),
@@ -229,7 +245,6 @@ async function forceSendRajalPrimer(sock, jid) {
         const currentPerioRaw = dataPerio.data || [];
         const currentUmumRaw = dataUmum.data || [];
 
-        // Sortir kronologis meskipun ini data primer, untuk baseline
         const currentEndo = sortChronologically(lastRajalEndoData || [], currentEndoRaw);
         const currentBM = sortChronologically(lastRajalBMData || [], currentBMRaw);
         const currentPerio = sortChronologically(lastRajalPerioData || [], currentPerioRaw);
@@ -256,13 +271,11 @@ async function forceSendRajalPrimer(sock, jid) {
         msg += `📊 *Total Antrean (SELESAI/BATAL):* Endo (${formatEndo.selesai}), BM (${formatBM.selesai}), Perio (${formatPerio.selesai}), Umum (${formatUmum.selesai})`;
         
         await sock.sendMessage(jid, { text: msg });
-    } catch (e) {
-        console.error("Gagal load primer Rajal:", e);
-    }
+    } catch (e) { console.error("Gagal load primer Rajal:", e); }
 }
 
 // ==========================================
-// POLLING API AUTO-UPDATE
+// POLLING API AUTO-UPDATE & JADWAL SHOLAT
 // ==========================================
 async function checkApiUpdates(sock) {
     if (!sock) return;
@@ -284,7 +297,6 @@ async function checkApiUpdates(sock) {
                     const { added, removed } = getDifferences(lastRanapData, currentRanap);
                     if (added.length > 0 || removed.length > 0) {
                         let msg = `🏥 *AUTO INFO: RAWAT INAP*\n_Mendeteksi perubahan data manifest._\n\n`;
-                        
                         if (added.length > 0) {
                             msg += `🟢 *PASIEN MASUK/BARU (${added.length}):*\n`;
                             added.forEach((p, i) => msg += `${i+1}. ${p.nama_pasien} *(BARU)*\n   🛏️ ${p.ruangan}\n`);
@@ -308,8 +320,6 @@ async function checkApiUpdates(sock) {
         // =======================================
         if (botSettings.autoRajal.length > 0) {
             const dateWITA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
-            
-            // HANYA FETCH DARI API RIWAYAT SESUAI PERMINTAAN (Menghindari Duplikat)
             const [dataEndo, dataBM, dataPerio, dataUmum] = await Promise.all([
                 fetchWithFallback('RajalEndo_RiwayatAntrianPx', `tanggal=${dateWITA}`),
                 fetchWithFallback('RajalBM_RiwayatAntrianPx', `tanggal=${dateWITA}`),
@@ -322,7 +332,6 @@ async function checkApiUpdates(sock) {
             const currentPerioRaw = dataPerio.data || [];
             const currentUmumRaw = dataUmum.data || [];
 
-            // Urutkan kronologis: Pertahankan urutan lama, pasien baru selalu jatuh ke paling bawah
             const currentEndo = sortChronologically(lastRajalEndoData || [], currentEndoRaw);
             const currentBM = sortChronologically(lastRajalBMData || [], currentBMRaw);
             const currentPerio = sortChronologically(lastRajalPerioData || [], currentPerioRaw);
@@ -334,20 +343,14 @@ async function checkApiUpdates(sock) {
                 const diffPerio = getDifferences(lastRajalPerioData, currentPerio);
                 const diffUmum = getDifferences(lastRajalUmumData, currentUmum);
                 
-                // Jika ada update data apa pun di salah satu klinik
                 if (diffEndo.hasDiff || diffBM.hasDiff || diffPerio.hasDiff || diffUmum.hasDiff) {
                     let msg = `🏥 *AUTO INFO: RAWAT JALAN*\n_Perubahan antrean tanggal ${dateWITA}._\n\n`;
-                    
                     const formatEndo = formatKlinikList("ENDODONSI", "🦷", currentEndo, diffEndo.removed);
                     const formatPerio = formatKlinikList("PERIODONSIA", "🩺", currentPerio, diffPerio.removed);
                     const formatBM = formatKlinikList("Bedah Mulut", "💉", currentBM, diffBM.removed);
                     const formatUmum = formatKlinikList("Gigi/Umum", "🪥", currentUmum, diffUmum.removed);
 
-                    msg += formatEndo.txt;
-                    msg += formatPerio.txt;
-                    msg += formatBM.txt;
-                    msg += formatUmum.txt;
-
+                    msg += formatEndo.txt + formatPerio.txt + formatBM.txt + formatUmum.txt;
                     msg += `📊 *Total Antrean (BARU: BELUM DIKERJA):* Endo (${formatEndo.baru}), BM (${formatBM.baru}), Perio (${formatPerio.baru}), Umum (${formatUmum.baru})\n`;
                     msg += `📊 *Total Antrean (SELESAI/BATAL):* Endo (${formatEndo.selesai}), BM (${formatBM.selesai}), Perio (${formatPerio.selesai}), Umum (${formatUmum.selesai})`;
                     
@@ -362,6 +365,66 @@ async function checkApiUpdates(sock) {
     } catch (e) { console.error("[Auto Info] Error polling API:", e); }
 }
 
+async function checkSholatSchedule(sock) {
+    if (!sock || botSettings.autoSholat.length === 0) return;
+    
+    try {
+        const now = new Date();
+        const dateWITA = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
+        const timeWITA = now.toLocaleTimeString('en-GB', { timeZone: 'Asia/Makassar', hour: '2-digit', minute: '2-digit' });
+
+        // Reset state jika berganti hari
+        if (notifiedPrayers.date !== dateWITA) {
+            notifiedPrayers = { Fajr: false, Dhuhr: false, Asr: false, Maghrib: false, Isha: false, date: dateWITA };
+            todaySholatTimes = await fetchSholatKendari();
+        }
+
+        // Broadcast Daily Jam 00:01 (Atau saat bot baru restart di hari tsb)
+        if (lastDailySholatSent !== dateWITA && todaySholatTimes) {
+            const sholatMsg = `🕌 *JADWAL SHOLAT KENDARI & SEKITARNYA*\n🗓️ *Tanggal:* ${dateWITA}\n\n` +
+                              `🌅 Imsak: ${todaySholatTimes.Imsak} WITA\n` +
+                              `🌄 *Subuh:* ${todaySholatTimes.Fajr} WITA\n` +
+                              `☀️ Terbit: ${todaySholatTimes.Sunrise} WITA\n` +
+                              `🕛 *Dzuhur:* ${todaySholatTimes.Dhuhr} WITA\n` +
+                              `🕝 *Ashar:* ${todaySholatTimes.Asr} WITA\n` +
+                              `🌇 *Maghrib:* ${todaySholatTimes.Maghrib} WITA\n` +
+                              `🌃 *Isya:* ${todaySholatTimes.Isha} WITA\n\n` +
+                              `_Bot akan memberikan notifikasi saat memasuki waktu sholat._`;
+            
+            for (const jid of botSettings.autoSholat) {
+                await sock.sendMessage(jid, { text: sholatMsg });
+            }
+            lastDailySholatSent = dateWITA;
+        }
+
+        // Pengecekan Waktu Masuk Sholat (Real-time)
+        if (todaySholatTimes) {
+            const prayersToCheck = [
+                { id: 'Fajr', name: 'Subuh', emoji: '🌄' },
+                { id: 'Dhuhr', name: 'Dzuhur', emoji: '🕛' },
+                { id: 'Asr', name: 'Ashar', emoji: '🕝' },
+                { id: 'Maghrib', name: 'Maghrib', emoji: '🌇' },
+                { id: 'Isha', name: 'Isya', emoji: '🌃' }
+            ];
+
+            for (const prayer of prayersToCheck) {
+                if (timeWITA === todaySholatTimes[prayer.id] && !notifiedPrayers[prayer.id]) {
+                    const alertMsg = `${prayer.emoji} *PENGINGAT WAKTU SHOLAT*\n\n` +
+                                     `Telah masuk waktu sholat *${prayer.name}* (${timeWITA} WITA) untuk wilayah Kendari dan sekitarnya.\n\n` +
+                                     `_Mari sejenak hentikan aktivitas dan laksanakan sholat._`;
+                    
+                    for (const jid of botSettings.autoSholat) {
+                        await sock.sendMessage(jid, { text: alertMsg });
+                    }
+                    notifiedPrayers[prayer.id] = true; // Tandai sudah dikirim
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Gagal memeriksa jadwal sholat:", e);
+    }
+}
+
 // ==========================================
 // EXPORT HANDLER
 // ==========================================
@@ -372,6 +435,7 @@ export default function setupMessageHandler(sock) {
     currentSock = sock; 
 
     if (!isIntervalStarted) {
+        // Interval Tugas Tertunda (30s)
         setInterval(async () => {
             if (!currentSock) return;
             const now = Date.now(); let hasChanges = false;
@@ -385,9 +449,15 @@ export default function setupMessageHandler(sock) {
             if (hasChanges) { botSchedules = botSchedules.filter(s => s.status === 'pending'); saveSchedules(); }
         }, 30000); 
 
+        // Interval Cek RSUD (60s)
         setInterval(() => {
             if (currentSock) checkApiUpdates(currentSock);
         }, 60000);
+
+        // Interval Cek Sholat (setiap 30s agar lebih akurat)
+        setInterval(() => {
+            if (currentSock) checkSholatSchedule(currentSock);
+        }, 30000);
 
         isIntervalStarted = true;
     }
@@ -491,8 +561,14 @@ export default function setupMessageHandler(sock) {
                                      `* !cekrajalantrianpxumumbsk*\n\n` +
                                      `*🔔 AUTO INFO (GROUP/CHAT):*\n` +
                                      `* !autoranap on/off* - Notif Otomatis Ranap\n` +
-                                     `* !autorajal on/off* - Notif Otomatis Rajal\n\n` +
+                                     `* !autorajal on/off* - Notif Otomatis Rajal\n` +
+                                     `* !autoinfosholat on/off* - Notif & Pengingat Sholat\n\n` +
+                                     `*📖 AL-QURAN & ISLAMI:*\n` +
+                                     `* !listsurah* - Menampilkan daftar ke-114 Surah\n` +
+                                     `* !surah <nomor>* - Menampilkan info Surah spesifik\n` +
+                                     `* !ayat <surah> <ayat>* - Teks, Arti, & Audio Ayat\n\n` +
                                      `*⚙️ SISTEM & LAINNYA:*\n` +
+                                     `* !settings* - Lihat fitur otomatis yang aktif\n` +
                                      `* !refresh* - 🔄 Paksa Ekstensi Scrape!\n` +
                                      `* !addjadwal* - Tambah auto-send\n` +
                                      `* !listjadwal* - Lihat auto-send\n` +
@@ -501,6 +577,46 @@ export default function setupMessageHandler(sock) {
                                      `* !runtime* - Cek sistem info\n` +
                                      `* !tagall* - Tag semua member grup\n`;
                     await sock.sendMessage(sender, { text: menuText }, { quoted: msg });
+                    break;
+
+                case 'settings':
+                    const ranapActive = botSettings.autoRanap.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const rajalActive = botSettings.autoRajal.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const sholatActive = botSettings.autoSholat.includes(sender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    
+                    let setsMsg = `⚙️ *PENGATURAN BOT DI CHAT INI*\n\n` +
+                                  `🏥 *Auto Info Rawat Inap:* ${ranapActive}\n` +
+                                  `🏥 *Auto Info Rawat Jalan:* ${rajalActive}\n` +
+                                  `🕌 *Auto Info Sholat (Kendari):* ${sholatActive}\n\n` +
+                                  `_Gunakan command *!autoranap on*, *!autorajal on*, atau *!autoinfosholat on* untuk mengaktifkan fitur._`;
+                    
+                    await sock.sendMessage(sender, { text: setsMsg }, { quoted: msg });
+                    break;
+
+                case 'autoinfosholat':
+                    if (args[0] === 'on') {
+                        if (!botSettings.autoSholat.includes(sender)) botSettings.autoSholat.push(sender);
+                        saveSettings();
+                        await sock.sendMessage(sender, { text: '✅ *Auto Info & Pengingat Sholat AKTIF* di obrolan ini.\nBot akan otomatis mengirim jadwal pada 00:01 WITA dan mengingatkan tepat pada waktu sholat (Khusus Kendari).' }, { quoted: msg });
+                        
+                        // Cek jika data hari ini sudah ada, langsung kirim baselinenya ke chat tsb
+                        if (todaySholatTimes) {
+                            const sholatMsg = `🕌 *JADWAL SHOLAT KENDARI HARI INI*\n\n` +
+                                              `🌅 Imsak: ${todaySholatTimes.Imsak} WITA\n` +
+                                              `🌄 *Subuh:* ${todaySholatTimes.Fajr} WITA\n` +
+                                              `🕛 *Dzuhur:* ${todaySholatTimes.Dhuhr} WITA\n` +
+                                              `🕝 *Ashar:* ${todaySholatTimes.Asr} WITA\n` +
+                                              `🌇 *Maghrib:* ${todaySholatTimes.Maghrib} WITA\n` +
+                                              `🌃 *Isya:* ${todaySholatTimes.Isha} WITA`;
+                            await sock.sendMessage(sender, { text: sholatMsg });
+                        }
+                    } else if (args[0] === 'off') {
+                        botSettings.autoSholat = botSettings.autoSholat.filter(jid => jid !== sender);
+                        saveSettings();
+                        await sock.sendMessage(sender, { text: '❌ *Auto Info & Pengingat Sholat NONAKTIF* di obrolan ini.' }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoinfosholat on* atau *!autoinfosholat off*' }, { quoted: msg });
+                    }
                     break;
 
                 case 'autoranap':
@@ -530,6 +646,78 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(sender, { text: '❌ *Auto Info Rawat Jalan NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else {
                         await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autorajal on* atau *!autorajal off*' }, { quoted: msg });
+                    }
+                    break;
+
+                case 'listsurah':
+                    await sock.sendMessage(sender, { text: '⏳ _Mengambil daftar Surah..._' }, { quoted: msg });
+                    try {
+                        const res = await fetch("http://api.alquran.cloud/v1/surah");
+                        const json = await res.json();
+                        let reply = `📖 *DAFTAR 114 SURAH AL-QURAN*\n\n`;
+                        json.data.forEach(s => {
+                            reply += `*${s.number}. ${s.englishName}* (${s.name}) - ${s.numberOfAyahs} Ayat\n`;
+                        });
+                        reply += `\n_Ketik *!surah <nomor>* untuk detail info Surah._\n_Ketik *!ayat <nomor_surah> <nomor_ayat>* untuk dengar audio ayat._`;
+                        await sock.sendMessage(sender, { text: reply }, { quoted: msg });
+                    } catch (e) { await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); }
+                    break;
+
+                case 'surah':
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Sertakan nomor surah!*\nContoh: !surah 1 (Untuk Al-Fatihah)' }, { quoted: msg });
+                    try {
+                        const num = parseInt(args[0]);
+                        const res = await fetch(`http://api.alquran.cloud/v1/surah/${num}`);
+                        const json = await res.json();
+                        if (json.code !== 200) return await sock.sendMessage(sender, { text: `❌ Surah tidak ditemukan.` });
+                        
+                        const s = json.data;
+                        const info = `📖 *INFORMASI SURAH*\n\n` +
+                                     `🔢 *Nomor:* ${s.number}\n` +
+                                     `📜 *Nama:* ${s.englishName} (${s.name})\n` +
+                                     `📝 *Arti:* ${s.englishNameTranslation}\n` +
+                                     `📍 *Turun di:* ${s.revelationType === 'Meccan' ? 'Makkah' : 'Madinah'}\n` +
+                                     `📏 *Jumlah Ayat:* ${s.numberOfAyahs} Ayat\n\n` +
+                                     `_Gunakan *!ayat ${s.number} 1* untuk melihat & memutar audio ayat pertama dari surah ini._`;
+                        await sock.sendMessage(sender, { text: info }, { quoted: msg });
+                    } catch (e) { await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); }
+                    break;
+
+                case 'ayat':
+                    if (args.length < 2) return await sock.sendMessage(sender, { text: '⚠️ *Format Salah!*\nGunakan: *!ayat <nomor_surah> <nomor_ayat>*\nContoh: *!ayat 1 2* (Untuk Al-Fatihah ayat 2)' }, { quoted: msg });
+                    await sock.sendMessage(sender, { text: '⏳ _Mengambil Teks & Audio Murottal..._' }, { quoted: msg });
+                    try {
+                        const surahNum = args[0];
+                        const ayatNum = args[1];
+                        
+                        // Fetching 3 edisi sekaligus: Arabic (Teks), Indonesian (Arti), ar.alafasy (Audio)
+                        const res = await fetch(`http://api.alquran.cloud/v1/ayah/${surahNum}:${ayatNum}/editions/quran-uthmani,id.indonesian,ar.alafasy`);
+                        const json = await res.json();
+                        
+                        if (json.code !== 200) return await sock.sendMessage(sender, { text: `❌ Gagal mengambil data. Pastikan nomor Surah dan Ayat valid.` }, { quoted: msg });
+
+                        const arabicData = json.data[0];
+                        const indoData = json.data[1];
+                        const audioData = json.data[2];
+
+                        const txt = `📖 *Surah ${arabicData.surah.englishName}* (${arabicData.surah.name}) - Ayat ${arabicData.numberInSurah}\n\n` +
+                                    `*${arabicData.text}*\n\n` +
+                                    `📝 *Terjemahan (ID):*\n_${indoData.text}_\n\n` +
+                                    `🎧 _Mengirimkan audio murottal Syeikh Mishari Rasyid Al-Afasi..._`;
+
+                        // Send Text
+                        await sock.sendMessage(sender, { text: txt }, { quoted: msg });
+                        // Send Audio File
+                        if (audioData.audio) {
+                            await sock.sendMessage(sender, { 
+                                audio: { url: audioData.audio }, 
+                                mimetype: 'audio/mp4', 
+                                ptt: false // Set false agar terkirim sebagai File Musik, bukan Voice Note
+                            }, { quoted: msg });
+                        }
+                    } catch (e) { 
+                        console.error("Error Quran:", e);
+                        await sock.sendMessage(sender, { text: '❌ *Gagal memuat atau mengirim dari API Al-Quran.*' }); 
                     }
                     break;
 
