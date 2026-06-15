@@ -10,16 +10,19 @@ import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
 // ==========================================
-// KONFIGURASI GLOBAL & API
+// KONFIGURASI GLOBAL & API (MENGGUNAKAN ENV RAILWAY)
 // ==========================================
-const ownerNumber = "6285256739684@s.whatsapp.net";
+const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 
 // URL RSUD / KLINIK
-const GAS_URL_RSUD = "https://script.google.com/macros/s/AKfycbzhDou1e-e4QXDILWfM_mkyagViYOvcpLLv7xL-kJ6cVhpR_R5_bVICdnUYxp0AA90/exec";
+const GAS_URL_RSUD = process.env.GAS_URL_RSUD || "https://script.google.com/macros/s/AKfycbzhDou1e-e4QXDILWfM_mkyagViYOvcpLLv7xL-kJ6cVhpR_R5_bVICdnUYxp0AA90/exec";
 
 // URL MONEY TRACKER & GEMINI AI
-const MONEY_GAS_URL = "https://script.google.com/macros/s/AKfycbw38Tsw-C6-SMTWjyh-y2b2rzT7_rHH6K4JHHpy7vikCHWdyj20lxAdu-9cS4hPNIEJ/exec";
-const genAI = new GoogleGenerativeAI("AQ.Ab8RN6Kv0O5noBbl4INzrZXC_zngVYJY04j38XLHpRmn371VzA");
+const MONEY_GAS_URL = process.env.MONEY_GAS_URL || "https://script.google.com/macros/s/AKfycbw38Tsw-C6-SMTWjyh-y2b2rzT7_rHH6K4JHHpy7vikCHWdyj20lxAdu-9cS4hPNIEJ/exec";
+
+// Gunakan API Key Gemini dari Environment Variable
+const geminiApiKey = process.env.GEMINI_API_KEY || "AQ.Ab8RN6Kv0O5noBbl4INzrZXC_zngVYJY04j38XLHpRmn371VzA";
+const genAI = new GoogleGenerativeAI(geminiApiKey);
 
 const botStartTime = new Date(); 
 
