@@ -21,7 +21,7 @@ const GAS_URL_RSUD = process.env.GAS_URL_RSUD || "https://script.google.com/macr
 const MONEY_GAS_URL = process.env.MONEY_GAS_URL || "https://script.google.com/macros/s/AKfycbw38Tsw-C6-SMTWjyh-y2b2rzT7_rHH6K4JHHpy7vikCHWdyj20lxAdu-9cS4hPNIEJ/exec";
 
 // Gunakan API Key Gemini dari Environment Variable
-const geminiApiKey = process.env.GEMINI_API_KEY || "AQ.Ab8RN6Kv0O5noBbl4INzrZXC_zngVYJY04j38XLHpRmn371VzA";
+const geminiApiKey = process.env.GEMINI_API_KEY || "AQ.Ab8RN6IIstqRK_PbyJzEIf0DHhboOMWfRVYIclHrUM8mORdYNw";
 const genAI = new GoogleGenerativeAI(geminiApiKey);
 
 const botStartTime = new Date(); 
