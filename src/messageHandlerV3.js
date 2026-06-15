@@ -2,16 +2,12 @@ import fs from 'fs';
 import process from 'process';
 import os from 'os';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // Jika Anda menggunakan command handler terpisah (pastikan file ini ada di direktori Anda)
 // Jika tidak ada, Anda bisa menghapus import ini dan case 'ai' / 'sticker' di bawah.
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
-// ==========================================
-// KONFIGURASI GLOBAL & API (MENGGUNAKAN ENV RAILWAY)
-// ==========================================
 const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 
 // URL RSUD / KLINIK
@@ -20,9 +16,8 @@ const GAS_URL_RSUD = process.env.GAS_URL_RSUD || "https://script.google.com/macr
 // URL MONEY TRACKER & GEMINI AI
 const MONEY_GAS_URL = process.env.MONEY_GAS_URL || "https://script.google.com/macros/s/AKfycbw38Tsw-C6-SMTWjyh-y2b2rzT7_rHH6K4JHHpy7vikCHWdyj20lxAdu-9cS4hPNIEJ/exec";
 
-// Gunakan API Key Gemini dari Environment Variable
-const geminiApiKey = process.env.GEMINI_API_KEY || "AQ.Ab8RN6IIstqRK_PbyJzEIf0DHhboOMWfRVYIclHrUM8mORdYNw";
-const genAI = new GoogleGenerativeAI(geminiApiKey);
+// Gunakan API Key / Token Gemini dari Environment Variable
+const geminiApiKey = process.env.GEMINI_API_KEY || "AQ.Ab8RN6Kv0O5noBbl4INzrZXC_zngVYJY04j38XLHpRmn371VzA";
 
 const botStartTime = new Date(); 
 
@@ -68,9 +63,6 @@ function formatWITA(dateObj) {
     }).format(dateObj);
 }
 
-// ==========================================
-// FUNGSI HELPER: MONEY TRACKER & AI
-// ==========================================
 async function sendToFinanceGAS(action, payload) {
     try {
         const response = await fetch(MONEY_GAS_URL, {
@@ -85,13 +77,12 @@ async function sendToFinanceGAS(action, payload) {
     }
 }
 
+/**
+ * Fungsi Cerdas Gemini 3.5 Flash REST API:
+ * Mendukung deteksi otomatis antara API Key (AIza...) dan Access Token (AQ...)
+ */
 async function aiCategorizeFinance(text = "", mediaBuffer = null, mimeType = null) {
     try {
-        const model = genAI.getGenerativeModel({ 
-            model: "gemini-1.5-flash", 
-            generationConfig: { responseMimeType: "application/json" } 
-        });
-        
         const prompt = `Kamu adalah asisten keuangan AI cerdas. Analisis input (bisa berupa teks keluhan/catatan, foto struk, atau transkrip Voice Note) dan ekstrak datanya ke dalam format JSON yang ketat.
         
         WAJIB gunakan format struktur JSON ini (hanya JSON, tanpa markdown): 
@@ -114,17 +105,61 @@ async function aiCategorizeFinance(text = "", mediaBuffer = null, mimeType = nul
             });
         }
 
-        const result = await model.generateContent(parts);
-        return JSON.parse(result.response.text());
+        const payload = {
+            contents: [{ parts: parts }],
+            generationConfig: {
+                responseMimeType: "application/json"
+            }
+        };
+
+        // Menggunakan model Gemini 3.5 Flash terbaru secara langsung
+        const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent";
+        
+        // Setup Header Dinamis berdasarkan jenis Key
+        let headers = {
+            'Content-Type': 'application/json'
+        };
+
+        const trimmedKey = geminiApiKey.trim();
+
+        if (trimmedKey.startsWith('AIza')) {
+            // Jika menggunakan API Key standar
+            headers['x-goog-api-key'] = trimmedKey;
+            console.log("[Gemini 3.5] Menggunakan auth tipe API-KEY (AIza)");
+        } else if (trimmedKey.startsWith('AQ')) {
+            // Jika menggunakan Access Token Gratis Google Workspace / Cloud Session
+            headers['Authorization'] = `Bearer ${trimmedKey}`;
+            console.log("[Gemini 3.5] Menggunakan auth tipe BEARER-TOKEN (AQ)");
+        } else {
+            // Default fallback
+            headers['x-goog-api-key'] = trimmedKey;
+        }
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errResponse = await response.text();
+            throw new Error(`Google API Error (${response.status}): ${errResponse}`);
+        }
+
+        const result = await response.json();
+        const responseText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        
+        if (!responseText) {
+            throw new Error("Respons teks kosong dari Gemini 3.5.");
+        }
+
+        return JSON.parse(responseText.trim());
     } catch (error) {
         console.error("[AI Error]", error);
-        throw new Error("AI gagal memproses input. Pastikan struk atau suara cukup jelas.");
+        throw new Error(`AI Gemini 3.5 gagal memproses input: ${error.message}`);
     }
 }
 
-// ==========================================
-// FUNGSI PINTAR: FETCH WITH FALLBACK (RSUD)
-// ==========================================
 async function fetchWithFallback(endpointName, queryParams = "") {
     try {
         const vercelUrl = `https://ishiprsud.vercel.app/api/${endpointName}${queryParams ? '?' + queryParams : ''}`;
@@ -163,9 +198,6 @@ async function fetchWithFallback(endpointName, queryParams = "") {
     }
 }
 
-// ==========================================
-// SMART CHRONOLOGICAL SORTING & DIFF ALGORITHM (RSUD)
-// ==========================================
 let lastRanapData = null;
 let lastRajalEndoData = null;
 let lastRajalBMData = null;
@@ -346,7 +378,7 @@ export default function setupMessageHandler(sock) {
                                      `* !jadwalranap* - Cek pasien Rawat Inap\n` +
                                      `* !cekrajal...* - (Cek command rajal)\n\n` +
                                      
-                                     `*💸 MONEY TRACKER (AI POWERED):*\n` +
+                                     `*💸 MONEY TRACKER (AI POWERED GEMINI 3.5):*\n` +
                                      `* !catat [teks/struk/vn]* - AI Catat Keuangan\n` +
                                      `* !baseline* - Cek Saldo & Pemasukan Bulan Ini\n` +
                                      `* !emergencyfund <pengeluaran>* - Hitung Dana Darurat\n` +
@@ -367,7 +399,7 @@ export default function setupMessageHandler(sock) {
                 // BLOK MONEY TRACKER COMMANDS
                 // =====================================
                 case 'catat':
-                    await sock.sendMessage(sender, { text: "⏳ _AI sedang memproses input keuanganmu..._" }, { quoted: msg });
+                    await sock.sendMessage(sender, { text: "⏳ _AI Gemini 3.5 sedang memproses input keuanganmu..._" }, { quoted: msg });
                     try {
                         const quotedMsg = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
                         const isImage = msg.message.imageMessage || quotedMsg?.imageMessage;
@@ -397,7 +429,7 @@ export default function setupMessageHandler(sock) {
                         const gasRes = await sendToFinanceGAS('add_record', aiData);
 
                         if (gasRes.status === 'success') {
-                            const reply = `✅ *Tercatat Otomatis oleh AI!*\n\n` +
+                            const reply = `✅ *Tercatat Otomatis oleh AI Gemini 3.5!*\n\n` +
                                           `Tipe: ${aiData.tipe.toUpperCase()}\n` +
                                           `Kategori: ${aiData.kategori}\n` +
                                           `Keterangan: ${aiData.keterangan}\n` +
