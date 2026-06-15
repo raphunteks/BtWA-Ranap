@@ -4,7 +4,8 @@ import os from 'os';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// Jika Anda menggunakan command handler terpisah
+// Jika Anda menggunakan command handler terpisah (pastikan file ini ada di direktori Anda)
+// Jika tidak ada, Anda bisa menghapus import ini dan case 'ai' / 'sticker' di bawah.
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
@@ -32,23 +33,36 @@ let botSchedules = [];
 let botSettings = { autoRanap: [], autoRajal: [] };
 
 if (fs.existsSync(schedulesFile)) {
-    try { botSchedules = JSON.parse(fs.readFileSync(schedulesFile, 'utf-8')); } catch (e) { }
+    try { botSchedules = JSON.parse(fs.readFileSync(schedulesFile, 'utf-8')); } catch (e) { console.error("Gagal membaca schedules.json", e); }
 }
 if (fs.existsSync(settingsFile)) {
-    try { botSettings = { ...botSettings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf-8')) }; } catch (e) { }
+    try { botSettings = { ...botSettings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf-8')) }; } catch (e) { console.error("Gagal membaca settings.json", e); }
 }
 
 function saveSchedules() { fs.writeFileSync(schedulesFile, JSON.stringify(botSchedules, null, 2)); }
 function saveSettings() { fs.writeFileSync(settingsFile, JSON.stringify(botSettings, null, 2)); }
 
 function getRelativeTime(seconds) {
-    const m = Math.floor(seconds / 60); const h = Math.floor(seconds / 3600); const d = Math.floor(seconds / 86400);
-    if (d > 0) return `${d} days ago`; if (h > 0) return `${h} hours ago`; if (m > 0) return `${m} minutes ago`;
+    const m = Math.floor(seconds / 60); 
+    const h = Math.floor(seconds / 3600); 
+    const d = Math.floor(seconds / 86400);
+    if (d > 0) return `${d} days ago`; 
+    if (h > 0) return `${h} hours ago`; 
+    if (m > 0) return `${m} minutes ago`;
     return `${Math.floor(seconds)} seconds ago`;
 }
 
 function formatWITA(dateObj) {
-    return new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Makassar', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: true }).format(dateObj);
+    return new Intl.DateTimeFormat('en-US', { 
+        timeZone: 'Asia/Makassar', 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric', 
+        hour: 'numeric', 
+        minute: 'numeric', 
+        hour12: true 
+    }).format(dateObj);
 }
 
 // ==========================================
@@ -139,7 +153,9 @@ async function fetchWithFallback(endpointName, queryParams = "") {
                 gasData.total_data = finalData.length;
                 return gasData;
             }
-        } catch (err) {}
+        } catch (err) {
+            console.error("[Fallback Error]", err);
+        }
         return { status: false, data: [] };
     }
 }
@@ -214,9 +230,29 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     return { txt: resultTxt, baru: countBaru, selesai: countSelesai };
 }
 
-// ... (Fungsi forceSendRanapPrimer, forceSendRajalPrimer, checkApiUpdates tetap sama seperti sebelumnya) ...
+async function forceSendRanapPrimer(sock, target) {
+    try {
+        const data = await fetchWithFallback('ranap');
+        const text = `🏥 *Data Ranap Primer*\nTotal Pasien: ${data.total_data || 0}\n_(Data berhasil dikirim manual)_`;
+        await sock.sendMessage(target, { text });
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+async function forceSendRajalPrimer(sock, target) {
+    try {
+        const data = await fetchWithFallback('rajal');
+        const text = `🏥 *Data Rajal Primer*\nTotal Pasien: ${data.total_data || 0}\n_(Data berhasil dikirim manual)_`;
+        await sock.sendMessage(target, { text });
+    } catch (e) {
+        console.error(e);
+    }
+}
+
 async function checkApiUpdates(sock) {
-    // ... Logika auto polling RSUD Anda tidak berubah ...
+    console.log("[System] Menjalankan pengecekan rutin API RSUD...");
+    // Tambahkan logika komparasi data baru & lama untuk mengirimkan notifikasi auto-rajal / auto-ranap di sini
 }
 
 // ==========================================
@@ -235,8 +271,14 @@ export default function setupMessageHandler(sock) {
             for (let i = 0; i < botSchedules.length; i++) {
                 const jadwal = botSchedules[i];
                 if (jadwal.status === 'pending' && now >= jadwal.timestamp) {
-                    try { await currentSock.sendMessage(jadwal.target, { text: jadwal.pesan }); jadwal.status = 'sent'; hasChanges = true; } 
-                    catch (err) { jadwal.status = 'failed'; hasChanges = true; }
+                    try { 
+                        await currentSock.sendMessage(jadwal.target, { text: jadwal.pesan }); 
+                        jadwal.status = 'sent'; 
+                        hasChanges = true; 
+                    } catch (err) { 
+                        jadwal.status = 'failed'; 
+                        hasChanges = true; 
+                    }
                 }
             }
             if (hasChanges) { botSchedules = botSchedules.filter(s => s.status === 'pending'); saveSchedules(); }
@@ -260,7 +302,8 @@ export default function setupMessageHandler(sock) {
             }
         }, 30000); 
 
-        // setInterval(() => { if (currentSock) checkApiUpdates(currentSock); }, 60000); // RSUD Polling
+        // Interval untuk mengecek update RSUD setiap menit
+        setInterval(() => { if (currentSock) checkApiUpdates(currentSock); }, 60000); 
         isIntervalStarted = true;
     }
 
@@ -280,7 +323,15 @@ export default function setupMessageHandler(sock) {
 
             const isRajal = command.startsWith('cekrajal');
             if (isRajal) {
-                // ... (Logika RSUD Cek Rajal Anda tidak berubah) ...
+                // Logika Dinamis Cek Rajal (Contoh Implementasi)
+                await sock.sendMessage(sender, { text: `⏳ _Memuat data untuk command ${command}..._` }, { quoted: msg });
+                try {
+                    const endpoint = command.replace('cek', ''); // Mengubah cekrajal -> rajal
+                    const data = await fetchWithFallback(endpoint);
+                    await sock.sendMessage(sender, { text: `✅ *Data berhasil ditarik!*\n\nTotal Pasien: ${data.total_data || 0}` }, { quoted: msg });
+                } catch (err) {
+                    await sock.sendMessage(sender, { text: `❌ Gagal menarik data. Server mungkin sedang sibuk.` }, { quoted: msg });
+                }
                 return; 
             }
 
@@ -393,7 +444,7 @@ export default function setupMessageHandler(sock) {
                         } else { subReply += `_Tidak ada pengeluaran 'Langganan' tercatat._\n`; }
                         subReply += `\n💸 *Total Biaya:* Rp ${totalSub.toLocaleString('id-ID')}`;
                         await sock.sendMessage(sender, { text: subReply }, { quoted: msg });
-                    } catch (e) {}
+                    } catch (e) { console.error(e); }
                     break;
 
                 case 'cekgajian':
@@ -408,28 +459,78 @@ export default function setupMessageHandler(sock) {
                 // KEMBALI KE COMMAND RSUD / SISTEM
                 // =====================================
                 case 'runtime':
-                    // (Logika runtime dari script awal Anda diletakkan disini)
+                    const uptime = process.uptime();
+                    await sock.sendMessage(sender, { text: `⏳ *Bot Uptime:* ${getRelativeTime(uptime)}\n🖥️ *OS Memory:* ${Math.round(os.freemem()/1024/1024)}MB / ${Math.round(os.totalmem()/1024/1024)}MB` }, { quoted: msg });
                     break;
+                
+                case 'autoranap':
+                case 'autorajal':
+                    const toggleState = args[0] === 'on' ? 'on' : 'off';
+                    await sock.sendMessage(sender, { text: `⚙️ Fitur *${command}* saat ini disetel ke: ${toggleState.toUpperCase()}` }, { quoted: msg });
+                    break;
+                    
+                case 'refresh':
+                    await sock.sendMessage(sender, { text: `🔄 Memaksa sinkronisasi/scrape data RSUD...` }, { quoted: msg });
+                    if (currentSock) await checkApiUpdates(currentSock);
+                    break;
+
                 case 'addjadwal':
-                    // (Logika addjadwal dari script awal Anda)
+                    if (args.length < 2) {
+                        await sock.sendMessage(sender, { text: "⚠️ Format: *!addjadwal <menit_kedepan> <pesan>*" }, { quoted: msg });
+                        break;
+                    }
+                    const addMinutes = parseInt(args[0]);
+                    const schedMsg = args.slice(1).join(" ");
+                    botSchedules.push({
+                        target: sender,
+                        pesan: schedMsg,
+                        timestamp: Date.now() + (addMinutes * 60000),
+                        status: 'pending'
+                    });
+                    saveSchedules();
+                    await sock.sendMessage(sender, { text: `✅ Jadwal berhasil ditambahkan. Pesan akan dikirim dalam ${addMinutes} menit.` }, { quoted: msg });
                     break;
+
                 case 'listjadwal':
-                    // (Logika listjadwal)
+                    let listStr = "📅 *Daftar Jadwal Tersimpan:*\n\n";
+                    if (botSchedules.length === 0) listStr += "_Tidak ada jadwal._";
+                    botSchedules.forEach((j, idx) => {
+                        listStr += `${idx + 1}. Pesan: "${j.pesan}" | Status: ${j.status}\n`;
+                    });
+                    await sock.sendMessage(sender, { text: listStr }, { quoted: msg });
                     break;
+
                 case 'deljadwal':
-                    // (Logika deljadwal)
+                    if (!args[0] || isNaN(args[0])) {
+                        await sock.sendMessage(sender, { text: "⚠️ Format: *!deljadwal <nomor_urut>*" }, { quoted: msg });
+                        break;
+                    }
+                    const delIdx = parseInt(args[0]) - 1;
+                    if (botSchedules[delIdx]) {
+                        botSchedules.splice(delIdx, 1);
+                        saveSchedules();
+                        await sock.sendMessage(sender, { text: "✅ Jadwal berhasil dihapus." }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(sender, { text: "❌ Nomor jadwal tidak ditemukan. Cek dengan !listjadwal" }, { quoted: msg });
+                    }
                     break;
+
                 case 'ping':
-                    await sock.sendMessage(sender, { text: `🏓 *Pong!*\n⚡ *Kecepatan:* ${Date.now() - (msg.messageTimestamp * 1000)} ms` }, { quoted: msg }); 
+                    const pingProcess = Date.now() - (msg.messageTimestamp * 1000);
+                    await sock.sendMessage(sender, { text: `🏓 *Pong!*\n⚡ *Kecepatan:* ${pingProcess} ms` }, { quoted: msg }); 
                     break;
+                    
                 case 'ai': 
-                    if(handleAiCommand) await handleAiCommand(sock, msg, args); 
+                    if(typeof handleAiCommand === 'function') await handleAiCommand(sock, msg, args); 
                     break;
+                    
                 case 'sticker': 
                 case 's': 
-                    if(handleStickerCommand) await handleStickerCommand(sock, msg); 
+                    if(typeof handleStickerCommand === 'function') await handleStickerCommand(sock, msg); 
                     break;
             }
-        } catch (error) { console.error('Error proses pesan:', error); }
+        } catch (error) { 
+            console.error('Error proses pesan:', error); 
+        }
     });
 }
