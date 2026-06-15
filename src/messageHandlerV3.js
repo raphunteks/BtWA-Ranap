@@ -2,9 +2,9 @@ import fs from 'fs';
 import process from 'process';
 import os from 'os';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { GoogleGenAI } from '@google/genai';
 
-// Jika Anda menggunakan command handler terpisah (pastikan file ini ada di direktori Anda)
-// Jika tidak ada, Anda bisa menghapus import ini dan case 'ai' / 'sticker' di bawah.
+// Handler perintah eksternal opsional
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
@@ -16,7 +16,7 @@ const GAS_URL_RSUD = process.env.GAS_URL_RSUD || "https://script.google.com/macr
 // URL MONEY TRACKER & GEMINI AI
 const MONEY_GAS_URL = process.env.MONEY_GAS_URL || "https://script.google.com/macros/s/AKfycbw38Tsw-C6-SMTWjyh-y2b2rzT7_rHH6K4JHHpy7vikCHWdyj20lxAdu-9cS4hPNIEJ/exec";
 
-// Gunakan API Key / Token Gemini dari Environment Variable
+// Kunci API / Token Sesi Gemini
 const geminiApiKey = process.env.GEMINI_API_KEY || "AQ.Ab8RN6Kv0O5noBbl4INzrZXC_zngVYJY04j38XLHpRmn371VzA";
 
 const botStartTime = new Date(); 
@@ -77,10 +77,26 @@ async function sendToFinanceGAS(action, payload) {
     }
 }
 
-/**
- * Fungsi Cerdas Gemini 3.5 Flash REST API:
- * Mendukung deteksi otomatis antara API Key (AIza...) dan Access Token (AQ...)
- */
+const genAIOptions = {};
+const trimmedKey = geminiApiKey.trim();
+
+if (trimmedKey.startsWith('AQ')) {
+    // Jika token bertipe OAuth/Workspace Access Token (AQ...), bypass x-goog-api-key dan gunakan Authorization Bearer
+    genAIOptions.httpOptions = {
+        headers: {
+            'Authorization': `Bearer ${trimmedKey}`
+        }
+    };
+    console.log("[System] Inisialisasi Google GenAI SDK dengan tipe Bearer Token (AQ...)");
+} else {
+    // Gunakan otentikasi API Key standar (AIza...)
+    genAIOptions.apiKey = trimmedKey;
+    console.log("[System] Inisialisasi Google GenAI SDK dengan tipe API Key standar (AIza...)");
+}
+
+// Membuat instance Client SDK baru berdasarkan opsi hibrida
+const ai = new GoogleGenAI(genAIOptions);
+
 async function aiCategorizeFinance(text = "", mediaBuffer = null, mimeType = null) {
     try {
         const prompt = `Kamu adalah asisten keuangan AI cerdas. Analisis input (bisa berupa teks keluhan/catatan, foto struk, atau transkrip Voice Note) dan ekstrak datanya ke dalam format JSON yang ketat.
@@ -105,58 +121,25 @@ async function aiCategorizeFinance(text = "", mediaBuffer = null, mimeType = nul
             });
         }
 
-        const payload = {
-            contents: [{ parts: parts }],
-            generationConfig: {
+        // Memanggil models.generateContent pada SDK terpadu baru dengan model gemini-3.5-flash
+        const response = await ai.models.generateContent({
+            model: "gemini-3.5-flash",
+            contents: parts,
+            config: {
                 responseMimeType: "application/json"
             }
-        };
-
-        // Menggunakan model Gemini 3.5 Flash terbaru secara langsung
-        const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent";
-        
-        // Setup Header Dinamis berdasarkan jenis Key
-        let headers = {
-            'Content-Type': 'application/json'
-        };
-
-        const trimmedKey = geminiApiKey.trim();
-
-        if (trimmedKey.startsWith('AIza')) {
-            // Jika menggunakan API Key standar
-            headers['x-goog-api-key'] = trimmedKey;
-            console.log("[Gemini 3.5] Menggunakan auth tipe API-KEY (AIza)");
-        } else if (trimmedKey.startsWith('AQ')) {
-            // Jika menggunakan Access Token Gratis Google Workspace / Cloud Session
-            headers['Authorization'] = `Bearer ${trimmedKey}`;
-            console.log("[Gemini 3.5] Menggunakan auth tipe BEARER-TOKEN (AQ)");
-        } else {
-            // Default fallback
-            headers['x-goog-api-key'] = trimmedKey;
-        }
-
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: headers,
-            body: JSON.stringify(payload)
         });
 
-        if (!response.ok) {
-            const errResponse = await response.text();
-            throw new Error(`Google API Error (${response.status}): ${errResponse}`);
-        }
-
-        const result = await response.json();
-        const responseText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        const responseText = response.text;
         
         if (!responseText) {
-            throw new Error("Respons teks kosong dari Gemini 3.5.");
+            throw new Error("Respons teks kosong dari Gemini 3.5 Flash.");
         }
 
         return JSON.parse(responseText.trim());
     } catch (error) {
         console.error("[AI Error]", error);
-        throw new Error(`AI Gemini 3.5 gagal memproses input: ${error.message}`);
+        throw new Error(`AI Gemini 3.5 Flash gagal memproses input: ${error.message}`);
     }
 }
 
@@ -287,12 +270,8 @@ async function forceSendRajalPrimer(sock, target) {
 
 async function checkApiUpdates(sock) {
     console.log("[System] Menjalankan pengecekan rutin API RSUD...");
-    // Tambahkan logika komparasi data baru & lama untuk mengirimkan notifikasi auto-rajal / auto-ranap di sini
 }
 
-// ==========================================
-// EXPORT HANDLER UTAMA
-// ==========================================
 let isIntervalStarted = false;
 let currentSock = null;
 
@@ -358,7 +337,6 @@ export default function setupMessageHandler(sock) {
 
             const isRajal = command.startsWith('cekrajal');
             if (isRajal) {
-                // Logika Dinamis Cek Rajal (Contoh Implementasi)
                 await sock.sendMessage(sender, { text: `⏳ _Memuat data untuk command ${command}..._` }, { quoted: msg });
                 try {
                     const endpoint = command.replace('cek', ''); // Mengubah cekrajal -> rajal
@@ -395,9 +373,6 @@ export default function setupMessageHandler(sock) {
                     await sock.sendMessage(sender, { text: menuText }, { quoted: msg });
                     break;
 
-                // =====================================
-                // BLOK MONEY TRACKER COMMANDS
-                // =====================================
                 case 'catat':
                     await sock.sendMessage(sender, { text: "⏳ _AI Gemini 3.5 sedang memproses input keuanganmu..._" }, { quoted: msg });
                     try {
@@ -490,9 +465,6 @@ export default function setupMessageHandler(sock) {
                     await sock.sendMessage(sender, { text: `🗺️ *FINANCIAL LIFE MAP*\n\n1. Dana Darurat Penuh (Target 6 Bulan)\n2. Bebas Hutang Konsumtif\n3. Dana Pendidikan/Menikah\n4. Investasi Saham/Properti` }, { quoted: msg });
                     break;
 
-                // =====================================
-                // KEMBALI KE COMMAND RSUD / SISTEM
-                // =====================================
                 case 'runtime':
                     const uptime = process.uptime();
                     await sock.sendMessage(sender, { text: `⏳ *Bot Uptime:* ${getRelativeTime(uptime)}\n🖥️ *OS Memory:* ${Math.round(os.freemem()/1024/1024)}MB / ${Math.round(os.totalmem()/1024/1024)}MB` }, { quoted: msg });
