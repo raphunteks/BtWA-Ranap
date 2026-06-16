@@ -1,7 +1,6 @@
 import fs from 'fs';
 import process from 'process';
 import os from 'os';
-import http from 'http'; // 🚀 Modul Webhook Receiver
 
 // Handler perintah eksternal
 import handleAiCommand from './commands/ai.js';
@@ -19,6 +18,9 @@ if (!fs.existsSync(sessionPath)) {
     console.log("[System] Folder session dibuat.");
 }
 
+// 🚀 SMART POLLER STATE: Menyimpan ID order yang sudah dinotifikasi agar tidak SPAM
+const notifiedOrders = new Set();
+
 function getRelativeTime(seconds) {
     const m = Math.floor(seconds / 60); 
     const h = Math.floor(seconds / 3600); 
@@ -33,41 +35,39 @@ export default function setupMessageHandler(sock) {
     console.log("[System] ZettBOT Photobooth & Utility Handler Aktif!");
 
     // ====================================================================
-    // 🚀 INTERNAL WEBHOOK SERVER (SUPPORT RAILWAY/HEROKU)
+    // 🚀 API PULLING SYSTEM (Pengganti Webhook yang Gagal)
+    // Mengecek Google Sheet setiap 10 Detik untuk mencari orderan "Pending"
     // ====================================================================
-    try {
-        const server = http.createServer((req, res) => {
-            if (req.method === 'POST' && req.url === '/api/new-order') {
-                let body = '';
-                req.on('data', chunk => body += chunk.toString());
-                req.on('end', async () => {
-                    try {
-                        const data = JSON.parse(body);
-                        // Bot langsung mengirim pesan notif order baru ke Owner!
-                        await sock.sendMessage(ownerNumber, { text: data.pesanFormat });
+    setInterval(async () => {
+        try {
+            const response = await fetch(PHOTOBOOTH_GAS_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: "get_pending_orders" })
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === "success" && result.data && result.data.length > 0) {
+                for (const order of result.data) {
+                    // Jika ID Transaksi ini BELUM pernah dinotifikasi ke owner
+                    if (!notifiedOrders.has(order.orderId)) {
+                        const hargaFormat = parseInt(order.harga).toLocaleString('id-ID');
+                        const msgText = `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: ${order.orderId}\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\nSilakan balas pesan ini dengan:\n!konfirmasi ${order.orderId}\n\nUntuk menyalakan kamera Kiosk secara otomatis.`;
                         
-                        res.writeHead(200, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({status: 'success'}));
-                    } catch(e) {
-                        console.error("[Webhook Error]", e);
-                        res.writeHead(500);
-                        res.end('Error parsing JSON');
+                        // Kirim Notif ke WA Owner
+                        await sock.sendMessage(ownerNumber, { text: msgText });
+                        
+                        // Masukkan ke daftar ingatan agar tidak dikirim ulang di detik berikutnya
+                        notifiedOrders.add(order.orderId);
+                        console.log(`[Photobooth] Notifikasi terkirim untuk order: ${order.orderId}`);
                     }
-                });
-            } else {
-                res.writeHead(404);
-                res.end('Not Found');
+                }
             }
-        });
-        
-        // MENGGUNAKAN DYNAMIC PORT RAILWAY (process.env.PORT)
-        const port = process.env.PORT || 3000;
-        server.listen(port, '0.0.0.0', () => {
-            console.log(`[System] Webhook Listener Aktif di Port ${port}`);
-        });
-    } catch(err) {
-        console.log('[System] Gagal menginisialisasi server Webhook: ' + err.message);
-    }
+        } catch (err) {
+            // Error di-silent agar console Railway tidak penuh/spam saat jaringan timeout
+        }
+    }, 10000); // 10000 ms = 10 detik sekali cek
     // ====================================================================
 
     sock.ev.on('messages.upsert', async (m) => {
