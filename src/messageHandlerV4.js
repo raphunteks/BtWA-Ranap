@@ -38,8 +38,14 @@ function saveAdmins() {
     fs.writeFileSync(adminsFile, JSON.stringify(botAdmins, null, 2));
 }
 
-// Helper Format Nomor HP (Memastikan selalu 628xxx)
+// Helper Format Nomor HP (Mendukung ID @lid dan Format Biasa)
 function formatPhoneToJid(phone) {
+    // Jika input sudah berakhiran @lid atau @s.whatsapp.net, biarkan formatnya utuh
+    if (phone.endsWith('@lid') || phone.endsWith('@s.whatsapp.net') || phone.endsWith('@g.us')) {
+        return phone;
+    }
+
+    // Jika input hanya angka biasa, format menjadi standar WA Indonesia
     let p = phone.replace(/[^0-9]/g, '');
     if (p.startsWith('0')) p = '62' + p.slice(1);
     if (p.startsWith('8')) p = '62' + p;
@@ -162,13 +168,14 @@ export default function setupMessageHandler(sock) {
                                      `* !konfirmasi <ID>* - Konfirmasi Pelunasan Order\n` +
                                      `* !listorder* - Rekap transaksi hari ini\n\n` +
                                      `*👥 MANAJEMEN ADMIN:*\n` +
-                                     `* !addadmin <no_hp>* - Tambah Admin Notif\n` +
-                                     `* !deladmin <no_hp>* - Hapus Admin\n` +
+                                     `* !addadmin <no_hp/ID>* - Tambah Admin Notif\n` +
+                                     `* !deladmin <no_hp/ID>* - Hapus Admin\n` +
                                      `* !listadmin* - Daftar Admin\n\n` +
                                      `*✨ AI & MEDIA (Umum):*\n` +
                                      `* !ai <pesan>* - Chat dengan AI\n` +
                                      `* !sticker / !s* - Buat sticker dari gambar\n\n` +
                                      `*⚙️ UTILITAS (Umum):*\n` +
+                                     `* !myid / !cekid* - Cek ID WA kamu (Bisa utk daftar Admin)\n` +
                                      `* !runtime* - Cek status & memori server\n` +
                                      `* !ping* - Cek kecepatan respon bot\n`;
                     await sock.sendMessage(replyJid, { text: menuText }, { quoted: msg });
@@ -177,6 +184,16 @@ export default function setupMessageHandler(sock) {
                 // ====================================================================
                 // 🚀 COMMAND UMUM (SIAPAPUN BISA PAKAI)
                 // ====================================================================
+                case 'myid':
+                case 'cekid':
+                    let idInfo = `*ℹ️ INFORMASI ID ANDA*\n\n`;
+                    idInfo += `*ID Pengirim:* \n${senderJid}\n\n`;
+                    idInfo += `_Ingin didaftarkan sebagai admin? Copy *ID Pengirim* di atas dan berikan ke Owner._\n\n`;
+                    idInfo += `_Owner dapat menambahkannya dengan cara:_\n`;
+                    idInfo += `*!addadmin ${senderJid}*`;
+                    await sock.sendMessage(replyJid, { text: idInfo }, { quoted: msg });
+                    break;
+
                 case 'ping':
                     const pingProcess = Date.now() - (msg.messageTimestamp * 1000);
                     await sock.sendMessage(replyJid, { text: `🏓 *Pong!*\n⚡ *Kecepatan:* ${pingProcess} ms` }, { quoted: msg }); 
@@ -202,36 +219,36 @@ export default function setupMessageHandler(sock) {
                 // 🚀 COMMAND KHUSUS ADMIN (DILINDUNGI SISTEM)
                 // ====================================================================
                 case 'addadmin':
-                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!addadmin 628xxx*" });
+                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!addadmin 628xxx* atau *!addadmin id@lid*" });
                     const newAdmin = formatPhoneToJid(args[0]);
                     if (!botAdmins.includes(newAdmin)) {
                         botAdmins.push(newAdmin);
                         saveAdmins();
-                        await sock.sendMessage(replyJid, { text: `✅ Nomor ${newAdmin.split('@')[0]} sukses ditambahkan sebagai Admin.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `✅ Berhasil! ID ${newAdmin} sukses ditambahkan sebagai Admin.` }, { quoted: msg });
                     } else {
-                        await sock.sendMessage(replyJid, { text: `⚠️ Nomor sudah menjadi admin.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `⚠️ Nomor/ID tersebut sudah menjadi admin.` }, { quoted: msg });
                     }
                     break;
 
                 case 'deladmin':
-                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!deladmin 628xxx*" });
+                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!deladmin 628xxx* atau *!deladmin id@lid*" });
                     const delTarget = formatPhoneToJid(args[0]);
                     if (delTarget === ownerNumber || delTarget === "247922893566044@lid") {
-                        return await sock.sendMessage(replyJid, { text: "❌ Anda tidak bisa menghapus nomor Owner utama." });
+                        return await sock.sendMessage(replyJid, { text: "❌ Anda tidak bisa menghapus ID Owner utama." });
                     }
                     
                     if (botAdmins.includes(delTarget)) {
                         botAdmins = botAdmins.filter(a => a !== delTarget);
                         saveAdmins();
-                        await sock.sendMessage(replyJid, { text: `✅ Nomor ${delTarget.split('@')[0]} sukses dihapus dari Admin.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `✅ Berhasil! ID ${delTarget} sukses dihapus dari Admin.` }, { quoted: msg });
                     } else {
-                        await sock.sendMessage(replyJid, { text: `⚠️ Nomor tidak ditemukan dalam daftar admin.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `⚠️ Nomor/ID tidak ditemukan dalam daftar admin.` }, { quoted: msg });
                     }
                     break;
 
                 case 'listadmin':
                     let adList = "👥 *DAFTAR ADMIN PHOTOBOOTH*\n\n";
-                    botAdmins.forEach((a, i) => adList += `${i+1}. ${a.split('@')[0]}\n`);
+                    botAdmins.forEach((a, i) => adList += `${i+1}. ${a}\n`);
                     await sock.sendMessage(replyJid, { text: adList }, { quoted: msg });
                     break;
 
