@@ -1,6 +1,7 @@
 import fs from 'fs';
 import process from 'process';
 import os from 'os';
+import http from 'http'; // 🚀 Modul Webhook Receiver
 
 // Handler perintah eksternal
 import handleAiCommand from './commands/ai.js';
@@ -8,21 +9,16 @@ import handleStickerCommand from './commands/sticker.js';
 
 const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 
-// ====================================================================
-// 🚀 URL PHOTOBOOTH KIOSK
-// ====================================================================
+// URL PHOTOBOOTH KIOSK
 const PHOTOBOOTH_GAS_URL = process.env.PHOTOBOOTH_GAS_URL || "https://script.google.com/macros/s/AKfycbxdyXI5z-RMC9LYaXiuJEsVDpfFOw44uTjP56dYec5V7HU2Vd06-X3dKDBUpyUD8hRi/exec";
 
-// ====================================================================
-// 📁 SESSION LOGIC (Wajib untuk Baileys Auth State)
-// ====================================================================
+// SESSION LOGIC
 const sessionPath = './session';
 if (!fs.existsSync(sessionPath)) {
     fs.mkdirSync(sessionPath, { recursive: true });
     console.log("[System] Folder session dibuat.");
 }
 
-// Helper untuk fitur Runtime
 function getRelativeTime(seconds) {
     const m = Math.floor(seconds / 60); 
     const h = Math.floor(seconds / 3600); 
@@ -36,13 +32,48 @@ function getRelativeTime(seconds) {
 export default function setupMessageHandler(sock) {
     console.log("[System] ZettBOT Photobooth & Utility Handler Aktif!");
 
+    // ====================================================================
+    // 🚀 INTERNAL WEBHOOK SERVER (Untuk menerima Notif dari GAS)
+    // ====================================================================
+    try {
+        const server = http.createServer((req, res) => {
+            if (req.method === 'POST' && req.url === '/api/new-order') {
+                let body = '';
+                req.on('data', chunk => body += chunk.toString());
+                req.on('end', async () => {
+                    try {
+                        const data = JSON.parse(body);
+                        // Bot langsung mengirim pesan notif order baru ke Owner!
+                        await sock.sendMessage(ownerNumber, { text: data.pesanFormat });
+                        
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({status: 'success'}));
+                    } catch(e) {
+                        console.error("[Webhook Error]", e);
+                        res.writeHead(500);
+                        res.end('Error parsing JSON');
+                    }
+                });
+            } else {
+                res.writeHead(404);
+                res.end('Not Found');
+            }
+        });
+        
+        // Listen di Port 3000 (Pastikan port ini terbuka di firewall VPS Anda)
+        server.listen(3000, () => {
+            console.log('[System] Webhook Listener Kiosk Aktif di Port 3000');
+        });
+    } catch(err) {
+        console.log('[System] Port 3000 gagal dibuka. Mungkin sudah terpakai.');
+    }
+    // ====================================================================
+
     sock.ev.on('messages.upsert', async (m) => {
         try {
             const msg = m.messages[0];
-            // Abaikan pesan dari diri sendiri atau status broadcast
             if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
-            // Ambil teks dari berbagai jenis pesan
             const text = msg.message.conversation || 
                          msg.message.extendedTextMessage?.text || 
                          msg.message.imageMessage?.caption || 
@@ -72,9 +103,6 @@ export default function setupMessageHandler(sock) {
                     await sock.sendMessage(sender, { text: menuText }, { quoted: msg });
                     break;
 
-                // ====================================================================
-                // 🚀 FITUR INTI: KONFIRMASI LUNAS KIOSK PHOTOBOOTH
-                // ====================================================================
                 case 'konfirmasi':
                     if (!args[0]) {
                         await sock.sendMessage(sender, { 
@@ -87,7 +115,6 @@ export default function setupMessageHandler(sock) {
                     await sock.sendMessage(sender, { text: `⏳ _Memproses pelunasan untuk ID ${orderId}..._` }, { quoted: msg });
                     
                     try {
-                        // Memanggil API Google Apps Script Photobooth Kiosk
                         const response = await fetch(PHOTOBOOTH_GAS_URL, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -115,7 +142,6 @@ export default function setupMessageHandler(sock) {
                         }, { quoted: msg });
                     }
                     break;
-                // ====================================================================
 
                 case 'ping':
                     const pingProcess = Date.now() - (msg.messageTimestamp * 1000);
@@ -136,10 +162,6 @@ export default function setupMessageHandler(sock) {
                 case 'sticker': 
                 case 's': 
                     if(typeof handleStickerCommand === 'function') await handleStickerCommand(sock, msg); 
-                    break;
-                    
-                default:
-                    // Abaikan command lain yang tidak terdaftar
                     break;
             }
         } catch (error) { 
