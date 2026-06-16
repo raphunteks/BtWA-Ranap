@@ -33,7 +33,7 @@ export default function setupMessageHandler(sock) {
     console.log("[System] ZettBOT Photobooth & Utility Handler Aktif!");
 
     // ====================================================================
-    // 🚀 INTERNAL WEBHOOK SERVER (Untuk menerima Notif dari GAS)
+    // 🚀 INTERNAL WEBHOOK SERVER (SUPPORT RAILWAY/HEROKU)
     // ====================================================================
     try {
         const server = http.createServer((req, res) => {
@@ -60,12 +60,13 @@ export default function setupMessageHandler(sock) {
             }
         });
         
-        // Listen di Port 3000 (Pastikan port ini terbuka di firewall VPS Anda)
-        server.listen(3000, () => {
-            console.log('[System] Webhook Listener Kiosk Aktif di Port 3000');
+        // MENGGUNAKAN DYNAMIC PORT RAILWAY (process.env.PORT)
+        const port = process.env.PORT || 3000;
+        server.listen(port, '0.0.0.0', () => {
+            console.log(`[System] Webhook Listener Aktif di Port ${port}`);
         });
     } catch(err) {
-        console.log('[System] Port 3000 gagal dibuka. Mungkin sudah terpakai.');
+        console.log('[System] Gagal menginisialisasi server Webhook: ' + err.message);
     }
     // ====================================================================
 
