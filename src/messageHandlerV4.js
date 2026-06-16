@@ -21,9 +21,15 @@ if (!fs.existsSync(sessionPath)) {
 }
 
 const adminsFile = `${sessionPath}/admins.json`;
-let botAdmins = [ownerNumber]; // Owner selalu jadi admin default
+// 🚀 BUGFIX: Memasukkan nomor owner dan ID @lid yang bermasalah sebagai Admin Permanen
+let botAdmins = [ownerNumber, "247922893566044@lid"]; 
+
 if (fs.existsSync(adminsFile)) {
-    try { botAdmins = JSON.parse(fs.readFileSync(adminsFile, 'utf-8')); } catch(e){}
+    try { 
+        let savedAdmins = JSON.parse(fs.readFileSync(adminsFile, 'utf-8')); 
+        // Menggabungkan admin permanen dengan admin yang disimpan agar tidak saling tindih
+        botAdmins = [...new Set([...botAdmins, ...savedAdmins])];
+    } catch(e){}
 } else {
     fs.writeFileSync(adminsFile, JSON.stringify(botAdmins));
 }
@@ -210,7 +216,9 @@ export default function setupMessageHandler(sock) {
                 case 'deladmin':
                     if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!deladmin 628xxx*" });
                     const delTarget = formatPhoneToJid(args[0]);
-                    if (delTarget === ownerNumber) return await sock.sendMessage(replyJid, { text: "❌ Anda tidak bisa menghapus nomor Owner utama." });
+                    if (delTarget === ownerNumber || delTarget === "247922893566044@lid") {
+                        return await sock.sendMessage(replyJid, { text: "❌ Anda tidak bisa menghapus nomor Owner utama." });
+                    }
                     
                     if (botAdmins.includes(delTarget)) {
                         botAdmins = botAdmins.filter(a => a !== delTarget);
