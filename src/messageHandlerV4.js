@@ -112,14 +112,27 @@ export default function setupMessageHandler(sock) {
             const command = args.shift().toLowerCase();
             
             // ====================================================================
-            // 🚀 BUGFIX: JID SANITIZER (Mencegah Bug Multi-Device & Group Chat)
+            // 🚀 BUGFIX: JID SANITIZER & LID HANDLER (Pembersih Bug Multi-Device)
             // ====================================================================
-            let rawSender = msg.key.participant || msg.key.remoteJid;
-            let sender = rawSender;
+            const replyJid = msg.key.remoteJid; // Target balasan (Penting agar bot mereply ke ruang chat yang benar)
+            let sender = msg.key.remoteJid;
             
-            // Jika ada titik dua (contoh: 628123:1@s.whatsapp.net), bersihkan jadi 628123@s.whatsapp.net
+            // Jika chat ini di dalam grup, ambil participant (nomor HP pengirim)
+            if (sender.endsWith('@g.us')) {
+                sender = msg.key.participant || sender;
+            }
+            
+            // Bersihkan suffix perangkat (titik dua) -> 628123:1@s.whatsapp.net jadi 628123@s.whatsapp.net
             if (sender.includes(':')) {
                 sender = sender.substring(0, sender.indexOf(':')) + '@s.whatsapp.net';
+            }
+            
+            // Fallback Khusus jika WhatsApp membaca nomor sebagai internal @lid
+            if (sender.endsWith('@lid') && msg.key.remoteJid && !msg.key.remoteJid.endsWith('@g.us')) {
+                sender = msg.key.remoteJid; // Paksa kembalikan ke remoteJid asli
+                if (sender.includes(':')) {
+                    sender = sender.substring(0, sender.indexOf(':')) + '@s.whatsapp.net';
+                }
             }
             // ====================================================================
 
@@ -132,7 +145,7 @@ export default function setupMessageHandler(sock) {
                 return; // Abaikan jika bukan admin mencoba command sensitif
             }
 
-            console.log(`[COMMAND] ${command} dari ${sender}`);
+            console.log(`[COMMAND] ${command} dieksekusi oleh: ${sender}`);
 
             switch (command) {
                 case 'menu':
@@ -151,42 +164,42 @@ export default function setupMessageHandler(sock) {
                                      `*⚙️ UTILITAS:*\n` +
                                      `* !runtime* - Cek status & memori server\n` +
                                      `* !ping* - Cek kecepatan respon bot\n`;
-                    await sock.sendMessage(rawSender, { text: menuText }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: menuText }, { quoted: msg });
                     break;
 
                 // ====================================================================
                 // 🚀 MANAJEMEN MULTI-ADMIN
                 // ====================================================================
                 case 'addadmin':
-                    if (!args[0]) return await sock.sendMessage(rawSender, { text: "⚠️ Format: *!addadmin 628xxx*" });
+                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!addadmin 628xxx*" });
                     const newAdmin = formatPhoneToJid(args[0]);
                     if (!botAdmins.includes(newAdmin)) {
                         botAdmins.push(newAdmin);
                         saveAdmins();
-                        await sock.sendMessage(rawSender, { text: `✅ Nomor ${newAdmin.split('@')[0]} sukses ditambahkan sebagai Admin.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `✅ Nomor ${newAdmin.split('@')[0]} sukses ditambahkan sebagai Admin.` }, { quoted: msg });
                     } else {
-                        await sock.sendMessage(rawSender, { text: `⚠️ Nomor sudah menjadi admin.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `⚠️ Nomor sudah menjadi admin.` }, { quoted: msg });
                     }
                     break;
 
                 case 'deladmin':
-                    if (!args[0]) return await sock.sendMessage(rawSender, { text: "⚠️ Format: *!deladmin 628xxx*" });
+                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!deladmin 628xxx*" });
                     const delTarget = formatPhoneToJid(args[0]);
-                    if (delTarget === ownerNumber) return await sock.sendMessage(rawSender, { text: "❌ Anda tidak bisa menghapus nomor Owner utama." });
+                    if (delTarget === ownerNumber) return await sock.sendMessage(replyJid, { text: "❌ Anda tidak bisa menghapus nomor Owner utama." });
                     
                     if (botAdmins.includes(delTarget)) {
                         botAdmins = botAdmins.filter(a => a !== delTarget);
                         saveAdmins();
-                        await sock.sendMessage(rawSender, { text: `✅ Nomor ${delTarget.split('@')[0]} sukses dihapus dari Admin.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `✅ Nomor ${delTarget.split('@')[0]} sukses dihapus dari Admin.` }, { quoted: msg });
                     } else {
-                        await sock.sendMessage(rawSender, { text: `⚠️ Nomor tidak ditemukan dalam daftar admin.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `⚠️ Nomor tidak ditemukan dalam daftar admin.` }, { quoted: msg });
                     }
                     break;
 
                 case 'listadmin':
                     let adList = "👥 *DAFTAR ADMIN PHOTOBOOTH*\n\n";
                     botAdmins.forEach((a, i) => adList += `${i+1}. ${a.split('@')[0]}\n`);
-                    await sock.sendMessage(rawSender, { text: adList }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: adList }, { quoted: msg });
                     break;
                 // ====================================================================
 
@@ -194,7 +207,7 @@ export default function setupMessageHandler(sock) {
                 // 🚀 REKAP ORDER HARI INI
                 // ====================================================================
                 case 'listorder':
-                    await sock.sendMessage(rawSender, { text: `⏳ _Menarik data orderan hari ini dari Database..._` }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: `⏳ _Menarik data orderan hari ini dari Database..._` }, { quoted: msg });
                     try {
                         const response = await fetch(PHOTOBOOTH_GAS_URL, {
                             method: 'POST',
@@ -217,12 +230,12 @@ export default function setupMessageHandler(sock) {
                                 });
                                 orderList += `💰 *TOTAL LUNAS:* Rp${totalPendapatan.toLocaleString('id-ID')}`;
                             }
-                            await sock.sendMessage(rawSender, { text: orderList }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: orderList }, { quoted: msg });
                         } else {
-                            await sock.sendMessage(rawSender, { text: `❌ Gagal: ${result.message}` }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: `❌ Gagal: ${result.message}` }, { quoted: msg });
                         }
                     } catch (e) {
-                        await sock.sendMessage(rawSender, { text: `❌ Error terhubung ke database.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `❌ Error terhubung ke database.` }, { quoted: msg });
                     }
                     break;
                 // ====================================================================
@@ -232,7 +245,7 @@ export default function setupMessageHandler(sock) {
                 // ====================================================================
                 case 'konfirmasi':
                     if (!args[0]) {
-                        await sock.sendMessage(rawSender, { 
+                        await sock.sendMessage(replyJid, { 
                             text: "⚠️ *Format Salah*\nGunakan format: *!konfirmasi <ID_Transaksi>*\n\nContoh: !konfirmasi MALL-20260616-0001" 
                         }, { quoted: msg });
                         break;
@@ -240,7 +253,7 @@ export default function setupMessageHandler(sock) {
                     
                     const orderId = args[0];
                     const adminPhone = sender.split('@')[0]; // Nama admin memakai nomor bersih
-                    await sock.sendMessage(rawSender, { text: `⏳ _Memproses pelunasan untuk ID ${orderId}..._` }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: `⏳ _Memproses pelunasan untuk ID ${orderId}..._` }, { quoted: msg });
                     
                     try {
                         const response = await fetch(PHOTOBOOTH_GAS_URL, {
@@ -249,14 +262,14 @@ export default function setupMessageHandler(sock) {
                             body: JSON.stringify({
                                 action: "konfirmasi_lunas",
                                 orderId: orderId,
-                                confirmedBy: "Admin " + adminPhone // 🚀 Tracking Identitas Admin
+                                confirmedBy: "Admin " + adminPhone // Tracking Identitas Admin
                             })
                         });
                         
                         const result = await response.json();
                         
                         if (result.status === "success") {
-                            await sock.sendMessage(rawSender, { 
+                            await sock.sendMessage(replyJid, { 
                                 text: `✅ *KONFIRMASI LUNAS BERHASIL*\n\nID: ${orderId}\nSistem Kiosk di mall telah otomatis dilanjutkan ke sesi kamera!` 
                             }, { quoted: msg });
                             
@@ -272,21 +285,21 @@ export default function setupMessageHandler(sock) {
                             }
 
                         } else {
-                            await sock.sendMessage(rawSender, { text: `❌ *Gagal Konfirmasi:*\n${result.message}` }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: `❌ *Gagal Konfirmasi:*\n${result.message}` }, { quoted: msg });
                         }
                     } catch (err) {
-                        await sock.sendMessage(rawSender, { text: `❌ *Gagal terhubung ke Server Photobooth.*` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `❌ *Gagal terhubung ke Server Photobooth.*` }, { quoted: msg });
                     }
                     break;
 
                 case 'ping':
                     const pingProcess = Date.now() - (msg.messageTimestamp * 1000);
-                    await sock.sendMessage(rawSender, { text: `🏓 *Pong!*\n⚡ *Kecepatan:* ${pingProcess} ms` }, { quoted: msg }); 
+                    await sock.sendMessage(replyJid, { text: `🏓 *Pong!*\n⚡ *Kecepatan:* ${pingProcess} ms` }, { quoted: msg }); 
                     break;
                     
                 case 'runtime':
                     const uptime = process.uptime();
-                    await sock.sendMessage(rawSender, { 
+                    await sock.sendMessage(replyJid, { 
                         text: `⏳ *Bot Uptime:* ${getRelativeTime(uptime)}\n🖥️ *OS Memory:* ${Math.round(os.freemem()/1024/1024)}MB / ${Math.round(os.totalmem()/1024/1024)}MB` 
                     }, { quoted: msg });
                     break;
