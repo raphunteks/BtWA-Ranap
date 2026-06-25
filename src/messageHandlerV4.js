@@ -2,7 +2,7 @@ import fs from 'fs';
 import process from 'process';
 import os from 'os';
 
-// 🚀 UPGRADE: Import generateWAMessageFromContent untuk mem-build payload vali
+// 🚀 UPGRADE: Import generateWAMessageFromContent untuk mem-build payload valid
 import { generateWAMessageFromContent } from '@whiskeysockets/baileys'; 
 
 // Handler perintah eksternal
@@ -172,7 +172,6 @@ async function broadcastToAdmins(sock, textPayload, interactivePayload = null) {
 
                     await sock.relayMessage(adminId, msgContent.message, { messageId: msgContent.key.id });
                 } catch (err) {
-                    // Tombol gagal diproses Baileys, tidak apa-apa karena Teks sudah berhasil
                     console.log(`[System] Tombol interaktif gagal untuk ${adminId}`);
                 }
             }
@@ -349,7 +348,8 @@ export default async function setupMessageHandler(sock) {
             }
 
             const isAdmin = botAdmins.includes(senderJid);
-            const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin', 'autoinfosholat', 'autocuaca', 'autogempa'];
+            // 🚀 UPGRADE: Menambahkan command "restart" ke dalam daftar proteksi
+            const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin', 'autoinfosholat', 'autocuaca', 'autogempa', 'restart'];
             
             if (adminCommands.includes(command) && !isAdmin) {
                 return await sock.sendMessage(replyJid, { text: "⚠️ *Akses Ditolak*\nMaaf, perintah tersebut khusus untuk Admin sistem." }, { quoted: msg });
@@ -358,6 +358,17 @@ export default async function setupMessageHandler(sock) {
             console.log(`[COMMAND] ${command} dieksekusi oleh: ${senderJid} (Admin: ${isAdmin})`);
 
             switch (command) {
+                // 🚀 FITUR BARU: AUTO-RESTART BOT
+                case 'restart':
+                    await sock.sendMessage(replyJid, { text: "🔄 *Restarting Bot...*\nSistem sedang dimuat ulang. Bot akan hidup kembali dan menjalankan script terbaru dalam beberapa detik.\n_(Anda tidak perlu scan QR ulang)_" }, { quoted: msg });
+                    console.log("[System] Force exit process requested. Server will auto-restart...");
+                    
+                    // Delay sedikit agar pesan WhatsApp sempat terkirim sebelum Node.js mati
+                    setTimeout(() => {
+                        process.exit(1); 
+                    }, 2000);
+                    break;
+
                 // 🚀 UPGRADE LOGIC: HYBRID MENU (TEKS DIKIRIM UTAMA, LIST BUTTON SUSULAN)
                 case 'menu':
                 case 'help':
@@ -368,7 +379,7 @@ export default async function setupMessageHandler(sock) {
                     let manualMenuText = `🤖 *MENU UTAMA ZETTBOT* 🤖\n\n`;
                     if (isAdmin) {
                         manualMenuText += `*📷 PHOTOBOOTH (Admin):*\n> !konfirmasi <ID>\n> !listorder\n\n` +
-                        `*⚙️ TOGGLE SISTEM (Admin):*\n> !autoinfosholat [on/off]\n> !autocuaca [on/off]\n> !autogempa [on/off]\n> !addadmin <ID>\n> !deladmin <ID>\n> !listadmin\n\n`;
+                        `*⚙️ TOGGLE SISTEM (Admin):*\n> !autoinfosholat [on/off]\n> !autocuaca [on/off]\n> !autogempa [on/off]\n> !addadmin <ID>\n> !deladmin <ID>\n> !listadmin\n> !restart\n\n`;
                     }
                     manualMenuText += `*✨ AI & UTILITIES:*\n> !ai <pertanyaan>\n> !s (buat stiker)\n> !gempa\n> !cuaca\n> !myid\n> !runtime\n> !ping`;
 
@@ -383,7 +394,8 @@ export default async function setupMessageHandler(sock) {
                             { title: `🕌 Sholat: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
                             { title: `⛅ Cuaca: ${botSettings.autoCuaca?"[ON]":"[OFF]"}`, description: "Prakiraan Kendari", id: `!autocuaca ${botSettings.autoCuaca?"off":"on"}` },
                             { title: `🚨 Gempa: ${botSettings.autoGempa?"[ON]":"[OFF]"}`, description: "Notifikasi BMKG", id: `!autogempa ${botSettings.autoGempa?"off":"on"}` },
-                            { title: "👥 Daftar Admin", description: "Lihat siapa saja Admin", id: "!listadmin" }
+                            { title: "👥 Daftar Admin", description: "Lihat siapa saja Admin", id: "!listadmin" },
+                            { title: "🔄 Restart Bot", description: "Muat ulang sistem & script", id: "!restart" }
                         ]});
                     }
                     menuSections.push({ title: "✨ AI & MEDIA", rows: [{ title: "🤖 Cara Pakai AI", description: "Bantuan chat AI", id: "!help ai" }, { title: "🖼️ Cara Bikin Sticker", description: "Bantuan stiker WA", id: "!help sticker" }] });
@@ -415,9 +427,7 @@ export default async function setupMessageHandler(sock) {
                         }, { userJid: sock.user?.id || sock.user?.jid });
 
                         await sock.relayMessage(replyJid, msgContent.message, { messageId: msgContent.key.id });
-                    } catch (err) {
-                        // Diabaikan jika WA Business menolak karena Teks Manual (pesan utama) sudah dikirim
-                    }
+                    } catch (err) {}
                     break;
 
                 // ====================================================================
