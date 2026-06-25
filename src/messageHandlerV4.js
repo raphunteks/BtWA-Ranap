@@ -158,7 +158,6 @@ async function broadcastToAdmins(sock, messagePayload, fallbackText = null) {
                 await sock.sendMessage(adminId, { text: messagePayload }); 
             } else if (messagePayload.isInteractive) {
                 try {
-                    // Menyusun pesan menggunakan format proto agar kompatibel 100%
                     const msgContent = generateWAMessageFromContent(adminId, {
                         viewOnceMessage: {
                             message: {
@@ -281,14 +280,10 @@ export default async function setupMessageHandler(sock) {
                     if (!notifiedOrders.has(order.orderId)) {
                         const hargaFormat = parseInt(order.harga).toLocaleString('id-ID');
                         
-                        // 🚀 UPGRADE: Trik Forwarded Message Bypass WA Business
                         const interactivePayload = {
                             isInteractive: true,
                             payload: {
-                                contextInfo: {
-                                    isForwarded: true, 
-                                    forwardingScore: 999 
-                                },
+                                contextInfo: { isForwarded: true, forwardingScore: 999 },
                                 header: { title: "Pesanan Masuk", hasMediaAttachment: false },
                                 body: { text: `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: *${order.orderId}*\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\n_Silakan ketuk tombol di bawah untuk menyalakan Kiosk._` },
                                 footer: { text: "Kiosk Photobooth Bot" },
@@ -306,7 +301,6 @@ export default async function setupMessageHandler(sock) {
                             }
                         };
                         
-                        // 🚀 FALLBACK TEXT
                         const fallbackOrderText = `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: *${order.orderId}*\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\n*⚠️ Tombol Konfirmasi Gagal Dimuat*\nKetik manual untuk konfirmasi:\n*!konfirmasi ${order.orderId}*`;
                         
                         await broadcastToAdmins(sock, interactivePayload, fallbackOrderText);
@@ -358,23 +352,61 @@ export default async function setupMessageHandler(sock) {
             const isAdmin = botAdmins.includes(senderJid);
             const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin', 'autoinfosholat', 'autocuaca', 'autogempa'];
             
-            if (adminCommands.includes(command) && !isAdmin) return;
+            // 🚀 UPGRADE: Jika bukan admin tapi coba jalankan fitur Admin, beri peringatan bukan sekadar diam!
+            if (adminCommands.includes(command) && !isAdmin) {
+                return await sock.sendMessage(replyJid, { text: "⚠️ *Akses Ditolak*\nMaaf, perintah tersebut khusus untuk Admin sistem." }, { quoted: msg });
+            }
 
-            console.log(`[COMMAND] ${command} dieksekusi oleh: ${senderJid}`);
+            console.log(`[COMMAND] ${command} dieksekusi oleh: ${senderJid} (Admin: ${isAdmin})`);
 
             switch (command) {
-                // 🚀 UPGRADE: MENU INTERAKTIF WA BUSINESS BYPASS
+                // 🚀 UPGRADE: MENU DINAMIS UNTUK PUBLIK & ADMIN (WA BUSINESS BYPASS)
                 case 'menu':
                 case 'help':
                     if (args[0] === 'ai') { return await sock.sendMessage(replyJid, { text: "🤖 *Cara Pakai AI:*\nKetik *!ai <pertanyaan>*\nContoh: !ai Siapa presiden indonesia?" }, { quoted: msg }); }
                     if (args[0] === 'sticker') { return await sock.sendMessage(replyJid, { text: "🖼️ *Cara Bikin Sticker:*\nKirimkan gambar dengan caption *!s* atau balas sebuah gambar dengan *!s*" }, { quoted: msg }); }
 
-                    // Payload List Menu dengan Trik Bypass
+                    // 1. MEMBUAT LIST MENU SECARA DINAMIS (BEDA ADMIN BEDA USER BIASA)
+                    const menuSections = [];
+
+                    // Jika yang ketik adalah Admin, tambahkan Menu Khusus Admin
+                    if (isAdmin) {
+                        menuSections.push({
+                            title: "📷 PHOTOBOOTH (Menu Admin)",
+                            rows: [{ title: "📋 Rekap Transaksi", description: "Cek pendapatan & orderan hari ini", id: "!listorder" }]
+                        });
+                        menuSections.push({
+                            title: "⚙️ TOGGLE SISTEM (Menu Admin)",
+                            rows: [
+                                { title: `🕌 Sholat: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
+                                { title: `⛅ Cuaca: ${botSettings.autoCuaca?"[ON]":"[OFF]"}`, description: "Prakiraan Kendari", id: `!autocuaca ${botSettings.autoCuaca?"off":"on"}` },
+                                { title: `🚨 Gempa: ${botSettings.autoGempa?"[ON]":"[OFF]"}`, description: "Notifikasi BMKG", id: `!autogempa ${botSettings.autoGempa?"off":"on"}` },
+                                { title: "👥 Daftar Admin", description: "Lihat siapa saja Admin", id: "!listadmin" }
+                            ]
+                        });
+                    }
+
+                    // Menu Publik (Tampil untuk semua orang)
+                    menuSections.push({
+                        title: "✨ AI & MEDIA",
+                        rows: [
+                            { title: "🤖 Cara Pakai AI", description: "Bantuan chat AI", id: "!help ai" },
+                            { title: "🖼️ Cara Bikin Sticker", description: "Bantuan stiker WA", id: "!help sticker" }
+                        ]
+                    });
+                    menuSections.push({
+                        title: "🛠️ INFO UTILITIES",
+                        rows: [
+                            { title: "🌋 Gempa Terakhir", description: "Info gempa BMKG saat ini", id: "!gempa" },
+                            { title: "🌤️ Cuaca Kendari", description: "Info cuaca hari ini", id: "!cuaca" },
+                            { title: "ℹ️ Cek ID Saya", description: "Untuk daftar Admin", id: "!myid" },
+                            { title: "📈 Status Server", description: "Ping & Uptime", id: "!runtime" }
+                        ]
+                    });
+
+                    // 2. PAYLOAD LIST MENU DENGAN BYPASS
                     const interactiveMenu = {
-                        contextInfo: {
-                            isForwarded: true,
-                            forwardingScore: 999
-                        },
+                        contextInfo: { isForwarded: true, forwardingScore: 999 },
                         header: { title: "🤖 MENU UTAMA", hasMediaAttachment: false },
                         body: { text: `👋 Halo! Ini adalah *ZettBOT Control Center*.\nSilakan tekan tombol di bawah untuk memunculkan pilihan menu yang tersedia.` },
                         footer: { text: "ZettBOT Utility & Photobooth" },
@@ -384,27 +416,20 @@ export default async function setupMessageHandler(sock) {
                                     name: "single_select",
                                     buttonParamsJson: JSON.stringify({
                                         title: "Buka Menu",
-                                        sections: [
-                                            { title: "📷 PHOTOBOOTH (Admin)", rows: [{ title: "📋 Rekap Transaksi", description: "Cek pendapatan & orderan hari ini", id: "!listorder" }] },
-                                            { title: "⚙️ TOGGLE SISTEM (Admin)", rows: [
-                                                    { title: `🕌 Sholat: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
-                                                    { title: `⛅ Cuaca: ${botSettings.autoCuaca?"[ON]":"[OFF]"}`, description: "Prakiraan Kendari", id: `!autocuaca ${botSettings.autoCuaca?"off":"on"}` },
-                                                    { title: `🚨 Gempa: ${botSettings.autoGempa?"[ON]":"[OFF]"}`, description: "Notifikasi BMKG", id: `!autogempa ${botSettings.autoGempa?"off":"on"}` },
-                                                    { title: "👥 Daftar Admin", description: "Lihat siapa saja Admin", id: "!listadmin" }
-                                                ] },
-                                            { title: "✨ AI & MEDIA", rows: [{ title: "🤖 Cara Pakai AI", description: "Bantuan chat AI", id: "!help ai" }, { title: "🖼️ Cara Bikin Sticker", description: "Bantuan stiker WA", id: "!help sticker" }] },
-                                            { title: "🛠️ INFO UTILITIES", rows: [{ title: "🌋 Gempa Terakhir", description: "Info gempa", id: "!gempa" }, { title: "🌤️ Cuaca Kendari", description: "Info cuaca", id: "!cuaca" }, { title: "ℹ️ Cek ID Saya", description: "Untuk daftar Admin", id: "!myid" }, { title: "📈 Status Server", description: "Ping & Uptime", id: "!runtime" }] }
-                                        ]
+                                        sections: menuSections
                                     })
                                 }
                             ]
                         }
                     };
 
-                    const fallbackMenuText = `*🤖 MENU ZETTBOT (Mode Teks) 🤖*\n_Tombol interaktif gagal dimuat. Silakan ketik manual command di bawah:_\n\n` +
-                        `*📷 PHOTOBOOTH (Admin):*\n> !konfirmasi <ID>\n> !listorder\n\n` +
-                        `*⚙️ TOGGLE SISTEM (Admin):*\n> !autoinfosholat [on/off]\n> !autocuaca [on/off]\n> !autogempa [on/off]\n> !addadmin <ID>\n> !deladmin <ID>\n> !listadmin\n\n` +
-                        `*✨ AI & UTILITIES:*\n> !ai <pertanyaan>\n> !s (untuk stiker)\n> !gempa\n> !cuaca\n> !myid\n> !runtime\n> !ping`;
+                    // 3. FALLBACK TEXT DINAMIS (Jika tombol direject oleh WA Client)
+                    let fallbackMenuText = `*🤖 MENU ZETTBOT (Mode Teks) 🤖*\n_Tombol interaktif gagal dimuat. Silakan ketik manual command di bawah:_\n\n`;
+                    if (isAdmin) {
+                        fallbackMenuText += `*📷 PHOTOBOOTH (Admin):*\n> !konfirmasi <ID>\n> !listorder\n\n` +
+                        `*⚙️ TOGGLE SISTEM (Admin):*\n> !autoinfosholat [on/off]\n> !autocuaca [on/off]\n> !autogempa [on/off]\n> !addadmin <ID>\n> !deladmin <ID>\n> !listadmin\n\n`;
+                    }
+                    fallbackMenuText += `*✨ AI & UTILITIES:*\n> !ai <pertanyaan>\n> !s (untuk stiker)\n> !gempa\n> !cuaca\n> !myid\n> !runtime\n> !ping`;
                     
                     try {
                         const msgContent = generateWAMessageFromContent(replyJid, {
