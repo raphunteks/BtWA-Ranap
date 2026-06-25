@@ -26,7 +26,8 @@ if (!fs.existsSync(sessionPath)) {
 const adminsFile = `${sessionPath}/admins.json`;
 const settingsFile = `${sessionPath}/settings.json`;
 
-let botAdmins = [ownerNumber, "247922893566044@lid"]; 
+// 🚀 ADMIN BARU TELAH DITAMBAHKAN DI SINI
+let botAdmins = [ownerNumber, "247922893566044@lid", "6282197493497@s.whatsapp.net"]; 
 
 if (fs.existsSync(adminsFile)) {
     try { 
@@ -348,7 +349,7 @@ export default async function setupMessageHandler(sock) {
             }
 
             const isAdmin = botAdmins.includes(senderJid);
-            // 🚀 UPGRADE: Menambahkan command "restart" ke dalam daftar proteksi
+            // 🚀 PROTEKSI COMMAND ADMIN
             const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin', 'autoinfosholat', 'autocuaca', 'autogempa', 'restart'];
             
             if (adminCommands.includes(command) && !isAdmin) {
@@ -358,7 +359,7 @@ export default async function setupMessageHandler(sock) {
             console.log(`[COMMAND] ${command} dieksekusi oleh: ${senderJid} (Admin: ${isAdmin})`);
 
             switch (command) {
-                // 🚀 FITUR BARU: AUTO-RESTART BOT
+                // 🚀 FITUR AUTO-RESTART BOT
                 case 'restart':
                     await sock.sendMessage(replyJid, { text: "🔄 *Restarting Bot...*\nSistem sedang dimuat ulang. Bot akan hidup kembali dan menjalankan script terbaru dalam beberapa detik.\n_(Anda tidak perlu scan QR ulang)_" }, { quoted: msg });
                     console.log("[System] Force exit process requested. Server will auto-restart...");
