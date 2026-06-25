@@ -150,12 +150,18 @@ function createGempaMessage(gempa, isBroadcast = false) {
     };
 }
 
-// BROADCAST HELPER
+// BROADCAST HELPER - UPDATE UNTUK MENDUKUNG RAW INTERACTIVE MESSAGE
 async function broadcastToAdmins(sock, messagePayload) {
     for (const adminId of botAdmins) {
         try { 
-            if (typeof messagePayload === 'string') { await sock.sendMessage(adminId, { text: messagePayload }); } 
-            else { await sock.sendMessage(adminId, messagePayload); }
+            if (typeof messagePayload === 'string') { 
+                await sock.sendMessage(adminId, { text: messagePayload }); 
+            } else if (messagePayload.viewOnceMessage) {
+                // Gunakan relayMessage khusus untuk Interactive Message BMKG/Photobooth
+                await sock.relayMessage(adminId, messagePayload, {});
+            } else { 
+                await sock.sendMessage(adminId, messagePayload); 
+            }
         } catch(err){}
     }
 }
@@ -256,7 +262,7 @@ export default async function setupMessageHandler(sock) {
     }, 60 * 1000); 
 
     // ====================================================================
-    // 📷 POLLER PHOTOBOOTH
+    // 📷 POLLER PHOTOBOOTH (MENGGUNAKAN NATIVE FLOW MESSAGE)
     // ====================================================================
     setInterval(async () => {
         try {
@@ -270,12 +276,36 @@ export default async function setupMessageHandler(sock) {
                 for (const order of result.data) {
                     if (!notifiedOrders.has(order.orderId)) {
                         const hargaFormat = parseInt(order.harga).toLocaleString('id-ID');
-                        const listMsg = {
-                            text: `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: *${order.orderId}*\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\n_Silakan ketuk tombol di bawah untuk menyalakan Kiosk._`,
-                            footer: "Kiosk Photobooth Bot", title: "Pesanan Masuk", buttonText: "Pilih Aksi",
-                            sections: [{ title: "Validasi Pesanan", rows: [{ title: "✅ Konfirmasi Lunas", rowId: `!konfirmasi ${order.orderId}`, description: `Nyalakan kamera untuk ID ${order.orderId}` }] }]
+                        
+                        // 🚀 UPDATE: Payload Interaktif Terbaru
+                        const interactiveListMsg = {
+                            viewOnceMessage: {
+                                message: {
+                                    messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+                                    interactiveMessage: {
+                                        body: { text: `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: *${order.orderId}*\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\n_Silakan ketuk tombol di bawah untuk menyalakan Kiosk._` },
+                                        footer: { text: "Kiosk Photobooth Bot" },
+                                        header: { title: "Pesanan Masuk", subtitle: "", hasMediaAttachment: false },
+                                        nativeFlowMessage: {
+                                            buttons: [
+                                                {
+                                                    name: "single_select",
+                                                    buttonParamsJson: JSON.stringify({
+                                                        title: "Pilih Aksi",
+                                                        sections: [{
+                                                            title: "Validasi Pesanan",
+                                                            rows: [{ header: "", title: "✅ Konfirmasi Lunas", description: `Nyalakan kamera untuk ID ${order.orderId}`, id: `!konfirmasi ${order.orderId}` }]
+                                                        }]
+                                                    })
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            }
                         };
-                        await broadcastToAdmins(sock, listMsg);
+                        
+                        await broadcastToAdmins(sock, interactiveListMsg);
                         notifiedOrders.add(order.orderId);
                     }
                 }
@@ -291,7 +321,7 @@ export default async function setupMessageHandler(sock) {
             const msg = m.messages[0];
             if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
-            // Penagkap Respon Multi-Format (Teks Biasa & Button/List)
+            // Penangkap Respon Multi-Format (Teks Biasa & Button/List)
             let text = '';
             if (msg.message.conversation) text = msg.message.conversation;
             else if (msg.message.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
@@ -328,7 +358,7 @@ export default async function setupMessageHandler(sock) {
             console.log(`[COMMAND] ${command} dieksekusi oleh: ${senderJid}`);
 
             switch (command) {
-                // 🚀 UPGRADE: MENU INTERAKTIF
+                // 🚀 UPGRADE: MENU INTERAKTIF DENGAN NATIVE FLOW WA TERBARU
                 case 'menu':
                 case 'help':
                     if (args[0] === 'ai') {
@@ -338,46 +368,65 @@ export default async function setupMessageHandler(sock) {
                         return await sock.sendMessage(replyJid, { text: "🖼️ *Cara Bikin Sticker:*\nKirimkan gambar dengan caption *!s* atau balas sebuah gambar dengan *!s*" }, { quoted: msg });
                     }
 
-                    const menuMsg = {
-                        text: `👋 Halo! Ini adalah *ZettBOT Control Center*.\nSilakan tekan tombol di bawah untuk memunculkan pilihan menu yang tersedia.`,
-                        footer: "ZettBOT Utility & Photobooth",
-                        title: "🤖 MENU UTAMA",
-                        buttonText: "Buka Menu",
-                        sections: [
-                            {
-                                title: "📷 PHOTOBOOTH (Khusus Admin)",
-                                rows: [
-                                    { title: "📋 Rekap Transaksi", rowId: "!listorder", description: "Cek pendapatan & orderan hari ini" }
-                                ]
-                            },
-                            {
-                                title: "⚙️ TOGGLE SISTEM (Admin)",
-                                rows: [
-                                    { title: `🕌 Auto Sholat: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, rowId: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}`, description: "Pengingat Adzan Otomatis Kendari" },
-                                    { title: `⛅ Auto Cuaca: ${botSettings.autoCuaca?"[ON]":"[OFF]"}`, rowId: `!autocuaca ${botSettings.autoCuaca?"off":"on"}`, description: "Prakiraan Cuaca Kendari (Pagi & Malam)" },
-                                    { title: `🚨 Auto Gempa: ${botSettings.autoGempa?"[ON]":"[OFF]"}`, rowId: `!autogempa ${botSettings.autoGempa?"off":"on"}`, description: "Notifikasi Gempa Realtime BMKG" },
-                                    { title: "👥 Daftar Admin", rowId: "!listadmin", description: "Lihat siapa saja yang jadi Admin" }
-                                ]
-                            },
-                            {
-                                title: "✨ AI & MEDIA",
-                                rows: [
-                                    { title: "🤖 Cara Pakai AI", rowId: "!help ai", description: "Bantuan command chat dengan AI" },
-                                    { title: "🖼️ Cara Bikin Sticker", rowId: "!help sticker", description: "Bantuan cara membuat stiker" }
-                                ]
-                            },
-                            {
-                                title: "🛠️ INFO UTILITIES",
-                                rows: [
-                                    { title: "🌋 Cek Gempa Terakhir", rowId: "!gempa", description: "Minta info gempa BMKG saat ini" },
-                                    { title: "🌤️ Cek Cuaca Kendari", rowId: "!cuaca", description: "Minta info cuaca hari ini" },
-                                    { title: "ℹ️ Cek ID Saya", rowId: "!myid", description: "Untuk keperluan pendaftaran Admin" },
-                                    { title: "📈 Status Server", rowId: "!runtime", description: "Ping & Uptime Bot" }
-                                ]
+                    // Native Flow Interactive Message (List Button) Format Terbaru
+                    const menuPayload = {
+                        viewOnceMessage: {
+                            message: {
+                                messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+                                interactiveMessage: {
+                                    body: { text: `👋 Halo! Ini adalah *ZettBOT Control Center*.\nSilakan tekan tombol di bawah untuk memunculkan pilihan menu yang tersedia.` },
+                                    footer: { text: "ZettBOT Utility & Photobooth" },
+                                    header: { title: "🤖 MENU UTAMA", subtitle: "", hasMediaAttachment: false },
+                                    nativeFlowMessage: {
+                                        buttons: [
+                                            {
+                                                name: "single_select",
+                                                buttonParamsJson: JSON.stringify({
+                                                    title: "Buka Menu",
+                                                    sections: [
+                                                        {
+                                                            title: "📷 PHOTOBOOTH (Khusus Admin)",
+                                                            rows: [
+                                                                { header: "", title: "📋 Rekap Transaksi", description: "Cek pendapatan & orderan hari ini", id: "!listorder" }
+                                                            ]
+                                                        },
+                                                        {
+                                                            title: "⚙️ TOGGLE SISTEM (Admin)",
+                                                            rows: [
+                                                                { header: "", title: `🕌 Sholat: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan Otomatis", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
+                                                                { header: "", title: `⛅ Cuaca: ${botSettings.autoCuaca?"[ON]":"[OFF]"}`, description: "Prakiraan Cuaca Kendari", id: `!autocuaca ${botSettings.autoCuaca?"off":"on"}` },
+                                                                { header: "", title: `🚨 Gempa: ${botSettings.autoGempa?"[ON]":"[OFF]"}`, description: "Notifikasi BMKG", id: `!autogempa ${botSettings.autoGempa?"off":"on"}` },
+                                                                { header: "", title: "👥 Daftar Admin", description: "Lihat siapa saja yang jadi Admin", id: "!listadmin" }
+                                                            ]
+                                                        },
+                                                        {
+                                                            title: "✨ AI & MEDIA",
+                                                            rows: [
+                                                                { header: "", title: "🤖 Cara Pakai AI", description: "Bantuan chat AI", id: "!help ai" },
+                                                                { header: "", title: "🖼️ Cara Bikin Sticker", description: "Bantuan stiker WA", id: "!help sticker" }
+                                                            ]
+                                                        },
+                                                        {
+                                                            title: "🛠️ INFO UTILITIES",
+                                                            rows: [
+                                                                { header: "", title: "🌋 Gempa Terakhir", description: "Info gempa BMKG saat ini", id: "!gempa" },
+                                                                { header: "", title: "🌤️ Cuaca Kendari", description: "Info cuaca hari ini", id: "!cuaca" },
+                                                                { header: "", title: "ℹ️ Cek ID Saya", description: "Untuk daftar Admin", id: "!myid" },
+                                                                { header: "", title: "📈 Status Server", description: "Ping & Uptime", id: "!runtime" }
+                                                            ]
+                                                        }
+                                                    ]
+                                                })
+                                            }
+                                        ]
+                                    }
+                                }
                             }
-                        ]
+                        }
                     };
-                    await sock.sendMessage(replyJid, menuMsg);
+                    
+                    // Mengirim Raw Payload (Dapat tembus WA Terbaru)
+                    await sock.relayMessage(replyJid, menuPayload, {});
                     break;
 
                 // ====================================================================
