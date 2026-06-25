@@ -2,7 +2,7 @@ import fs from 'fs';
 import process from 'process';
 import os from 'os';
 
-// 🚀 UPGRADE: Import generateWAMessageFromContent untuk mem-build payload valid
+// 🚀 UPGRADE: Import generateWAMessageFromContent untuk mem-build payload vali
 import { generateWAMessageFromContent } from '@whiskeysockets/baileys'; 
 
 // Handler perintah eksternal
