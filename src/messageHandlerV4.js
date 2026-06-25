@@ -2,8 +2,8 @@ import fs from 'fs';
 import process from 'process';
 import os from 'os';
 
-// 🚀 UPGRADE: Wajib mengimport fungsi ini untuk build Interactive Message di WA terbaru!
-import { generateWAMessageFromContent } from '@whiskeysockets/baileys'; 
+// 🚀 UPGRADE: Import generateWAMessageFromContent & proto untuk Bypass WA Business
+import { generateWAMessageFromContent, proto } from '@whiskeysockets/baileys'; 
 
 // Handler perintah eksternal
 import handleAiCommand from './commands/ai.js';
@@ -150,20 +150,20 @@ function createGempaMessage(gempa, isBroadcast = false) {
     };
 }
 
-// 🚀 UPGRADE: BROADCAST HELPER COMPILER UNTUK INTERACTIVE MESSAGE
+// 🚀 UPGRADE: BROADCAST HELPER UNTUK ANTI-BLOCK WA BUSINESS
 async function broadcastToAdmins(sock, messagePayload, fallbackText = null) {
     for (const adminId of botAdmins) {
         try { 
             if (typeof messagePayload === 'string') { 
                 await sock.sendMessage(adminId, { text: messagePayload }); 
-            } else if (messagePayload.interactiveMessage) {
+            } else if (messagePayload.isInteractive) {
                 try {
-                    // Melakukan kompilasi payload menggunakan library core Baileys
+                    // Menyusun pesan menggunakan format proto agar kompatibel 100%
                     const msgContent = generateWAMessageFromContent(adminId, {
                         viewOnceMessage: {
                             message: {
                                 messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
-                                interactiveMessage: messagePayload.interactiveMessage
+                                interactiveMessage: messagePayload.payload
                             }
                         }
                     }, { userJid: sock.user?.id || sock.user?.jid });
@@ -266,7 +266,7 @@ export default async function setupMessageHandler(sock) {
     }, 60 * 1000); 
 
     // ====================================================================
-    // 📷 POLLER PHOTOBOOTH DENGAN QUICK REPLY BUTTON
+    // 📷 POLLER PHOTOBOOTH DENGAN QUICK REPLY BUTTON BYPASS
     // ====================================================================
     setInterval(async () => {
         try {
@@ -281,9 +281,14 @@ export default async function setupMessageHandler(sock) {
                     if (!notifiedOrders.has(order.orderId)) {
                         const hargaFormat = parseInt(order.harga).toLocaleString('id-ID');
                         
-                        // 🚀 UPGRADE: Menggunakan "quick_reply" (Tombol Biasa) agar admin langsung tap 1x
-                        const interactiveListMsg = {
-                            interactiveMessage: {
+                        // 🚀 UPGRADE: Trik Forwarded Message Bypass WA Business
+                        const interactivePayload = {
+                            isInteractive: true,
+                            payload: {
+                                contextInfo: {
+                                    isForwarded: true, 
+                                    forwardingScore: 999 
+                                },
                                 header: { title: "Pesanan Masuk", hasMediaAttachment: false },
                                 body: { text: `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: *${order.orderId}*\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\n_Silakan ketuk tombol di bawah untuk menyalakan Kiosk._` },
                                 footer: { text: "Kiosk Photobooth Bot" },
@@ -304,7 +309,7 @@ export default async function setupMessageHandler(sock) {
                         // 🚀 FALLBACK TEXT
                         const fallbackOrderText = `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: *${order.orderId}*\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\n*⚠️ Tombol Konfirmasi Gagal Dimuat*\nKetik manual untuk konfirmasi:\n*!konfirmasi ${order.orderId}*`;
                         
-                        await broadcastToAdmins(sock, interactiveListMsg, fallbackOrderText);
+                        await broadcastToAdmins(sock, interactivePayload, fallbackOrderText);
                         notifiedOrders.add(order.orderId);
                     }
                 }
@@ -330,7 +335,6 @@ export default async function setupMessageHandler(sock) {
             else if (msg.message.templateButtonReplyMessage?.selectedId) text = msg.message.templateButtonReplyMessage.selectedId;
             else if (msg.message.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson) {
                 try { 
-                    // Menangkap return value baik dari List Menu maupun Quick Reply Button
                     let params = JSON.parse(msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson); 
                     text = params.id || ''; 
                 } catch(e) {}
@@ -359,14 +363,18 @@ export default async function setupMessageHandler(sock) {
             console.log(`[COMMAND] ${command} dieksekusi oleh: ${senderJid}`);
 
             switch (command) {
-                // 🚀 UPGRADE: MENU INTERAKTIF WA 100% SUPPORTED
+                // 🚀 UPGRADE: MENU INTERAKTIF WA BUSINESS BYPASS
                 case 'menu':
                 case 'help':
                     if (args[0] === 'ai') { return await sock.sendMessage(replyJid, { text: "🤖 *Cara Pakai AI:*\nKetik *!ai <pertanyaan>*\nContoh: !ai Siapa presiden indonesia?" }, { quoted: msg }); }
                     if (args[0] === 'sticker') { return await sock.sendMessage(replyJid, { text: "🖼️ *Cara Bikin Sticker:*\nKirimkan gambar dengan caption *!s* atau balas sebuah gambar dengan *!s*" }, { quoted: msg }); }
 
-                    // Payload Murni List Menu (Single Select)
+                    // Payload List Menu dengan Trik Bypass
                     const interactiveMenu = {
+                        contextInfo: {
+                            isForwarded: true,
+                            forwardingScore: 999
+                        },
                         header: { title: "🤖 MENU UTAMA", hasMediaAttachment: false },
                         body: { text: `👋 Halo! Ini adalah *ZettBOT Control Center*.\nSilakan tekan tombol di bawah untuk memunculkan pilihan menu yang tersedia.` },
                         footer: { text: "ZettBOT Utility & Photobooth" },
