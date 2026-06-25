@@ -42,7 +42,8 @@ function saveAdmins() {
     fs.writeFileSync(adminsFile, JSON.stringify(botAdmins, null, 2));
 }
 
-let botSettings = { autoSholat: true, autoGempa: true, autoCuaca: true };
+// 🚀 UPGRADE: Tambah autoSholatRun (Default: false/off)
+let botSettings = { autoSholat: true, autoSholatRun: false, autoGempa: true, autoCuaca: true };
 if (fs.existsSync(settingsFile)) {
     try {
         let savedSettings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
@@ -203,7 +204,9 @@ export default async function setupMessageHandler(sock) {
     console.log("[System] ZettBOT Photobooth, Utility, Prayer & BMKG Handler Aktif!");
 
     setTimeout(async () => {
-        if (botSettings.autoSholat) await sendDailyPrayerSchedule(sock);
+        // 🚀 UPGRADE: Info Sholat saat Startup kini difilter oleh autoSholatRun
+        if (botSettings.autoSholatRun) await sendDailyPrayerSchedule(sock);
+        
         if (botSettings.autoCuaca) {
             const cMsg = await formatCuacaMsg("hari_ini");
             await broadcastToAdmins(sock, cMsg);
@@ -349,8 +352,8 @@ export default async function setupMessageHandler(sock) {
             }
 
             const isAdmin = botAdmins.includes(senderJid);
-            // 🚀 PROTEKSI COMMAND ADMIN
-            const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin', 'autoinfosholat', 'autocuaca', 'autogempa', 'restart'];
+            // 🚀 PROTEKSI COMMAND ADMIN (Tambahan autoinfosholatrun)
+            const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin', 'autoinfosholat', 'autoinfosholatrun', 'autocuaca', 'autogempa', 'restart'];
             
             if (adminCommands.includes(command) && !isAdmin) {
                 return await sock.sendMessage(replyJid, { text: "⚠️ *Akses Ditolak*\nMaaf, perintah tersebut khusus untuk Admin sistem." }, { quoted: msg });
@@ -380,7 +383,7 @@ export default async function setupMessageHandler(sock) {
                     let manualMenuText = `🤖 *MENU UTAMA ZETTBOT* 🤖\n\n`;
                     if (isAdmin) {
                         manualMenuText += `*📷 PHOTOBOOTH (Admin):*\n> !konfirmasi <ID>\n> !listorder\n\n` +
-                        `*⚙️ TOGGLE SISTEM (Admin):*\n> !autoinfosholat [on/off]\n> !autocuaca [on/off]\n> !autogempa [on/off]\n> !addadmin <ID>\n> !deladmin <ID>\n> !listadmin\n> !restart\n\n`;
+                        `*⚙️ TOGGLE SISTEM (Admin):*\n> !autoinfosholat [on/off]\n> !autoinfosholatrun [on/off]\n> !autocuaca [on/off]\n> !autogempa [on/off]\n> !addadmin <ID>\n> !deladmin <ID>\n> !listadmin\n> !restart\n\n`;
                     }
                     manualMenuText += `*✨ AI & UTILITIES:*\n> !ai <pertanyaan>\n> !s (buat stiker)\n> !gempa\n> !cuaca\n> !myid\n> !runtime\n> !ping`;
 
@@ -392,7 +395,8 @@ export default async function setupMessageHandler(sock) {
                     if (isAdmin) {
                         menuSections.push({ title: "📷 PHOTOBOOTH", rows: [{ title: "📋 Rekap Transaksi", description: "Cek pendapatan & orderan hari ini", id: "!listorder" }] });
                         menuSections.push({ title: "⚙️ TOGGLE SISTEM", rows: [
-                            { title: `🕌 Sholat: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
+                            { title: `🕌 Sholat Otomatis: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
+                            { title: `🕌 Sholat Startup: ${botSettings.autoSholatRun?"[ON]":"[OFF]"}`, description: "Kirim Jadwal saat Bot Start", id: `!autoinfosholatrun ${botSettings.autoSholatRun?"off":"on"}` },
                             { title: `⛅ Cuaca: ${botSettings.autoCuaca?"[ON]":"[OFF]"}`, description: "Prakiraan Kendari", id: `!autocuaca ${botSettings.autoCuaca?"off":"on"}` },
                             { title: `🚨 Gempa: ${botSettings.autoGempa?"[ON]":"[OFF]"}`, description: "Notifikasi BMKG", id: `!autogempa ${botSettings.autoGempa?"off":"on"}` },
                             { title: "👥 Daftar Admin", description: "Lihat siapa saja Admin", id: "!listadmin" },
@@ -445,11 +449,17 @@ export default async function setupMessageHandler(sock) {
                     await sock.sendMessage(replyJid, { text: cMsg }, { quoted: msg });
                     break;
 
-                case 'autoinfosholat': case 'autocuaca': case 'autogempa':
+                // 🚀 UPGRADE: Menangani autoinfosholatrun
+                case 'autoinfosholat': case 'autoinfosholatrun': case 'autocuaca': case 'autogempa':
                     if (!args[0]) return await sock.sendMessage(replyJid, { text: `⚠️ Format: *!${command} on* atau *!${command} off*` });
                     const param = args[0].toLowerCase();
-                    const settingKey = command === 'autoinfosholat' ? 'autoSholat' : (command === 'autocuaca' ? 'autoCuaca' : 'autoGempa');
-                    const label = command === 'autoinfosholat' ? 'Pengingat Sholat' : (command === 'autocuaca' ? 'Auto Cuaca' : 'Auto Gempa BMKG');
+                    
+                    let settingKey = '';
+                    let label = '';
+                    if (command === 'autoinfosholat') { settingKey = 'autoSholat'; label = 'Pengingat Sholat'; }
+                    else if (command === 'autoinfosholatrun') { settingKey = 'autoSholatRun'; label = 'Info Sholat saat Startup'; }
+                    else if (command === 'autocuaca') { settingKey = 'autoCuaca'; label = 'Auto Cuaca'; }
+                    else if (command === 'autogempa') { settingKey = 'autoGempa'; label = 'Auto Gempa BMKG'; }
                     
                     if (param === 'on') {
                         botSettings[settingKey] = true; saveSettings();
