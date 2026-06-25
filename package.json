@@ -1,7 +1,7 @@
 {
   "name": "ultimate-wa-bot-backend",
-  "version": "3.0.0",
-  "description": "Enterprise WhatsApp Bot Modular untuk Web Portal QR & Pairing",
+  "version": "4.0.0",
+  "description": "Enterprise WhatsApp Bot Modular untuk Web Portal QR & Pairing (Interactive Supported)",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
   "dependencies": {
     "@google/genai": "^1.30.0",
     "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.7.7",
+    "@whiskeysockets/baileys": "latest",
     "axios": "^1.6.8",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
