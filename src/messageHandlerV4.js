@@ -12,7 +12,7 @@ const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 const PHOTOBOOTH_GAS_URL = process.env.PHOTOBOOTH_GAS_URL || "https://script.google.com/macros/s/AKfycbxdyXI5z-RMC9LYaXiuJEsVDpfFOw44uTjP56dYec5V7HU2Vd06-X3dKDBUpyUD8hRi/exec";
 
 // ====================================================================
-// 📁 SESSION & MULTI-ADMIN LOGIC
+// 📁 SESSION, MULTI-ADMIN & SETTINGS LOGIC
 // ====================================================================
 const sessionPath = './session';
 if (!fs.existsSync(sessionPath)) {
@@ -21,13 +21,14 @@ if (!fs.existsSync(sessionPath)) {
 }
 
 const adminsFile = `${sessionPath}/admins.json`;
+const settingsFile = `${sessionPath}/settings.json`;
+
 // 🚀 BUGFIX: Memasukkan nomor owner dan ID @lid yang bermasalah sebagai Admin Permanen
 let botAdmins = [ownerNumber, "247922893566044@lid"]; 
 
 if (fs.existsSync(adminsFile)) {
     try { 
         let savedAdmins = JSON.parse(fs.readFileSync(adminsFile, 'utf-8')); 
-        // Menggabungkan admin permanen dengan admin yang disimpan agar tidak saling tindih
         botAdmins = [...new Set([...botAdmins, ...savedAdmins])];
     } catch(e){}
 } else {
@@ -38,21 +39,94 @@ function saveAdmins() {
     fs.writeFileSync(adminsFile, JSON.stringify(botAdmins, null, 2));
 }
 
-// Helper Format Nomor HP (Mendukung ID @lid dan Format Biasa)
-function formatPhoneToJid(phone) {
-    // Jika input sudah berakhiran @lid atau @s.whatsapp.net, biarkan formatnya utuh
-    if (phone.endsWith('@lid') || phone.endsWith('@s.whatsapp.net') || phone.endsWith('@g.us')) {
-        return phone;
-    }
+// Global Settings untuk Fitur Sholat dsb
+let botSettings = { autoSholat: true };
+if (fs.existsSync(settingsFile)) {
+    try {
+        let savedSettings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+        botSettings = { ...botSettings, ...savedSettings };
+    } catch (e) {}
+} else {
+    fs.writeFileSync(settingsFile, JSON.stringify(botSettings, null, 2));
+}
 
-    // Jika input hanya angka biasa, format menjadi standar WA Indonesia
+function saveSettings() {
+    fs.writeFileSync(settingsFile, JSON.stringify(botSettings, null, 2));
+}
+
+// Helper Format Nomor HP
+function formatPhoneToJid(phone) {
+    if (phone.endsWith('@lid') || phone.endsWith('@s.whatsapp.net') || phone.endsWith('@g.us')) return phone;
     let p = phone.replace(/[^0-9]/g, '');
     if (p.startsWith('0')) p = '62' + p.slice(1);
     if (p.startsWith('8')) p = '62' + p;
     return p + "@s.whatsapp.net";
 }
 
-// SMART POLLER STATE
+// ====================================================================
+// 🕌 JADWAL SHOLAT & WAKTU (KENDARI - WITA)
+// ====================================================================
+let todayPrayerTimes = null;
+let lastFetchDate = null;
+
+// Fungsi Helper untuk Waktu WITA (Asia/Makassar)
+function getWitaTime() {
+    const now = new Date();
+    const witaString = now.toLocaleString("en-US", { timeZone: "Asia/Makassar" });
+    return new Date(witaString);
+}
+
+function formatTimeWita(date) {
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function getDateStringWita(date) {
+    return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+async function fetchPrayerTimes() {
+    try {
+        const res = await fetch("https://api.aladhan.com/v1/timingsByCity?city=Kendari&country=Indonesia&method=20");
+        const data = await res.json();
+        if (data.code === 200) {
+            const t = data.data.timings;
+            todayPrayerTimes = {
+                Subuh: t.Fajr,
+                Dzuhur: t.Dhuhr,
+                Ashar: t.Asr,
+                Maghrib: t.Maghrib,
+                Isya: t.Isha
+            };
+            lastFetchDate = getDateStringWita(getWitaTime());
+            return true;
+        }
+    } catch (e) {
+        console.error("[System] Gagal fetch jadwal sholat", e);
+    }
+    return false;
+}
+
+async function broadcastToAdmins(sock, text) {
+    for (const adminId of botAdmins) {
+        try { await sock.sendMessage(adminId, { text }); } catch(err){}
+    }
+}
+
+async function sendDailyPrayerSchedule(sock) {
+    if (!todayPrayerTimes) await fetchPrayerTimes();
+    if (!todayPrayerTimes) return;
+    
+    let msg = `🕌 *JADWAL SHOLAT HARI INI*\n📍 Wilayah Kendari & Sekitarnya\n🗓️ Tanggal: ${getDateStringWita(getWitaTime())}\n\n`;
+    for (const [name, time] of Object.entries(todayPrayerTimes)) {
+        msg += `> *${name}:* ${time} WITA\n`;
+    }
+    msg += `\n_Sistem akan otomatis mengingatkan Admin saat waktu sholat tiba._\n_(Ketik !autoinfosholat off untuk mematikan)_`;
+    
+    await broadcastToAdmins(sock, msg);
+}
+
+
+// SMART POLLER STATE (Photobooth)
 const notifiedOrders = new Set();
 
 function getRelativeTime(seconds) {
@@ -65,11 +139,59 @@ function getRelativeTime(seconds) {
     return `${Math.floor(seconds)} seconds ago`;
 }
 
-export default function setupMessageHandler(sock) {
-    console.log("[System] ZettBOT Photobooth & Utility Handler Aktif!");
+export default async function setupMessageHandler(sock) {
+    console.log("[System] ZettBOT Photobooth, Utility & Prayer Handler Aktif!");
+
+    // 🕌 EKSEKUSI JADWAL SHOLAT SAAT BOT BARU STARTUP
+    if (botSettings.autoSholat) {
+        console.log("[System] Mengirim Jadwal Sholat Kendari ke Admin (Startup)...");
+        await sendDailyPrayerSchedule(sock);
+    }
 
     // ====================================================================
-    // 🚀 API PULLING SYSTEM & MULTI-ADMIN BROADCAST
+    // 🕌 CRON-JOB JADWAL SHOLAT (Check Setiap 1 Menit)
+    // ====================================================================
+    let lastDailySentDate = getDateStringWita(getWitaTime()); // Supaya tidak ngirim double di jam yg sama saat startup
+    let lastPrayerReminded = null; // Mencegah spam menit yang sama
+
+    setInterval(async () => {
+        if (!botSettings.autoSholat) return;
+
+        const now = getWitaTime();
+        const dateStr = getDateStringWita(now);
+        const timeStr = formatTimeWita(now);
+
+        // Fetch data baru jika ganti hari
+        if (lastFetchDate !== dateStr) {
+            await fetchPrayerTimes();
+        }
+
+        if (!todayPrayerTimes) return;
+
+        // 1. Broadcast Jadwal Lengkap Jam 00:00 WITA
+        if (timeStr === "00:00" && lastDailySentDate !== dateStr) {
+            lastDailySentDate = dateStr;
+            await sendDailyPrayerSchedule(sock);
+        }
+
+        // 2. Broadcast Pengingat Persis di Waktu Sholat
+        for (const [name, time] of Object.entries(todayPrayerTimes)) {
+            if (timeStr === time) {
+                const reminderId = `${name}-${dateStr}`;
+                if (lastPrayerReminded !== reminderId) {
+                    lastPrayerReminded = reminderId;
+                    const adzanMsg = `📢 *WAKTUNYA SHOLAT!*\n\nTelah masuk waktu *${name}* (${time} WITA) untuk wilayah Kota Kendari dan sekitarnya.\n\n_Selamat menunaikan ibadah sholat._ 🕌`;
+                    await broadcastToAdmins(sock, adzanMsg);
+                    console.log(`[Sholat] Pengingat sholat ${name} terkirim.`);
+                }
+            }
+        }
+    }, 60 * 1000); // 1 Menit sekali
+    // ====================================================================
+
+
+    // ====================================================================
+    // 🚀 API PULLING SYSTEM (PHOTOBOOTH)
     // ====================================================================
     setInterval(async () => {
         try {
@@ -86,17 +208,11 @@ export default function setupMessageHandler(sock) {
                     if (!notifiedOrders.has(order.orderId)) {
                         const hargaFormat = parseInt(order.harga).toLocaleString('id-ID');
                         
-                        // 🚀 Pesan di-Split agar gampang di Copy-Paste
                         const msg1 = `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: ${order.orderId}\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\nSilakan COPY pesan di bawah yang saya berikan\n\nUntuk menyalakan kamera Kiosk secara otomatis.`;
                         const msg2 = `!konfirmasi ${order.orderId}`;
                         
-                        // Broadcast ke seluruh Admin terdaftar
-                        for (const adminId of botAdmins) {
-                            try {
-                                await sock.sendMessage(adminId, { text: msg1 });
-                                await sock.sendMessage(adminId, { text: msg2 });
-                            } catch(err){}
-                        }
+                        await broadcastToAdmins(sock, msg1);
+                        await broadcastToAdmins(sock, msg2);
                         
                         notifiedOrders.add(order.orderId);
                         console.log(`[Photobooth] Notifikasi order ${order.orderId} sukses di-broadcast.`);
@@ -123,38 +239,30 @@ export default function setupMessageHandler(sock) {
             const args = text.slice(prefix.length).trim().split(/ +/);
             const command = args.shift().toLowerCase();
             
-            // ====================================================================
-            // 🚀 BUGFIX: JID SANITIZER & PEMISAHAN RUANG OBROLAN
-            // ====================================================================
-            const replyJid = msg.key.remoteJid; // Target agar bot selalu membalas ke ruangan yang tepat
-            let senderJid = msg.key.remoteJid; // Identitas asli pengirim
+            // JID SANITIZER
+            const replyJid = msg.key.remoteJid; 
+            let senderJid = msg.key.remoteJid; 
             
-            // Ambil identitas asli jika pesan dari dalam Grup
             if (senderJid.endsWith('@g.us')) {
                 senderJid = msg.key.participant || senderJid;
             }
-            
-            // Bersihkan suffix multi-device (titik dua) -> 628123:1@... jadi 628123@...
             if (senderJid.includes(':')) {
                 senderJid = senderJid.substring(0, senderJid.indexOf(':')) + '@s.whatsapp.net';
             }
-            
-            // Bersihkan bug @lid WhatsApp (Sangat penting agar bot merespons Anda!)
             if (senderJid.endsWith('@lid') && msg.key.remoteJid && !msg.key.remoteJid.endsWith('@g.us')) {
                 senderJid = msg.key.remoteJid;
                 if (senderJid.includes(':')) {
                     senderJid = senderJid.substring(0, senderJid.indexOf(':')) + '@s.whatsapp.net';
                 }
             }
-            // ====================================================================
 
-            // Keamanan: Cek apakah pengirim ini adalah admin?
+            // Keamanan Admin
             const isAdmin = botAdmins.includes(senderJid);
-            const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin'];
+            // Tambahkan autoinfosholat ke array command yang dijaga ketat
+            const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin', 'autoinfosholat'];
             
-            // Jika ini command admin, TAPI dia bukan admin, tolak diam-diam.
             if (adminCommands.includes(command) && !isAdmin) {
-                console.log(`[Security] Orang biasa (${senderJid}) mencoba command Admin: ${command}`);
+                console.log(`[Security] Akses ditolak untuk ${senderJid} pada command: ${command}`);
                 return;
             }
 
@@ -163,34 +271,32 @@ export default function setupMessageHandler(sock) {
             switch (command) {
                 case 'menu':
                 case 'help':
+                    const sholatStatus = botSettings.autoSholat ? "✅ ON" : "❌ OFF";
                     const menuText = `*🤖 BOT PHOTOBOOTH & UTILITY 🤖*\n\n` +
                                      `*📷 PHOTOBOOTH (Khusus Admin):*\n` +
                                      `* !konfirmasi <ID>* - Konfirmasi Pelunasan Order\n` +
                                      `* !listorder* - Rekap transaksi hari ini\n\n` +
-                                     `*👥 MANAJEMEN ADMIN:*\n` +
+                                     `*👥 MANAJEMEN ADMIN & SISTEM:*\n` +
                                      `* !addadmin <no_hp/ID>* - Tambah Admin Notif\n` +
                                      `* !deladmin <no_hp/ID>* - Hapus Admin\n` +
-                                     `* !listadmin* - Daftar Admin\n\n` +
+                                     `* !listadmin* - Daftar Admin\n` +
+                                     `* !autoinfosholat on/off* - Pengingat Sholat [${sholatStatus}]\n\n` +
                                      `*✨ AI & MEDIA (Umum):*\n` +
                                      `* !ai <pesan>* - Chat dengan AI\n` +
                                      `* !sticker / !s* - Buat sticker dari gambar\n\n` +
                                      `*⚙️ UTILITAS (Umum):*\n` +
-                                     `* !myid / !cekid* - Cek ID WA kamu (Bisa utk daftar Admin)\n` +
+                                     `* !myid / !cekid* - Cek ID WA kamu\n` +
                                      `* !runtime* - Cek status & memori server\n` +
                                      `* !ping* - Cek kecepatan respon bot\n`;
                     await sock.sendMessage(replyJid, { text: menuText }, { quoted: msg });
                     break;
 
                 // ====================================================================
-                // 🚀 COMMAND UMUM (SIAPAPUN BISA PAKAI)
+                // 🚀 COMMAND UMUM
                 // ====================================================================
                 case 'myid':
                 case 'cekid':
-                    let idInfo = `*ℹ️ INFORMASI ID ANDA*\n\n`;
-                    idInfo += `*ID Pengirim:* \n${senderJid}\n\n`;
-                    idInfo += `_Ingin didaftarkan sebagai admin? Copy *ID Pengirim* di atas dan berikan ke Owner._\n\n`;
-                    idInfo += `_Owner dapat menambahkannya dengan cara:_\n`;
-                    idInfo += `*!addadmin ${senderJid}*`;
+                    let idInfo = `*ℹ️ INFORMASI ID ANDA*\n\n*ID Pengirim:* \n${senderJid}\n\n_Ingin didaftarkan sebagai admin? Copy *ID Pengirim* di atas dan berikan ke Owner._\n\n_Owner dapat menambahkannya dengan cara:_\n*!addadmin ${senderJid}*`;
                     await sock.sendMessage(replyJid, { text: idInfo }, { quoted: msg });
                     break;
 
@@ -216,8 +322,25 @@ export default function setupMessageHandler(sock) {
                     break;
 
                 // ====================================================================
-                // 🚀 COMMAND KHUSUS ADMIN (DILINDUNGI SISTEM)
+                // 🚀 COMMAND KHUSUS ADMIN
                 // ====================================================================
+                case 'autoinfosholat':
+                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!autoinfosholat on* atau *!autoinfosholat off*" });
+                    const param = args[0].toLowerCase();
+                    if (param === 'on') {
+                        botSettings.autoSholat = true;
+                        saveSettings();
+                        await sock.sendMessage(replyJid, { text: "✅ Fitur Pengingat Sholat (WITA) BERHASIL diaktifkan." });
+                        await sendDailyPrayerSchedule(sock); // Langsung kirim jadwal setelah diaktifkan
+                    } else if (param === 'off') {
+                        botSettings.autoSholat = false;
+                        saveSettings();
+                        await sock.sendMessage(replyJid, { text: "❌ Fitur Pengingat Sholat (WITA) DIMATIKAN." });
+                    } else {
+                        await sock.sendMessage(replyJid, { text: "⚠️ Gunakan *on* atau *off*." });
+                    }
+                    break;
+
                 case 'addadmin':
                     if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!addadmin 628xxx* atau *!addadmin id@lid*" });
                     const newAdmin = formatPhoneToJid(args[0]);
@@ -294,7 +417,7 @@ export default function setupMessageHandler(sock) {
                     }
                     
                     const orderId = args[0];
-                    const adminPhone = senderJid.split('@')[0]; // Nama admin diambil dari identitas aslinya
+                    const adminPhone = senderJid.split('@')[0]; 
                     await sock.sendMessage(replyJid, { text: `⏳ _Memproses pelunasan untuk ID ${orderId}..._` }, { quoted: msg });
                     
                     try {
@@ -304,7 +427,7 @@ export default function setupMessageHandler(sock) {
                             body: JSON.stringify({
                                 action: "konfirmasi_lunas",
                                 orderId: orderId,
-                                confirmedBy: "Admin " + adminPhone // Mengirim info ke Google Sheet siapa yg konfirm
+                                confirmedBy: "Admin " + adminPhone 
                             })
                         });
                         
@@ -315,9 +438,8 @@ export default function setupMessageHandler(sock) {
                                 text: `✅ *KONFIRMASI LUNAS BERHASIL*\n\nID: ${orderId}\nSistem Kiosk di mall telah otomatis dilanjutkan ke sesi kamera!` 
                             }, { quoted: msg });
                             
-                            // BROADCAST KE ADMIN LAIN (Agar admin lain tahu ini sudah diurus)
                             for (const adminId of botAdmins) {
-                                if (adminId !== senderJid) { // Jangan kirim ulang ke orang yg ngeklik
+                                if (adminId !== senderJid) { 
                                     try {
                                         await sock.sendMessage(adminId, { 
                                             text: `ℹ️ *INFO SISTEM*\nPesanan ${orderId} telah dikonfirmasi lunas oleh Admin ${adminPhone}.` 
@@ -325,7 +447,6 @@ export default function setupMessageHandler(sock) {
                                     } catch(e){}
                                 }
                             }
-
                         } else {
                             await sock.sendMessage(replyJid, { text: `❌ *Gagal Konfirmasi:*\n${result.message}` }, { quoted: msg });
                         }
