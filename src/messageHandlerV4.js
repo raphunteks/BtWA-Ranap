@@ -2,8 +2,8 @@ import fs from 'fs';
 import process from 'process';
 import os from 'os';
 
-// 🚀 UPGRADE: Import generateWAMessageFromContent & proto untuk Bypass WA Business
-import { generateWAMessageFromContent, proto } from '@whiskeysockets/baileys'; 
+// 🚀 UPGRADE: Import generateWAMessageFromContent untuk mem-build payload valid
+import { generateWAMessageFromContent } from '@whiskeysockets/baileys'; 
 
 // Handler perintah eksternal
 import handleAiCommand from './commands/ai.js';
@@ -75,7 +75,6 @@ function getDateStringWita(date) { return `${date.getFullYear()}-${date.getMonth
 // 🌍 MODUL API: JADWAL SHOLAT, CUACA & GEMPA
 // ====================================================================
 
-// 1. SHOLAT (KENDARI)
 let todayPrayerTimes = null;
 let lastFetchDate = null;
 
@@ -93,7 +92,6 @@ async function fetchPrayerTimes() {
     return false;
 }
 
-// 2. CUACA (KENDARI)
 const WMO_CODES = { 0: "Cerah ☀️", 1: "Cerah Berawan 🌤️", 2: "Berawan ⛅", 3: "Mendung ☁️", 45: "Berkabut 🌫️", 48: "Kabut Tebal 🌫️", 51: "Gerimis 🌧️", 53: "Gerimis 🌧️", 55: "Gerimis Lebat 🌧️", 61: "Hujan Ringan 🌧️", 63: "Hujan Sedang 🌧️", 65: "Hujan Lebat 🌧️", 80: "Hujan Lokal 🌦️", 81: "Hujan Lokal 🌦️", 82: "Hujan Lokal Lebat 🌧️", 95: "Badai Petir ⛈️" };
 
 async function fetchCuaca() {
@@ -128,7 +126,6 @@ async function formatCuacaMsg(tipe = "hari_ini") {
     return msg;
 }
 
-// 3. GEMPA (BMKG)
 let lastGempaId = null;
 
 async function checkGempa() {
@@ -150,30 +147,34 @@ function createGempaMessage(gempa, isBroadcast = false) {
     };
 }
 
-// 🚀 UPGRADE: BROADCAST HELPER UNTUK ANTI-BLOCK WA BUSINESS
-async function broadcastToAdmins(sock, messagePayload, fallbackText = null) {
+// 🚀 UPGRADE LOGIC: HYBRID BROADCASTER (Teks Selalu Dikirim Dulu, Tombol Menyusul)
+async function broadcastToAdmins(sock, textPayload, interactivePayload = null) {
     for (const adminId of botAdmins) {
         try { 
-            if (typeof messagePayload === 'string') { 
-                await sock.sendMessage(adminId, { text: messagePayload }); 
-            } else if (messagePayload.isInteractive) {
+            // 1. Selalu kirim teks manualnya agar 100% aman masuk ke WA Business
+            if (typeof textPayload === 'string') { 
+                await sock.sendMessage(adminId, { text: textPayload }); 
+            } else {
+                await sock.sendMessage(adminId, textPayload); 
+            }
+
+            // 2. Jika ada payload interaktif (Tombol), susulkan pesannya
+            if (interactivePayload) {
                 try {
                     const msgContent = generateWAMessageFromContent(adminId, {
                         viewOnceMessage: {
                             message: {
                                 messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
-                                interactiveMessage: messagePayload.payload
+                                interactiveMessage: interactivePayload
                             }
                         }
                     }, { userJid: sock.user?.id || sock.user?.jid });
 
                     await sock.relayMessage(adminId, msgContent.message, { messageId: msgContent.key.id });
                 } catch (err) {
-                    console.error(`[System] Gagal kirim List Message ke ${adminId}, menggunakan Fallback Text.`);
-                    if (fallbackText) await sock.sendMessage(adminId, { text: fallbackText });
+                    // Tombol gagal diproses Baileys, tidak apa-apa karena Teks sudah berhasil
+                    console.log(`[System] Tombol interaktif gagal untuk ${adminId}`);
                 }
-            } else { 
-                await sock.sendMessage(adminId, messagePayload); 
             }
         } catch(err){}
     }
@@ -265,7 +266,7 @@ export default async function setupMessageHandler(sock) {
     }, 60 * 1000); 
 
     // ====================================================================
-    // 📷 POLLER PHOTOBOOTH DENGAN QUICK REPLY BUTTON BYPASS
+    // 📷 POLLER PHOTOBOOTH DENGAN HYBRID LOGIC
     // ====================================================================
     setInterval(async () => {
         try {
@@ -280,30 +281,27 @@ export default async function setupMessageHandler(sock) {
                     if (!notifiedOrders.has(order.orderId)) {
                         const hargaFormat = parseInt(order.harga).toLocaleString('id-ID');
                         
-                        const interactivePayload = {
-                            isInteractive: true,
-                            payload: {
-                                contextInfo: { isForwarded: true, forwardingScore: 999 },
-                                header: { title: "Pesanan Masuk", hasMediaAttachment: false },
-                                body: { text: `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: *${order.orderId}*\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\n_Silakan ketuk tombol di bawah untuk menyalakan Kiosk._` },
-                                footer: { text: "Kiosk Photobooth Bot" },
-                                nativeFlowMessage: {
-                                    buttons: [
-                                        {
-                                            name: "quick_reply",
-                                            buttonParamsJson: JSON.stringify({
-                                                display_text: "✅ Konfirmasi Lunas",
-                                                id: `!konfirmasi ${order.orderId}`
-                                            })
-                                        }
-                                    ]
-                                }
+                        // 1. TEKS UTAMA (Pasti terkirim 100%)
+                        const primaryText = `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: *${order.orderId}*\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\n*Ketik untuk konfirmasi:*\n!konfirmasi ${order.orderId}`;
+                        
+                        // 2. TOMBOL JALAN PINTAS (Pesan Susulan)
+                        const shortcutButton = {
+                            body: { text: `Atau gunakan tombol di bawah ini:` },
+                            footer: { text: "Kiosk Photobooth Bot" },
+                            nativeFlowMessage: {
+                                buttons: [
+                                    {
+                                        name: "quick_reply",
+                                        buttonParamsJson: JSON.stringify({
+                                            display_text: "✅ Konfirmasi Lunas",
+                                            id: `!konfirmasi ${order.orderId}`
+                                        })
+                                    }
+                                ]
                             }
                         };
                         
-                        const fallbackOrderText = `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: *${order.orderId}*\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\n*⚠️ Tombol Konfirmasi Gagal Dimuat*\nKetik manual untuk konfirmasi:\n*!konfirmasi ${order.orderId}*`;
-                        
-                        await broadcastToAdmins(sock, interactivePayload, fallbackOrderText);
+                        await broadcastToAdmins(sock, primaryText, shortcutButton);
                         notifiedOrders.add(order.orderId);
                     }
                 }
@@ -319,6 +317,7 @@ export default async function setupMessageHandler(sock) {
             const msg = m.messages[0];
             if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
+            // Tangkap ID jika menggunakan Tombol
             let text = '';
             if (msg.message.conversation) text = msg.message.conversation;
             else if (msg.message.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
@@ -352,7 +351,6 @@ export default async function setupMessageHandler(sock) {
             const isAdmin = botAdmins.includes(senderJid);
             const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin', 'autoinfosholat', 'autocuaca', 'autogempa'];
             
-            // 🚀 UPGRADE: Jika bukan admin tapi coba jalankan fitur Admin, beri peringatan bukan sekadar diam!
             if (adminCommands.includes(command) && !isAdmin) {
                 return await sock.sendMessage(replyJid, { text: "⚠️ *Akses Ditolak*\nMaaf, perintah tersebut khusus untuk Admin sistem." }, { quoted: msg });
             }
@@ -360,77 +358,52 @@ export default async function setupMessageHandler(sock) {
             console.log(`[COMMAND] ${command} dieksekusi oleh: ${senderJid} (Admin: ${isAdmin})`);
 
             switch (command) {
-                // 🚀 UPGRADE: MENU DINAMIS UNTUK PUBLIK & ADMIN (WA BUSINESS BYPASS)
+                // 🚀 UPGRADE LOGIC: HYBRID MENU (TEKS DIKIRIM UTAMA, LIST BUTTON SUSULAN)
                 case 'menu':
                 case 'help':
                     if (args[0] === 'ai') { return await sock.sendMessage(replyJid, { text: "🤖 *Cara Pakai AI:*\nKetik *!ai <pertanyaan>*\nContoh: !ai Siapa presiden indonesia?" }, { quoted: msg }); }
                     if (args[0] === 'sticker') { return await sock.sendMessage(replyJid, { text: "🖼️ *Cara Bikin Sticker:*\nKirimkan gambar dengan caption *!s* atau balas sebuah gambar dengan *!s*" }, { quoted: msg }); }
 
-                    // 1. MEMBUAT LIST MENU SECARA DINAMIS (BEDA ADMIN BEDA USER BIASA)
-                    const menuSections = [];
-
-                    // Jika yang ketik adalah Admin, tambahkan Menu Khusus Admin
+                    // 1. SUSUN TEKS MANUAL SEBAGAI PESAN UTAMA (Aman 100%)
+                    let manualMenuText = `🤖 *MENU UTAMA ZETTBOT* 🤖\n\n`;
                     if (isAdmin) {
-                        menuSections.push({
-                            title: "📷 PHOTOBOOTH (Menu Admin)",
-                            rows: [{ title: "📋 Rekap Transaksi", description: "Cek pendapatan & orderan hari ini", id: "!listorder" }]
-                        });
-                        menuSections.push({
-                            title: "⚙️ TOGGLE SISTEM (Menu Admin)",
-                            rows: [
-                                { title: `🕌 Sholat: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
-                                { title: `⛅ Cuaca: ${botSettings.autoCuaca?"[ON]":"[OFF]"}`, description: "Prakiraan Kendari", id: `!autocuaca ${botSettings.autoCuaca?"off":"on"}` },
-                                { title: `🚨 Gempa: ${botSettings.autoGempa?"[ON]":"[OFF]"}`, description: "Notifikasi BMKG", id: `!autogempa ${botSettings.autoGempa?"off":"on"}` },
-                                { title: "👥 Daftar Admin", description: "Lihat siapa saja Admin", id: "!listadmin" }
-                            ]
-                        });
-                    }
-
-                    // Menu Publik (Tampil untuk semua orang)
-                    menuSections.push({
-                        title: "✨ AI & MEDIA",
-                        rows: [
-                            { title: "🤖 Cara Pakai AI", description: "Bantuan chat AI", id: "!help ai" },
-                            { title: "🖼️ Cara Bikin Sticker", description: "Bantuan stiker WA", id: "!help sticker" }
-                        ]
-                    });
-                    menuSections.push({
-                        title: "🛠️ INFO UTILITIES",
-                        rows: [
-                            { title: "🌋 Gempa Terakhir", description: "Info gempa BMKG saat ini", id: "!gempa" },
-                            { title: "🌤️ Cuaca Kendari", description: "Info cuaca hari ini", id: "!cuaca" },
-                            { title: "ℹ️ Cek ID Saya", description: "Untuk daftar Admin", id: "!myid" },
-                            { title: "📈 Status Server", description: "Ping & Uptime", id: "!runtime" }
-                        ]
-                    });
-
-                    // 2. PAYLOAD LIST MENU DENGAN BYPASS
-                    const interactiveMenu = {
-                        contextInfo: { isForwarded: true, forwardingScore: 999 },
-                        header: { title: "🤖 MENU UTAMA", hasMediaAttachment: false },
-                        body: { text: `👋 Halo! Ini adalah *ZettBOT Control Center*.\nSilakan tekan tombol di bawah untuk memunculkan pilihan menu yang tersedia.` },
-                        footer: { text: "ZettBOT Utility & Photobooth" },
-                        nativeFlowMessage: {
-                            buttons: [
-                                {
-                                    name: "single_select",
-                                    buttonParamsJson: JSON.stringify({
-                                        title: "Buka Menu",
-                                        sections: menuSections
-                                    })
-                                }
-                            ]
-                        }
-                    };
-
-                    // 3. FALLBACK TEXT DINAMIS (Jika tombol direject oleh WA Client)
-                    let fallbackMenuText = `*🤖 MENU ZETTBOT (Mode Teks) 🤖*\n_Tombol interaktif gagal dimuat. Silakan ketik manual command di bawah:_\n\n`;
-                    if (isAdmin) {
-                        fallbackMenuText += `*📷 PHOTOBOOTH (Admin):*\n> !konfirmasi <ID>\n> !listorder\n\n` +
+                        manualMenuText += `*📷 PHOTOBOOTH (Admin):*\n> !konfirmasi <ID>\n> !listorder\n\n` +
                         `*⚙️ TOGGLE SISTEM (Admin):*\n> !autoinfosholat [on/off]\n> !autocuaca [on/off]\n> !autogempa [on/off]\n> !addadmin <ID>\n> !deladmin <ID>\n> !listadmin\n\n`;
                     }
-                    fallbackMenuText += `*✨ AI & UTILITIES:*\n> !ai <pertanyaan>\n> !s (untuk stiker)\n> !gempa\n> !cuaca\n> !myid\n> !runtime\n> !ping`;
+                    manualMenuText += `*✨ AI & UTILITIES:*\n> !ai <pertanyaan>\n> !s (buat stiker)\n> !gempa\n> !cuaca\n> !myid\n> !runtime\n> !ping`;
+
+                    // Kirim Teks Manualnya Terlebih Dahulu!
+                    await sock.sendMessage(replyJid, { text: manualMenuText }, { quoted: msg });
+
+                    // 2. SUSUN LIST BUTTON INTERAKTIF SEBAGAI PESAN SUSULAN
+                    const menuSections = [];
+                    if (isAdmin) {
+                        menuSections.push({ title: "📷 PHOTOBOOTH", rows: [{ title: "📋 Rekap Transaksi", description: "Cek pendapatan & orderan hari ini", id: "!listorder" }] });
+                        menuSections.push({ title: "⚙️ TOGGLE SISTEM", rows: [
+                            { title: `🕌 Sholat: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
+                            { title: `⛅ Cuaca: ${botSettings.autoCuaca?"[ON]":"[OFF]"}`, description: "Prakiraan Kendari", id: `!autocuaca ${botSettings.autoCuaca?"off":"on"}` },
+                            { title: `🚨 Gempa: ${botSettings.autoGempa?"[ON]":"[OFF]"}`, description: "Notifikasi BMKG", id: `!autogempa ${botSettings.autoGempa?"off":"on"}` },
+                            { title: "👥 Daftar Admin", description: "Lihat siapa saja Admin", id: "!listadmin" }
+                        ]});
+                    }
+                    menuSections.push({ title: "✨ AI & MEDIA", rows: [{ title: "🤖 Cara Pakai AI", description: "Bantuan chat AI", id: "!help ai" }, { title: "🖼️ Cara Bikin Sticker", description: "Bantuan stiker WA", id: "!help sticker" }] });
+                    menuSections.push({ title: "🛠️ INFO UTILITIES", rows: [{ title: "🌋 Gempa Terakhir", description: "Info gempa BMKG saat ini", id: "!gempa" }, { title: "🌤️ Cuaca Kendari", description: "Info cuaca hari ini", id: "!cuaca" }, { title: "ℹ️ Cek ID Saya", description: "Untuk daftar Admin", id: "!myid" }, { title: "📈 Status Server", description: "Ping & Uptime", id: "!runtime" }] });
+
+                    const interactiveMenu = {
+                        body: { text: `_Atau gunakan tombol di bawah untuk akses cepat:_` },
+                        footer: { text: "ZettBOT Interactive" },
+                        nativeFlowMessage: {
+                            buttons: [{
+                                name: "single_select",
+                                buttonParamsJson: JSON.stringify({
+                                    title: "Buka Menu",
+                                    sections: menuSections
+                                })
+                            }]
+                        }
+                    };
                     
+                    // Coba Kirim Tombol Susulan
                     try {
                         const msgContent = generateWAMessageFromContent(replyJid, {
                             viewOnceMessage: {
@@ -443,8 +416,7 @@ export default async function setupMessageHandler(sock) {
 
                         await sock.relayMessage(replyJid, msgContent.message, { messageId: msgContent.key.id });
                     } catch (err) {
-                        console.error("[System] Tombol Menu Gagal dikirim, mengirim Teks Manual.", err);
-                        await sock.sendMessage(replyJid, { text: fallbackMenuText }, { quoted: msg });
+                        // Diabaikan jika WA Business menolak karena Teks Manual (pesan utama) sudah dikirim
                     }
                     break;
 
