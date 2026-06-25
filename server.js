@@ -191,6 +191,29 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
             return {
                 conversation: 'Pesan referensi untuk bot.'
             };
+        },
+        // 🚀 UPGRADE BESAR: Patch Otomatis untuk Button/List/Interactive Message (Native Flow)
+        patchMessageBeforeSending: (message) => {
+            const requiresPatch = !!(
+                message.buttonsMessage ||
+                message.templateMessage ||
+                message.listMessage ||
+                message.interactiveMessage
+            );
+            if (requiresPatch) {
+                message = {
+                    viewOnceMessage: {
+                        message: {
+                            messageContextInfo: {
+                                deviceListMetadataVersion: 2,
+                                deviceListMetadata: {},
+                            },
+                            ...message,
+                        },
+                    },
+                };
+            }
+            return message;
         }
     });
 
