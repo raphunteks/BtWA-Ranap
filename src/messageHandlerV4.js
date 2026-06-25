@@ -38,7 +38,6 @@ function saveAdmins() {
     fs.writeFileSync(adminsFile, JSON.stringify(botAdmins, null, 2));
 }
 
-// 🚀 UPGRADE: Tambahan Global Settings untuk Gempa & Cuaca
 let botSettings = { autoSholat: true, autoGempa: true, autoCuaca: true };
 if (fs.existsSync(settingsFile)) {
     try {
@@ -61,7 +60,6 @@ function formatPhoneToJid(phone) {
     return p + "@s.whatsapp.net";
 }
 
-// Helper Waktu (WITA)
 function getWitaTime() {
     const now = new Date();
     const witaString = now.toLocaleString("en-US", { timeZone: "Asia/Makassar" });
@@ -92,12 +90,11 @@ async function fetchPrayerTimes() {
     return false;
 }
 
-// 2. CUACA (KENDARI) - Menggunakan Open-Meteo
+// 2. CUACA (KENDARI)
 const WMO_CODES = { 0: "Cerah ☀️", 1: "Cerah Berawan 🌤️", 2: "Berawan ⛅", 3: "Mendung ☁️", 45: "Berkabut 🌫️", 48: "Kabut Tebal 🌫️", 51: "Gerimis 🌧️", 53: "Gerimis 🌧️", 55: "Gerimis Lebat 🌧️", 61: "Hujan Ringan 🌧️", 63: "Hujan Sedang 🌧️", 65: "Hujan Lebat 🌧️", 80: "Hujan Lokal 🌦️", 81: "Hujan Lokal 🌦️", 82: "Hujan Lokal Lebat 🌧️", 95: "Badai Petir ⛈️" };
 
 async function fetchCuaca() {
     try {
-        // Koordinat Kendari
         const res = await fetch("https://api.open-meteo.com/v1/forecast?latitude=-3.9985&longitude=122.5156&daily=weather_code,temperature_2m_max,temperature_2m_min&current_weather=true&timezone=Asia%2FMakassar");
         return await res.json();
     } catch(e) { console.error("[System] Gagal fetch cuaca", e); }
@@ -150,15 +147,21 @@ function createGempaMessage(gempa, isBroadcast = false) {
     };
 }
 
-// BROADCAST HELPER - UPDATE UNTUK MENDUKUNG RAW INTERACTIVE MESSAGE
-async function broadcastToAdmins(sock, messagePayload) {
+// 🚀 UPGRADE: BROADCAST HELPER DENGAN SISTEM FALLBACK TEXT
+async function broadcastToAdmins(sock, messagePayload, fallbackText = null) {
     for (const adminId of botAdmins) {
         try { 
             if (typeof messagePayload === 'string') { 
                 await sock.sendMessage(adminId, { text: messagePayload }); 
             } else if (messagePayload.viewOnceMessage) {
-                // Gunakan relayMessage khusus untuk Interactive Message BMKG/Photobooth
-                await sock.relayMessage(adminId, messagePayload, {});
+                try {
+                    // Mencoba kirim Interactive Message
+                    await sock.relayMessage(adminId, messagePayload, {});
+                } catch (err) {
+                    console.error(`[System] Gagal kirim List Message ke ${adminId}, menggunakan Fallback Text.`);
+                    // Jika gagal (karena library usang dll), kirim teks manual
+                    if (fallbackText) await sock.sendMessage(adminId, { text: fallbackText });
+                }
             } else { 
                 await sock.sendMessage(adminId, messagePayload); 
             }
@@ -188,7 +191,6 @@ function getRelativeTime(seconds) {
 export default async function setupMessageHandler(sock) {
     console.log("[System] ZettBOT Photobooth, Utility, Prayer & BMKG Handler Aktif!");
 
-    // 🚀 EKSEKUSI AWAL SAAT STARTUP (Kirim semua yang ON ke Admin)
     setTimeout(async () => {
         if (botSettings.autoSholat) await sendDailyPrayerSchedule(sock);
         if (botSettings.autoCuaca) {
@@ -198,15 +200,12 @@ export default async function setupMessageHandler(sock) {
         if (botSettings.autoGempa) {
             const g = await checkGempa();
             if (g) {
-                lastGempaId = g.DateTime; // Set initial state
+                lastGempaId = g.DateTime; 
                 await broadcastToAdmins(sock, createGempaMessage(g, false));
             }
         }
-    }, 5000); // Delay 5 detik agar bot ready
+    }, 5000); 
 
-    // ====================================================================
-    // ⏰ CRON-JOB MASTER (Dieksekusi Setiap 1 Menit)
-    // ====================================================================
     let lastDailySentDate = getDateStringWita(getWitaTime()); 
     let lastPrayerReminded = null; 
 
@@ -215,17 +214,13 @@ export default async function setupMessageHandler(sock) {
         const dateStr = getDateStringWita(now);
         const timeStr = formatTimeWita(now);
 
-        // --- 1. JADWAL SHOLAT ---
         if (botSettings.autoSholat) {
             if (lastFetchDate !== dateStr) await fetchPrayerTimes();
-            
             if (todayPrayerTimes) {
-                // Jam 00:00 - Kirim Jadwal Penuh
                 if (timeStr === "00:00" && lastDailySentDate !== dateStr) {
                     lastDailySentDate = dateStr;
                     await sendDailyPrayerSchedule(sock);
                 }
-                // Reminder waktu sholat masuk
                 for (const [name, time] of Object.entries(todayPrayerTimes)) {
                     if (timeStr === time) {
                         const reminderId = `${name}-${dateStr}`;
@@ -239,19 +234,17 @@ export default async function setupMessageHandler(sock) {
             }
         }
 
-        // --- 2. CUACA HARIAN ---
         if (botSettings.autoCuaca) {
-            if (timeStr === "06:00") { // Kirim cuaca hari ini jam 06:00 pagi
+            if (timeStr === "06:00") { 
                 const msg = await formatCuacaMsg("hari_ini");
                 await broadcastToAdmins(sock, msg);
             }
-            if (timeStr === "20:00") { // Kirim prakiraan besok jam 20:00 malam
+            if (timeStr === "20:00") { 
                 const msg = await formatCuacaMsg("besok");
                 await broadcastToAdmins(sock, msg);
             }
         }
 
-        // --- 3. DETEKSI GEMPA REALTIME (Cek setiap menit) ---
         if (botSettings.autoGempa) {
             const g = await checkGempa();
             if (g && lastGempaId !== g.DateTime) {
@@ -262,7 +255,7 @@ export default async function setupMessageHandler(sock) {
     }, 60 * 1000); 
 
     // ====================================================================
-    // 📷 POLLER PHOTOBOOTH (MENGGUNAKAN NATIVE FLOW MESSAGE)
+    // 📷 POLLER PHOTOBOOTH DENGAN FALLBACK
     // ====================================================================
     setInterval(async () => {
         try {
@@ -277,7 +270,6 @@ export default async function setupMessageHandler(sock) {
                     if (!notifiedOrders.has(order.orderId)) {
                         const hargaFormat = parseInt(order.harga).toLocaleString('id-ID');
                         
-                        // 🚀 UPDATE: Payload Interaktif Terbaru
                         const interactiveListMsg = {
                             viewOnceMessage: {
                                 message: {
@@ -305,7 +297,11 @@ export default async function setupMessageHandler(sock) {
                             }
                         };
                         
-                        await broadcastToAdmins(sock, interactiveListMsg);
+                        // 🚀 FALLBACK TEXT JIKA TOMBOL GAGAL MUNCUL
+                        const fallbackOrderText = `🔔 *PESANAN PHOTOBOOTH BARU*\n\nID: *${order.orderId}*\nPaket: ${order.paket}\nTotal: Rp${hargaFormat}\nWaktu: ${order.waktu}\n\n*⚠️ Tombol Konfirmasi Gagal Dimuat*\nKetik manual untuk konfirmasi:\n*!konfirmasi ${order.orderId}*`;
+                        
+                        // Kirim dengan parameter fallback
+                        await broadcastToAdmins(sock, interactiveListMsg, fallbackOrderText);
                         notifiedOrders.add(order.orderId);
                     }
                 }
@@ -321,7 +317,6 @@ export default async function setupMessageHandler(sock) {
             const msg = m.messages[0];
             if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
-            // Penangkap Respon Multi-Format (Teks Biasa & Button/List)
             let text = '';
             if (msg.message.conversation) text = msg.message.conversation;
             else if (msg.message.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
@@ -340,7 +335,6 @@ export default async function setupMessageHandler(sock) {
             const args = text.slice(prefix.length).trim().split(/ +/);
             const command = args.shift().toLowerCase();
             
-            // JID Sanitizer
             const replyJid = msg.key.remoteJid; 
             let senderJid = msg.key.remoteJid; 
             if (senderJid.endsWith('@g.us')) senderJid = msg.key.participant || senderJid;
@@ -358,17 +352,12 @@ export default async function setupMessageHandler(sock) {
             console.log(`[COMMAND] ${command} dieksekusi oleh: ${senderJid}`);
 
             switch (command) {
-                // 🚀 UPGRADE: MENU INTERAKTIF DENGAN NATIVE FLOW WA TERBARU
+                // 🚀 UPGRADE: MENU INTERAKTIF DENGAN FALLBACK
                 case 'menu':
                 case 'help':
-                    if (args[0] === 'ai') {
-                        return await sock.sendMessage(replyJid, { text: "🤖 *Cara Pakai AI:*\nKetik *!ai <pertanyaan>*\nContoh: !ai Siapa presiden indonesia?" }, { quoted: msg });
-                    }
-                    if (args[0] === 'sticker') {
-                        return await sock.sendMessage(replyJid, { text: "🖼️ *Cara Bikin Sticker:*\nKirimkan gambar dengan caption *!s* atau balas sebuah gambar dengan *!s*" }, { quoted: msg });
-                    }
+                    if (args[0] === 'ai') { return await sock.sendMessage(replyJid, { text: "🤖 *Cara Pakai AI:*\nKetik *!ai <pertanyaan>*\nContoh: !ai Siapa presiden indonesia?" }, { quoted: msg }); }
+                    if (args[0] === 'sticker') { return await sock.sendMessage(replyJid, { text: "🖼️ *Cara Bikin Sticker:*\nKirimkan gambar dengan caption *!s* atau balas sebuah gambar dengan *!s*" }, { quoted: msg }); }
 
-                    // Native Flow Interactive Message (List Button) Format Terbaru
                     const menuPayload = {
                         viewOnceMessage: {
                             message: {
@@ -384,37 +373,15 @@ export default async function setupMessageHandler(sock) {
                                                 buttonParamsJson: JSON.stringify({
                                                     title: "Buka Menu",
                                                     sections: [
-                                                        {
-                                                            title: "📷 PHOTOBOOTH (Khusus Admin)",
-                                                            rows: [
-                                                                { header: "", title: "📋 Rekap Transaksi", description: "Cek pendapatan & orderan hari ini", id: "!listorder" }
-                                                            ]
-                                                        },
-                                                        {
-                                                            title: "⚙️ TOGGLE SISTEM (Admin)",
-                                                            rows: [
-                                                                { header: "", title: `🕌 Sholat: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan Otomatis", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
-                                                                { header: "", title: `⛅ Cuaca: ${botSettings.autoCuaca?"[ON]":"[OFF]"}`, description: "Prakiraan Cuaca Kendari", id: `!autocuaca ${botSettings.autoCuaca?"off":"on"}` },
+                                                        { title: "📷 PHOTOBOOTH (Khusus Admin)", rows: [{ header: "", title: "📋 Rekap Transaksi", description: "Cek pendapatan & orderan hari ini", id: "!listorder" }] },
+                                                        { title: "⚙️ TOGGLE SISTEM (Admin)", rows: [
+                                                                { header: "", title: `🕌 Sholat: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
+                                                                { header: "", title: `⛅ Cuaca: ${botSettings.autoCuaca?"[ON]":"[OFF]"}`, description: "Prakiraan Kendari", id: `!autocuaca ${botSettings.autoCuaca?"off":"on"}` },
                                                                 { header: "", title: `🚨 Gempa: ${botSettings.autoGempa?"[ON]":"[OFF]"}`, description: "Notifikasi BMKG", id: `!autogempa ${botSettings.autoGempa?"off":"on"}` },
-                                                                { header: "", title: "👥 Daftar Admin", description: "Lihat siapa saja yang jadi Admin", id: "!listadmin" }
-                                                            ]
-                                                        },
-                                                        {
-                                                            title: "✨ AI & MEDIA",
-                                                            rows: [
-                                                                { header: "", title: "🤖 Cara Pakai AI", description: "Bantuan chat AI", id: "!help ai" },
-                                                                { header: "", title: "🖼️ Cara Bikin Sticker", description: "Bantuan stiker WA", id: "!help sticker" }
-                                                            ]
-                                                        },
-                                                        {
-                                                            title: "🛠️ INFO UTILITIES",
-                                                            rows: [
-                                                                { header: "", title: "🌋 Gempa Terakhir", description: "Info gempa BMKG saat ini", id: "!gempa" },
-                                                                { header: "", title: "🌤️ Cuaca Kendari", description: "Info cuaca hari ini", id: "!cuaca" },
-                                                                { header: "", title: "ℹ️ Cek ID Saya", description: "Untuk daftar Admin", id: "!myid" },
-                                                                { header: "", title: "📈 Status Server", description: "Ping & Uptime", id: "!runtime" }
-                                                            ]
-                                                        }
+                                                                { header: "", title: "👥 Daftar Admin", description: "Lihat siapa saja Admin", id: "!listadmin" }
+                                                            ] },
+                                                        { title: "✨ AI & MEDIA", rows: [{ header: "", title: "🤖 Cara Pakai AI", description: "Bantuan chat AI", id: "!help ai" }, { header: "", title: "🖼️ Cara Bikin Sticker", description: "Bantuan stiker WA", id: "!help sticker" }] },
+                                                        { title: "🛠️ INFO UTILITIES", rows: [{ header: "", title: "🌋 Gempa Terakhir", description: "Info gempa", id: "!gempa" }, { header: "", title: "🌤️ Cuaca Kendari", description: "Info cuaca", id: "!cuaca" }, { header: "", title: "ℹ️ Cek ID Saya", description: "Untuk daftar Admin", id: "!myid" }, { header: "", title: "📈 Status Server", description: "Ping & Uptime", id: "!runtime" }] }
                                                     ]
                                                 })
                                             }
@@ -424,13 +391,21 @@ export default async function setupMessageHandler(sock) {
                             }
                         }
                     };
+
+                    // 🚀 FALLBACK TEXT MENU JIKA TOMBOL GAGAL
+                    const fallbackMenuText = `*🤖 MENU ZETTBOT (Mode Teks) 🤖*\n_Tombol interaktif gagal dimuat. Silakan ketik manual command di bawah:_\n\n` +
+                        `*📷 PHOTOBOOTH (Admin):*\n> !konfirmasi <ID>\n> !listorder\n\n` +
+                        `*⚙️ TOGGLE SISTEM (Admin):*\n> !autoinfosholat [on/off]\n> !autocuaca [on/off]\n> !autogempa [on/off]\n> !addadmin <ID>\n> !deladmin <ID>\n> !listadmin\n\n` +
+                        `*✨ AI & UTILITIES:*\n> !ai <pertanyaan>\n> !s (untuk stiker)\n> !gempa\n> !cuaca\n> !myid\n> !runtime\n> !ping`;
                     
-                    // Mengirim Raw Payload (Dapat tembus WA Terbaru)
-                    await sock.relayMessage(replyJid, menuPayload, {});
+                    try {
+                        await sock.relayMessage(replyJid, menuPayload, {});
+                    } catch (err) {
+                        console.error("[System] Tombol Menu Gagal dikirim, mengirim Teks Manual.");
+                        await sock.sendMessage(replyJid, { text: fallbackMenuText }, { quoted: msg });
+                    }
                     break;
 
-                // ====================================================================
-                // 🚀 COMMAND FITUR BARU (GEMPA & CUACA MANUAL)
                 // ====================================================================
                 case 'gempa':
                     await sock.sendMessage(replyJid, { text: "⏳ _Menarik data BMKG terbaru..._" }, { quoted: msg });
@@ -445,38 +420,25 @@ export default async function setupMessageHandler(sock) {
                     await sock.sendMessage(replyJid, { text: cMsg }, { quoted: msg });
                     break;
 
-                // ====================================================================
-                // 🚀 COMMAND TOGGLES (KHUSUS ADMIN)
-                // ====================================================================
-                case 'autoinfosholat':
-                case 'autocuaca':
-                case 'autogempa':
+                case 'autoinfosholat': case 'autocuaca': case 'autogempa':
                     if (!args[0]) return await sock.sendMessage(replyJid, { text: `⚠️ Format: *!${command} on* atau *!${command} off*` });
                     const param = args[0].toLowerCase();
                     const settingKey = command === 'autoinfosholat' ? 'autoSholat' : (command === 'autocuaca' ? 'autoCuaca' : 'autoGempa');
                     const label = command === 'autoinfosholat' ? 'Pengingat Sholat' : (command === 'autocuaca' ? 'Auto Cuaca' : 'Auto Gempa BMKG');
                     
                     if (param === 'on') {
-                        botSettings[settingKey] = true;
-                        saveSettings();
+                        botSettings[settingKey] = true; saveSettings();
                         await sock.sendMessage(replyJid, { text: `✅ Fitur *${label}* BERHASIL diaktifkan.` });
-                        
-                        // Eksekusi trigger instant setelah diaktifkan
                         if (settingKey === 'autoSholat') await sendDailyPrayerSchedule(sock);
                         if (settingKey === 'autoCuaca') await broadcastToAdmins(sock, await formatCuacaMsg("hari_ini"));
                         if (settingKey === 'autoGempa') { const newG = await checkGempa(); if(newG) await broadcastToAdmins(sock, createGempaMessage(newG, false)); }
                     } else if (param === 'off') {
-                        botSettings[settingKey] = false;
-                        saveSettings();
+                        botSettings[settingKey] = false; saveSettings();
                         await sock.sendMessage(replyJid, { text: `❌ Fitur *${label}* DIMATIKAN.` });
                     }
                     break;
 
-                // ====================================================================
-                // 🚀 COMMAND UTILS & MEDIA LAMA
-                // ====================================================================
-                case 'myid':
-                case 'cekid':
+                case 'myid': case 'cekid':
                     await sock.sendMessage(replyJid, { text: `*ℹ️ INFORMASI ID ANDA*\n\n*ID Pengirim:* \n${senderJid}\n\n_Ingin didaftarkan sebagai admin? Copy *ID Pengirim* di atas dan berikan ke Owner._\n\n_Owner dapat menambahkannya dengan cara:_\n*!addadmin ${senderJid}*` }, { quoted: msg });
                     break;
 
@@ -493,9 +455,6 @@ export default async function setupMessageHandler(sock) {
                 case 'ai': if(typeof handleAiCommand === 'function') await handleAiCommand(sock, msg, args); break;
                 case 'sticker': case 's': if(typeof handleStickerCommand === 'function') await handleStickerCommand(sock, msg); break;
 
-                // ====================================================================
-                // 🚀 COMMAND MANAJEMEN ADMIN & PHOTOBOOTH
-                // ====================================================================
                 case 'addadmin':
                     if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!addadmin 628xxx* atau *!addadmin id@lid*" });
                     const newAdmin = formatPhoneToJid(args[0]);
@@ -509,7 +468,6 @@ export default async function setupMessageHandler(sock) {
                     if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!deladmin 628xxx* atau *!deladmin id@lid*" });
                     const delTarget = formatPhoneToJid(args[0]);
                     if (delTarget === ownerNumber || delTarget === "247922893566044@lid") return await sock.sendMessage(replyJid, { text: "❌ Anda tidak bisa menghapus ID Owner utama." });
-                    
                     if (botAdmins.includes(delTarget)) {
                         botAdmins = botAdmins.filter(a => a !== delTarget); saveAdmins();
                         await sock.sendMessage(replyJid, { text: `✅ Berhasil! ID ${delTarget} sukses dihapus dari Admin.` }, { quoted: msg });
