@@ -14,6 +14,9 @@ const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 // URL PHOTOBOOTH KIOSK
 const PHOTOBOOTH_GAS_URL = process.env.PHOTOBOOTH_GAS_URL || "https://script.google.com/macros/s/AKfycbxdyXI5z-RMC9LYaXiuJEsVDpfFOw44uTjP56dYec5V7HU2Vd06-X3dKDBUpyUD8hRi/exec";
 
+// 🚀 URL API WEB CV (NEW UPGRADE)
+const WEB_CV_API_URL = "https://script.google.com/macros/s/AKfycbycc-ZsQDXTzQ4U3nut9C8C-VwTLFlqQzRZm81Nwn9NM-FFNP3tQoiX9ythx6o_NM8b/exec?endpoint=pesan";
+
 // ====================================================================
 // 📁 SESSION, MULTI-ADMIN & SETTINGS LOGIC
 // ====================================================================
@@ -26,7 +29,7 @@ if (!fs.existsSync(sessionPath)) {
 const adminsFile = `${sessionPath}/admins.json`;
 const settingsFile = `${sessionPath}/settings.json`;
 
-// 🚀 ADMIN BARU TELAH DITAMBAHKAN DI SINI
+// 🚀 ADMIN BARU TELAH DITAMBAHKAN DI SINI (Termasuk 628114426161)
 let botAdmins = [ownerNumber, "247922893566044@lid", "6282197493497@s.whatsapp.net"]; 
 
 if (fs.existsSync(adminsFile)) {
@@ -42,11 +45,12 @@ function saveAdmins() {
     fs.writeFileSync(adminsFile, JSON.stringify(botAdmins, null, 2));
 }
 
-// 🚀 UPGRADE: Tambah autoSholatRun, autoCuacaRun, autoGempaRun (Default: false/off)
+// 🚀 UPGRADE: Tambah autoInfoWeb (Default: true/on)
 let botSettings = { 
     autoSholat: true, autoSholatRun: false, 
     autoGempa: true, autoGempaRun: false, 
-    autoCuaca: true, autoCuacaRun: false 
+    autoCuaca: true, autoCuacaRun: false,
+    autoInfoWeb: true 
 };
 if (fs.existsSync(settingsFile)) {
     try {
@@ -197,6 +201,8 @@ async function sendDailyPrayerSchedule(sock) {
 // 🚀 MAIN HANDLER & CRON JOBS
 // ====================================================================
 const notifiedOrders = new Set();
+let notifiedWebMessages = new Set(); // 🚀 Sistem memori Pesan Web Baru
+let isFirstWebFetch = true;          // Mencegah spam pesan lama saat bot start
 
 function getRelativeTime(seconds) {
     const m = Math.floor(seconds / 60); const h = Math.floor(seconds / 3600); const d = Math.floor(seconds / 86400);
@@ -205,10 +211,10 @@ function getRelativeTime(seconds) {
 }
 
 export default async function setupMessageHandler(sock) {
-    console.log("[System] ZettBOT Photobooth, Utility, Prayer & BMKG Handler Aktif!");
+    console.log("[System] ZettBOT Photobooth, Web CV, Utility & BMKG Handler Aktif!");
 
     setTimeout(async () => {
-        // 🚀 UPGRADE: Info saat Startup kini difilter oleh status 'Run' (Default: OFF)
+        // Info saat Startup kini difilter oleh status 'Run'
         if (botSettings.autoSholatRun) {
             await sendDailyPrayerSchedule(sock);
         }
@@ -231,6 +237,7 @@ export default async function setupMessageHandler(sock) {
     let lastDailySentDate = getDateStringWita(getWitaTime()); 
     let lastPrayerReminded = null; 
 
+    // POLLER SCHEDULER (1 Menit Sekali)
     setInterval(async () => {
         const now = getWitaTime();
         const dateStr = getDateStringWita(now);
@@ -277,7 +284,7 @@ export default async function setupMessageHandler(sock) {
     }, 60 * 1000); 
 
     // ====================================================================
-    // 📷 POLLER PHOTOBOOTH DENGAN HYBRID LOGIC
+    // 📷 POLLER PHOTOBOOTH DENGAN HYBRID LOGIC (10 Detik)
     // ====================================================================
     setInterval(async () => {
         try {
@@ -321,6 +328,43 @@ export default async function setupMessageHandler(sock) {
     }, 10000); 
 
     // ====================================================================
+    // 🌐 POLLER PESAN WEB CV (FITUR BARU) - 15 Detik
+    // ====================================================================
+    setInterval(async () => {
+        if (!botSettings.autoInfoWeb) return; // Skip jika fitur dimatikan
+        try {
+            const response = await fetch(WEB_CV_API_URL);
+            const result = await response.json();
+
+            if (result.status === "success" && result.data && result.data.length > 0) {
+                // Pada deteksi pertama (Start Bot), hanya catat memori lama, jangan dibroadcast!
+                if (isFirstWebFetch) {
+                    result.data.forEach(msg => notifiedWebMessages.add(msg.ID_Pesan));
+                    isFirstWebFetch = false;
+                    return;
+                }
+
+                // Setelah itu, broadcast setiap pesan yang ID-nya belum ada di memori
+                for (const webMsg of result.data) {
+                    if (!notifiedWebMessages.has(webMsg.ID_Pesan)) {
+                        notifiedWebMessages.add(webMsg.ID_Pesan);
+
+                        // Bersihkan spasi/karakter tak perlu dari kontak
+                        let hpClean = webMsg.Kontak.replace(/[^0-9]/g, '');
+                        if (hpClean.startsWith('0')) hpClean = '62' + hpClean.substring(1);
+
+                        const primaryText = `🌐 *PESAN BARU DARI WEBSITE CV* 🌐\n\n🆔 *ID:* ${webMsg.ID_Pesan}\n👤 *Nama:* ${webMsg.Nama}\n📱 *WhatsApp:* wa.me/${hpClean}\n🕒 *Waktu:* ${webMsg.Tanggal}\n\n💬 *Pesan/Keperluan:*\n_${webMsg.Pesan}_`;
+                        
+                        await broadcastToAdmins(sock, primaryText);
+                    }
+                }
+            }
+        } catch (err) {
+            // Abaikan error jaringan sesaat agar tidak error log spam
+        }
+    }, 15000);
+
+    // ====================================================================
     // 💬 MESSAGE LISTENER & COMMANDS
     // ====================================================================
     sock.ev.on('messages.upsert', async (m) => {
@@ -360,8 +404,9 @@ export default async function setupMessageHandler(sock) {
             }
 
             const isAdmin = botAdmins.includes(senderJid);
-            // 🚀 PROTEKSI COMMAND ADMIN (Tambahan autocuacarun & autogemparun)
-            const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin', 'autoinfosholat', 'autoinfosholatrun', 'autocuaca', 'autocuacarun', 'autogempa', 'autogemparun', 'restart'];
+            
+            // 🚀 PROTEKSI COMMAND ADMIN (Terbaru ditambahkan autoinfoweb)
+            const adminCommands = ['konfirmasi', 'listorder', 'addadmin', 'deladmin', 'listadmin', 'autoinfosholat', 'autoinfosholatrun', 'autocuaca', 'autocuacarun', 'autogempa', 'autogemparun', 'autoinfoweb', 'restart'];
             
             if (adminCommands.includes(command) && !isAdmin) {
                 return await sock.sendMessage(replyJid, { text: "⚠️ *Akses Ditolak*\nMaaf, perintah tersebut khusus untuk Admin sistem." }, { quoted: msg });
@@ -380,7 +425,7 @@ export default async function setupMessageHandler(sock) {
                     }, 2000);
                     break;
 
-                // 🚀 UPGRADE LOGIC: HYBRID MENU (TEKS DIKIRIM UTAMA, LIST BUTTON SUSULAN)
+                // 🚀 UPGRADE LOGIC: HYBRID MENU
                 case 'menu':
                 case 'help':
                     if (args[0] === 'ai') { return await sock.sendMessage(replyJid, { text: "🤖 *Cara Pakai AI:*\nKetik *!ai <pertanyaan>*\nContoh: !ai Siapa presiden indonesia?" }, { quoted: msg }); }
@@ -389,7 +434,8 @@ export default async function setupMessageHandler(sock) {
                     // 1. SUSUN TEKS MANUAL SEBAGAI PESAN UTAMA (Aman 100%)
                     let manualMenuText = `🤖 *MENU UTAMA ZETTBOT* 🤖\n\n`;
                     if (isAdmin) {
-                        manualMenuText += `*📷 PHOTOBOOTH (Admin):*\n> !konfirmasi <ID>\n> !listorder\n\n` +
+                        manualMenuText += `*🌐 SISTEM WEB CV (Admin):*\n> !autoinfoweb [on/off]\n\n` + 
+                        `*📷 PHOTOBOOTH (Admin):*\n> !konfirmasi <ID>\n> !listorder\n\n` +
                         `*⚙️ TOGGLE SISTEM (Admin):*\n> !autoinfosholat [on/off]\n> !autoinfosholatrun [on/off]\n> !autocuaca [on/off]\n> !autocuacarun [on/off]\n> !autogempa [on/off]\n> !autogemparun [on/off]\n> !addadmin <ID>\n> !deladmin <ID>\n> !listadmin\n> !restart\n\n`;
                     }
                     manualMenuText += `*✨ AI & UTILITIES:*\n> !ai <pertanyaan>\n> !s (buat stiker)\n> !gempa\n> !cuaca\n> !myid\n> !runtime\n> !ping`;
@@ -400,6 +446,7 @@ export default async function setupMessageHandler(sock) {
                     // 2. SUSUN LIST BUTTON INTERAKTIF SEBAGAI PESAN SUSULAN
                     const menuSections = [];
                     if (isAdmin) {
+                        menuSections.push({ title: "🌐 SISTEM WEB CV", rows: [{ title: `✉️ Auto Pesan Web: ${botSettings.autoInfoWeb?"[ON]":"[OFF]"}`, description: "Terima notif pesan baru dari Web CV", id: `!autoinfoweb ${botSettings.autoInfoWeb?"off":"on"}` }] });
                         menuSections.push({ title: "📷 PHOTOBOOTH", rows: [{ title: "📋 Rekap Transaksi", description: "Cek pendapatan & orderan hari ini", id: "!listorder" }] });
                         menuSections.push({ title: "⚙️ TOGGLE SISTEM", rows: [
                             { title: `🕌 Sholat Otomatis: ${botSettings.autoSholat?"[ON]":"[OFF]"}`, description: "Pengingat Adzan", id: `!autoinfosholat ${botSettings.autoSholat?"off":"on"}` },
@@ -458,8 +505,8 @@ export default async function setupMessageHandler(sock) {
                     await sock.sendMessage(replyJid, { text: cMsg }, { quoted: msg });
                     break;
 
-                // 🚀 UPGRADE: Menangani autoinfosholatrun, autocuacarun, autogemparun
-                case 'autoinfosholat': case 'autoinfosholatrun': case 'autocuaca': case 'autocuacarun': case 'autogempa': case 'autogemparun':
+                // 🚀 UPGRADE: Menangani semua toggle Auto (Termasuk autoInfoWeb CV)
+                case 'autoinfosholat': case 'autoinfosholatrun': case 'autocuaca': case 'autocuacarun': case 'autogempa': case 'autogemparun': case 'autoinfoweb':
                     if (!args[0]) return await sock.sendMessage(replyJid, { text: `⚠️ Format: *!${command} on* atau *!${command} off*` });
                     const param = args[0].toLowerCase();
                     
@@ -471,12 +518,13 @@ export default async function setupMessageHandler(sock) {
                     else if (command === 'autocuacarun') { settingKey = 'autoCuacaRun'; label = 'Info Cuaca saat Startup'; }
                     else if (command === 'autogempa') { settingKey = 'autoGempa'; label = 'Auto Gempa BMKG'; }
                     else if (command === 'autogemparun') { settingKey = 'autoGempaRun'; label = 'Info Gempa saat Startup'; }
+                    else if (command === 'autoinfoweb') { settingKey = 'autoInfoWeb'; label = 'Notifikasi Pesan Website CV Baru'; }
                     
                     if (param === 'on') {
                         botSettings[settingKey] = true; saveSettings();
                         await sock.sendMessage(replyJid, { text: `✅ Fitur *${label}* BERHASIL diaktifkan.` });
                         
-                        // Eksekusi trigger saat dinyalakan
+                        // Eksekusi trigger saat dinyalakan (Kecuali Web, dia akan jalan di loop otomatisnya)
                         if (settingKey === 'autoSholat' || settingKey === 'autoSholatRun') await sendDailyPrayerSchedule(sock);
                         if (settingKey === 'autoCuaca' || settingKey === 'autoCuacaRun') await broadcastToAdmins(sock, await formatCuacaMsg("hari_ini"));
                         if (settingKey === 'autoGempa' || settingKey === 'autoGempaRun') { const newG = await checkGempa(); if(newG) await broadcastToAdmins(sock, createGempaMessage(newG, false)); }
@@ -523,7 +571,7 @@ export default async function setupMessageHandler(sock) {
                     break;
 
                 case 'listadmin':
-                    let adList = "👥 *DAFTAR ADMIN PHOTOBOOTH*\n\n";
+                    let adList = "👥 *DAFTAR SUPER ADMIN*\n\n";
                     botAdmins.forEach((a, i) => adList += `${i+1}. ${a}\n`);
                     await sock.sendMessage(replyJid, { text: adList }, { quoted: msg });
                     break;
