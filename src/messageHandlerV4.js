@@ -15,7 +15,7 @@ const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 const PHOTOBOOTH_GAS_URL = process.env.PHOTOBOOTH_GAS_URL || "https://script.google.com/macros/s/AKfycbxdyXI5z-RMC9LYaXiuJEsVDpfFOw44uTjP56dYec5V7HU2Vd06-X3dKDBUpyUD8hRi/exec";
 
 // 🚀 URL API WEB CV (NEW UPGRADE)
-const WEB_CV_API_URL = "https://script.google.com/macros/s/AKfycbycc-ZsQDXTzQ4U3nut9C8C-VwTLFlqQzRZm81Nwn9NM-FFNP3tQoiX9ythx6o_NM8b/exec?endpoint=pesan";
+const WEB_CV_API_URL = "https://script.google.com/macros/s/AKfycbxv7LpGFB37qXUvpPYapXUIaaMv0nV06AnGbwQ_CRBSj4zIoxo7N3NwAn9WSsphDrtR/exec?endpoint=pesan";
 
 // ====================================================================
 // 📁 SESSION, MULTI-ADMIN & SETTINGS LOGIC
