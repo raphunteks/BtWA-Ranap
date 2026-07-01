@@ -30,7 +30,7 @@ const adminsFile = `${sessionPath}/admins.json`;
 const settingsFile = `${sessionPath}/settings.json`;
 
 // 🚀 ADMIN BARU TELAH DITAMBAHKAN DI SINI (Termasuk 628114426161)
-let botAdmins = [ownerNumber, "6282197493497@s.whatsapp.net"]; 
+let botAdmins = [ownerNumber, "247922893566044@lid", "6282197493497@s.whatsapp.net"]; 
 
 if (fs.existsSync(adminsFile)) {
     try { 
