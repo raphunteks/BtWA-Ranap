@@ -22,10 +22,10 @@ if (!fs.existsSync(sessionPath)) {
     console.log("[System] Folder session dibuat.");
 }
 
-const adminsFile = `${sessionPath}/admins.json`;
+const adminsFile = `${sessionPath}/adminsv2.json`;
 
 // 🚀 ADMIN BARU TELAH DITAMBAHKAN
-let botAdmins = [ownerNumber, "6282122224408@s.whatsapp.net"]; 
+let botAdmins = [ownerNumber, "6285256739684@s.whatsapp.net", "6282122224408@s.whatsapp.net"]; 
 
 if (fs.existsSync(adminsFile)) {
     try { 
