@@ -8,7 +8,7 @@ import { generateWAMessageFromContent } from '@whiskeysockets/baileys';
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
-const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
+const ownerNumber = process.env.OWNER_NUMBER || "247922893566044@lid";
 
 // 🚀 API FILTER BY CAN (Sesuai dengan Deploy Web App GAS Terbaru)
 const FILTER_API_URL = process.env.FILTER_API_URL || "https://script.google.com/macros/s/AKfycbxS9GzjYgnegsamBeD7OTaKuEuK8VntMTPXeX6p-Q4psRy96XAecNZs3T9-9RXe8r9-/exec";
