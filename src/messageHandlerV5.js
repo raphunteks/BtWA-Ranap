@@ -25,7 +25,7 @@ if (!fs.existsSync(sessionPath)) {
 const adminsFile = `${sessionPath}/adminsv2.json`;
 
 // 🚀 ADMIN BARU TELAH DITAMBAHKAN
-let botAdmins = [ownerNumber, "6285256739684@s.whatsapp.net", "6282122224408@s.whatsapp.net"]; 
+let botAdmins = [ownerNumber, "247922893566044@lid", "6282122224408@s.whatsapp.net"]; 
 
 if (fs.existsSync(adminsFile)) {
     try { 
