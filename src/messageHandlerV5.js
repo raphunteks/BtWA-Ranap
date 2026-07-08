@@ -8,10 +8,11 @@ import { generateWAMessageFromContent } from '@whiskeysockets/baileys';
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
+// UPGRADE: Update Owner Number menjadi format LID
 const ownerNumber = process.env.OWNER_NUMBER || "247922893566044@lid";
 
 // 🚀 API FILTER BY CAN (Sesuai dengan Deploy Web App GAS Terbaru)
-const FILTER_API_URL = process.env.FILTER_API_URL || "https://script.google.com/macros/s/AKfycbxS9GzjYgnegsamBeD7OTaKuEuK8VntMTPXeX6p-Q4psRy96XAecNZs3T9-9RXe8r9-/exec";
+const FILTER_API_URL = process.env.FILTER_API_URL || "https://script.google.com/macros/s/AKfycbzDL_eMuMzjsWmAedsbLtYw9Sd9_uzisavHrH4Ry8wiaoJrnMWFhpm4W2dH6y6lXM7m/exec";
 
 // ====================================================================
 // 📁 SESSION & MULTI-ADMIN LOGIC
@@ -22,9 +23,9 @@ if (!fs.existsSync(sessionPath)) {
     console.log("[System] Folder session dibuat.");
 }
 
-const adminsFile = `${sessionPath}/adminsv2.json`;
+const adminsFile = `${sessionPath}/admins.json`;
 
-// 🚀 ADMIN BARU TELAH DITAMBAHKAN
+// UPGRADE: Update array Bot Admins
 let botAdmins = [ownerNumber, "247922893566044@lid", "6282122224408@s.whatsapp.net"]; 
 
 if (fs.existsSync(adminsFile)) {
@@ -108,15 +109,17 @@ export default async function setupMessageHandler(sock) {
                     if (!notifiedOrders.has(order.trxId)) {
                         notifiedOrders.add(order.trxId);
 
-                        // Format Nomor WA Customer
-                        let hpClean = order.wa.replace(/[^0-9]/g, '');
+                        // Format Nomor WA Customer (Cegah Error Tipe Data dengan toString)
+                        let hpClean = order.wa ? order.wa.toString().replace(/[^0-9]/g, '') : "";
                         if (hpClean.startsWith('0')) hpClean = '62' + hpClean.substring(1);
                         const customerJid = hpClean + "@s.whatsapp.net";
                         
                         // Simpan sementara di memori bot untuk pengiriman link GDrive nanti
                         pendingOrdersMap.set(order.trxId, customerJid);
 
-                        const totalFmt = parseInt(order.grandTotal).toLocaleString('id-ID');
+                        // SUPER BUG FIX HARGA: Double Sanitizer untuk mencegah parseInt salah baca titik "50.000" jadi "50" atau NaN
+                        let rawTotal = order.grandTotal ? order.grandTotal.toString().replace(/[^0-9]/g, '') : "0";
+                        const totalFmt = parseInt(rawTotal || "0", 10).toLocaleString('id-ID');
                         
                         const primaryText = `🛍️ *ORDERAN FILTER BARU* 🛍️\n\n🆔 *Trx ID:* ${order.trxId}\n👤 *Nama:* ${order.nama}\n📱 *WhatsApp:* wa.me/${hpClean}\n💰 *Total Bayar:* Rp${totalFmt}\n🛒 *Pesanan:*\n${order.detail}\n\n📄 *Cek Bukti TF:*\n${order.buktiTf || "Belum ada link"}\n\n*Aksi Konfirmasi:* Ketik perintah atau tekan tombol di bawah!\n_${order.commandKonfir}_`;
                         
@@ -184,7 +187,7 @@ export default async function setupMessageHandler(sock) {
                 if (senderJid.includes(':')) senderJid = senderJid.substring(0, senderJid.indexOf(':')) + '@s.whatsapp.net';
             }
 
-            // BUG FIX SUPER UPGRADE: Pengecekan Admin Bulletproof (Hanya membandingkan angka nomor telpon)
+            // Pengecekan Admin Bulletproof (Hanya membandingkan angka nomor telpon / LID)
             const senderNum = senderJid.split('@')[0];
             const isAdmin = botAdmins.some(adminStr => adminStr.startsWith(senderNum));
             
@@ -204,7 +207,7 @@ export default async function setupMessageHandler(sock) {
                     setTimeout(() => { process.exit(1); }, 2000);
                     break;
 
-                // 🚀 HYBRID MENU (CLEANED UP & FOCUSED)
+                // 🚀 HYBRID MENU
                 case 'menu':
                 case 'help':
                     if (args[0] === 'ai') { return await sock.sendMessage(replyJid, { text: "🤖 *Cara Pakai AI:*\nKetik *!ai <pertanyaan>*\nContoh: !ai Apa itu filter cinematic?" }, { quoted: msg }); }
@@ -272,22 +275,22 @@ export default async function setupMessageHandler(sock) {
                 case 'sticker': case 's': if(typeof handleStickerCommand === 'function') await handleStickerCommand(sock, msg); break;
 
                 case 'addadmin':
-                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!addadmin 628xxx*" });
+                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!addadmin 628xxx* atau LID" });
                     const newAdmin = formatPhoneToJid(args[0]);
                     if (!botAdmins.includes(newAdmin)) {
                         botAdmins.push(newAdmin); saveAdmins();
-                        await sock.sendMessage(replyJid, { text: `✅ Berhasil! Nomor ${newAdmin} sukses ditambahkan sebagai Admin.` }, { quoted: msg });
-                    } else await sock.sendMessage(replyJid, { text: `⚠️ Nomor tersebut sudah menjadi admin.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `✅ Berhasil! Nomor/ID ${newAdmin} sukses ditambahkan sebagai Admin.` }, { quoted: msg });
+                    } else await sock.sendMessage(replyJid, { text: `⚠️ Nomor/ID tersebut sudah menjadi admin.` }, { quoted: msg });
                     break;
 
                 case 'deladmin':
-                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!deladmin 628xxx*" });
+                    if (!args[0]) return await sock.sendMessage(replyJid, { text: "⚠️ Format: *!deladmin 628xxx* atau LID" });
                     const delTarget = formatPhoneToJid(args[0]);
                     if (delTarget === ownerNumber || delTarget === "6282122224408@s.whatsapp.net") return await sock.sendMessage(replyJid, { text: "❌ Anda tidak bisa menghapus ID Utama/Developer." });
                     if (botAdmins.includes(delTarget)) {
                         botAdmins = botAdmins.filter(a => a !== delTarget); saveAdmins();
-                        await sock.sendMessage(replyJid, { text: `✅ Berhasil! Nomor ${delTarget} sukses dicabut hak Admin-nya.` }, { quoted: msg });
-                    } else await sock.sendMessage(replyJid, { text: `⚠️ Nomor tidak ditemukan dalam daftar admin.` }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: `✅ Berhasil! Nomor/ID ${delTarget} sukses dicabut hak Admin-nya.` }, { quoted: msg });
+                    } else await sock.sendMessage(replyJid, { text: `⚠️ Nomor/ID tidak ditemukan dalam daftar admin.` }, { quoted: msg });
                     break;
 
                 case 'listadmin':
