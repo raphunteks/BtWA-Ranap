@@ -25,7 +25,7 @@ if (!fs.existsSync(sessionPath)) {
 const adminsFile = `${sessionPath}/admins.json`;
 
 // 🚀 ADMIN BARU TELAH DITAMBAHKAN
-let botAdmins = [ownerNumber, "247922893566044@lid","6282122224408@s.whatsapp.net"]; 
+let botAdmins = [ownerNumber, "6282122224408@s.whatsapp.net"]; 
 
 if (fs.existsSync(adminsFile)) {
     try { 
@@ -184,7 +184,9 @@ export default async function setupMessageHandler(sock) {
                 if (senderJid.includes(':')) senderJid = senderJid.substring(0, senderJid.indexOf(':')) + '@s.whatsapp.net';
             }
 
-            const isAdmin = botAdmins.includes(senderJid);
+            // BUG FIX SUPER UPGRADE: Pengecekan Admin Bulletproof (Hanya membandingkan angka nomor telpon)
+            const senderNum = senderJid.split('@')[0];
+            const isAdmin = botAdmins.some(adminStr => adminStr.startsWith(senderNum));
             
             // 🚀 PROTEKSI COMMAND ADMIN 
             const adminCommands = ['addadmin', 'deladmin', 'listadmin', 'restart'];
@@ -337,7 +339,7 @@ export default async function setupMessageHandler(sock) {
                             await sock.sendMessage(customerJid, { text: custMsg });
 
                             // Notifikasi Sukses ke Admin
-                            await sock.sendMessage(replyJid, { text: `✅ *PENGIRIMAN LINK SUKSES!*\n\nPesanan *${trxId}* selesai dikonfirmasi. Link filter telah otomatis meluncur ke WhatsApp Customer (wa.me/${customerJid.split('@')[0]}).` }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: `✅ *PENGIRIMAN LINK SUKSES!*\n\nPesanan *${trxId}* selesai dikonfirmasi. Link filter telah otomatis meluncur ke WhatsApp Customer (wa.me/${customerJid.split('@')[0]}). Status pada spreadsheet otomatis berubah jadi SUKSES.` }, { quoted: msg });
 
                             // Hapus ID dari memori antrean karena sudah selesai
                             pendingOrdersMap.delete(trxId);
