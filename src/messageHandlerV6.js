@@ -44,26 +44,30 @@ export default async function setupMessageHandler(sock) {
     // ====================================================================
     const app = express();
     app.use(express.json());
-    const WEBHOOK_PORT = process.env.WEBHOOK_PORT || 3000;
+    
+    // UPGRADE RAILWAY: Railway menggunakan env.PORT secara dinamis. Wajib terbaca agar Webhook tidak gagal/timeout!
+    const WEBHOOK_PORT = process.env.PORT || process.env.WEBHOOK_PORT || 3000;
 
     app.post('/webhook/evot', async (req, res) => {
         try {
             const data = req.body;
+            // Validasi keamanan: Pastikan payload memiliki action 'send_token'
             if (data && data.action === 'send_token') {
                 
-                // Standarisasi WA Target
+                // Standarisasi WA Target (Jaga-jaga jika GAS mengirim format kotor)
                 let targetWa = String(data.wa).replace(/[^0-9]/g, ''); 
                 if (targetWa.startsWith('0')) targetWa = '62' + targetWa.slice(1);
                 else if (targetWa.startsWith('8')) targetWa = '62' + targetWa;
                 
                 if (!targetWa.includes('@')) targetWa = targetWa + '@s.whatsapp.net';
 
-                // Template Pesan Dinamis (Aktivasi vs Lupa Token)
+                // Template Pesan Dinamis (Aktivasi vs Lupa Token) 
+                // Tergantung dari 'context' yang dikirim oleh code.gs
                 let txt = '';
                 if (data.context === 'lupa_token') {
                     txt = `🔄 *PERMINTAAN RESET TOKEN KPU* 🔄\n\n`;
                     txt += `Halo *${data.nama.toUpperCase()}*,\n`;
-                    txt += `Sistem telah mereset dan menerbitkan ulang Token Anda sesuai permintaan dari Website.\n\n`;
+                    txt += `Sistem telah mereset dan menerbitkan ulang Token Anda sesuai permintaan dari Website Pemilihan.\n\n`;
                 } else {
                     txt = `🎓 *SELAMAT, AKTIVASI BERHASIL!* 🎓\n\n`;
                     txt += `Halo *${data.nama.toUpperCase()}*,\n`;
@@ -75,10 +79,11 @@ export default async function setupMessageHandler(sock) {
                 txt += `_Gunakan NIM dan Token di atas untuk login ke website pemilihan. Jangan bagikan token ini kepada siapapun demi kerahasiaan suara Anda!_\n\n`;
                 txt += `Ketik *!menu* untuk melihat layanan bantuan.`;
 
-                // Eksekusi pengiriman pesan otomatis
+                // Eksekusi pengiriman pesan otomatis ke Mahasiswa
                 await sock.sendMessage(targetWa, { text: txt });
                 console.log(`[Webhook 🚀] Token (${data.context}) terkirim sukses ke: ${data.nama} (JID: ${targetWa})`);
                 
+                // Beri respon ke GAS agar request selesai dan tidak pending/timeout
                 return res.status(200).json({ status: 'success', message: 'Pesan otomatis berhasil dikirim' });
             }
             res.status(400).json({ status: 'error', message: 'Action webhook tidak valid' });
@@ -88,19 +93,20 @@ export default async function setupMessageHandler(sock) {
         }
     });
 
-    app.listen(WEBHOOK_PORT, () => {
-        console.log(`[System 🌐] Webhook Listener KPU Aktif! (Port: ${WEBHOOK_PORT})`);
+    // Binding ke 0.0.0.0 sangat penting untuk deployment Docker/Railway
+    app.listen(WEBHOOK_PORT, '0.0.0.0', () => {
+        console.log(`[System 🌐] Webhook Listener KPU Aktif! (Railway Port: ${WEBHOOK_PORT})`);
     });
 
     // ====================================================================
-    // INCOMING CHAT HANDLER
+    // INCOMING CHAT HANDLER (BOT COMMANDS)
     // ====================================================================
     sock.ev.on('messages.upsert', async (m) => {
         try {
             const msg = m.messages[0];
             if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
-            // Tangkap Input Teks atau Interaktif
+            // Tangkap Input Teks atau Interaktif (Buttons/List)
             let text = '';
             if (msg.message.conversation) text = msg.message.conversation;
             else if (msg.message.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
@@ -152,7 +158,7 @@ export default async function setupMessageHandler(sock) {
                             
                             await sock.sendMessage(replyJid, { text: txt }, { quoted: msg });
                         } else {
-                            // Pesan error kini menampilkan Format Standar WA
+                            // Pesan error kini menampilkan Format Standar WA agar mahasiswa sadar jika pakai nomor lain
                             await sock.sendMessage(replyJid, { text: `❌ *Data Tidak Ditemukan*\nNomor WhatsApp Anda (${userWaFormat}) belum diaktivasi di website. Silakan aktivasi akun terlebih dahulu di web E-Voting.` }, { quoted: msg });
                         }
                     } catch(err) {
