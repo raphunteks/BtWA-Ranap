@@ -4,22 +4,22 @@ import { generateWAMessageFromContent } from '@whiskeysockets/baileys';
 import express from 'express'; 
 
 // Handler perintah eksternal (Pastikan file ini ada di folder /commands Anda)
-// Jika tidak ada, bisa di-comment saja agar tidak error
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
 // ====================================================================
-// 🚀 KONFIGURASI API E-VOTING BEM FKG UMI
+// 🚀 KONFIGURASI API E-VOTING BEM FKG UMI (VERCEL & GAS)
 // ====================================================================
-// PASTE URL ENDPOINT GAS ANDA DI SINI
+// PASTE URL ENDPOINT GAS ANDA DI SINI (Yang berakhir dengan /exec)
 const EVOT_API_URL = process.env.EVOT_API_URL || "https://script.google.com/macros/s/AKfycbxw3v9--RsgQoXMRpwTvApotQZ-UmlTuH_mHpRGZIiMryxirWPSJjPcSwdtMUngcBEn/exec";
 
 // ====================================================================
-// 📁 UTILITY & FORMATTER
+// 📁 UTILITY & FORMATTER (ANTI-CRASH)
 // ====================================================================
-// Sinkronisasi Sempurna: Paksa nomor pengirim menjadi format Internasional (628...) 
-// Agar 100% cocok dengan Database GAS yang telah distandarisasi
+// Standarisasi Sempurna: Paksa nomor WA menjadi format Internasional (628...) 
+// Menghilangkan spasi, @lid, tanda strip, atau karakter aneh lainnya.
 function formatWaNumber(jid) {
+    if (!jid) return "";
     let p = String(jid).split('@')[0].replace(/[^0-9]/g, '');
     if (p.startsWith('0')) p = '62' + p.slice(1);
     else if (p.startsWith('8')) p = '62' + p;
@@ -37,7 +37,7 @@ function getRelativeTime(seconds) {
 // ====================================================================
 export default async function setupMessageHandler(sock) {
     console.log("[System] BOT E-VOTING BEM FKG UMI Handler Aktif!");
-    console.log("[System] Mode: PUBLIK (Fitur Admin Dihapus Total)");
+    console.log("[System] Mode: PUBLIK MURNI (Standarisasi 628... & Railway Webhook Ready)");
 
     // ====================================================================
     // 🌐 WEBHOOK SERVER: MENERIMA TRIGGER PUSH DARI GOOGLE APPS SCRIPT
@@ -45,21 +45,18 @@ export default async function setupMessageHandler(sock) {
     const app = express();
     app.use(express.json());
     
-    // UPGRADE RAILWAY: Railway menggunakan env.PORT secara dinamis. Wajib terbaca agar Webhook tidak gagal/timeout!
+    // UPGRADE RAILWAY: Deteksi Port Dinamis (Wajib agar Webhook masuk dari luar)
     const WEBHOOK_PORT = process.env.PORT || process.env.WEBHOOK_PORT || 3000;
 
     app.post('/webhook/evot', async (req, res) => {
         try {
             const data = req.body;
-            // Validasi keamanan: Pastikan payload memiliki action 'send_token'
+            // Validasi keamanan: Pastikan payload dari code.gs memiliki action 'send_token'
             if (data && data.action === 'send_token') {
                 
-                // Standarisasi WA Target (Jaga-jaga jika GAS mengirim format kotor)
-                let targetWa = String(data.wa).replace(/[^0-9]/g, ''); 
-                if (targetWa.startsWith('0')) targetWa = '62' + targetWa.slice(1);
-                else if (targetWa.startsWith('8')) targetWa = '62' + targetWa;
-                
-                if (!targetWa.includes('@')) targetWa = targetWa + '@s.whatsapp.net';
+                // Standarisasi Target WA yang masuk dari GAS menggunakan fungsi anti-crash kita
+                let targetWaBase = formatWaNumber(data.wa); 
+                let targetWaJid = targetWaBase + '@s.whatsapp.net';
 
                 // Template Pesan Dinamis (Aktivasi vs Lupa Token) 
                 // Tergantung dari 'context' yang dikirim oleh code.gs
@@ -80,10 +77,10 @@ export default async function setupMessageHandler(sock) {
                 txt += `Ketik *!menu* untuk melihat layanan bantuan.`;
 
                 // Eksekusi pengiriman pesan otomatis ke Mahasiswa
-                await sock.sendMessage(targetWa, { text: txt });
-                console.log(`[Webhook 🚀] Token (${data.context}) terkirim sukses ke: ${data.nama} (JID: ${targetWa})`);
+                await sock.sendMessage(targetWaJid, { text: txt });
+                console.log(`[Webhook 🚀] Token (${data.context}) terkirim sukses ke: ${data.nama} (JID: ${targetWaJid})`);
                 
-                // Beri respon ke GAS agar request selesai dan tidak pending/timeout
+                // Beri respon JSON ke GAS agar eksekusi HTTP POST di GAS selesai dengan rapi
                 return res.status(200).json({ status: 'success', message: 'Pesan otomatis berhasil dikirim' });
             }
             res.status(400).json({ status: 'error', message: 'Action webhook tidak valid' });
@@ -93,7 +90,7 @@ export default async function setupMessageHandler(sock) {
         }
     });
 
-    // Binding ke 0.0.0.0 sangat penting untuk deployment Docker/Railway
+    // Wajib Binding ke 0.0.0.0 agar port terbuka ke jaringan publik (Internet)
     app.listen(WEBHOOK_PORT, '0.0.0.0', () => {
         console.log(`[System 🌐] Webhook Listener KPU Aktif! (Railway Port: ${WEBHOOK_PORT})`);
     });
@@ -130,10 +127,10 @@ export default async function setupMessageHandler(sock) {
             let senderJid = msg.key.remoteJid; 
             if (senderJid.endsWith('@g.us')) senderJid = msg.key.participant || senderJid;
 
-            // Format nomor pengirim (Membuang @lid atau s.whatsapp.net dan memastikan berformat 628...)
+            // Standarisasi nomor user yang nge-chat bot, pasti jadi format 628...
             const userWaFormat = formatWaNumber(senderJid); 
 
-            console.log(`[COMMAND] ${command} dieksekusi oleh ID: ${senderJid} (Parsed Format: ${userWaFormat})`);
+            console.log(`[COMMAND] ${command} dieksekusi oleh ID: ${senderJid} (Parsed Standar: ${userWaFormat})`);
 
             switch (command) {
                 // ==========================================
@@ -158,7 +155,6 @@ export default async function setupMessageHandler(sock) {
                             
                             await sock.sendMessage(replyJid, { text: txt }, { quoted: msg });
                         } else {
-                            // Pesan error kini menampilkan Format Standar WA agar mahasiswa sadar jika pakai nomor lain
                             await sock.sendMessage(replyJid, { text: `❌ *Data Tidak Ditemukan*\nNomor WhatsApp Anda (${userWaFormat}) belum diaktivasi di website. Silakan aktivasi akun terlebih dahulu di web E-Voting.` }, { quoted: msg });
                         }
                     } catch(err) {
@@ -253,6 +249,7 @@ export default async function setupMessageHandler(sock) {
                     await sock.sendMessage(replyJid, { text: `⏳ *Bot Uptime:* ${getRelativeTime(uptime)}\n🖥️ *OS Memory:* ${Math.round(os.freemem()/1024/1024)}MB / ${Math.round(os.totalmem()/1024/1024)}MB` }, { quoted: msg });
                     break;
                 
+                // Eksekusi Command Eksternal jika ada (Pastikan file ada di folder commands/)
                 case 'ai': if(typeof handleAiCommand === 'function') await handleAiCommand(sock, msg, args); break;
                 case 'sticker': case 's': if(typeof handleStickerCommand === 'function') await handleStickerCommand(sock, msg); break;
 
