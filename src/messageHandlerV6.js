@@ -14,20 +14,6 @@ const EVOT_API_URL = process.env.EVOT_API_URL || "https://script.google.com/macr
 // ====================================================================
 // 📁 FORMATTER UTILITIES
 // ====================================================================
-function formatWaNumber(jid) {
-    if (!jid) return "";
-    let p = String(jid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-    if (p.startsWith('0')) p = '62' + p.slice(1);
-    else if (p.startsWith('8')) p = '62' + p;
-    return p;
-}
-
-function formatJidToLocal(jid) {
-    let p = formatWaNumber(jid);
-    if (p.startsWith('62')) p = '0' + p.slice(2);
-    return p;
-}
-
 function getRelativeTime(seconds) {
     const m = Math.floor(seconds / 60); const h = Math.floor(seconds / 3600); const d = Math.floor(seconds / 86400);
     if (d > 0) return `${d} hari yang lalu`; if (h > 0) return `${h} jam yang lalu`; if (m > 0) return `${m} menit yang lalu`;
@@ -139,14 +125,14 @@ export default async function setupMessageHandler(sock) {
             const args = text.slice(prefix.length).trim().split(/ +/);
             const command = args.shift().toLowerCase();
             
-            // Mengambil JID dari Bot dan memformat WA-nya
             const replyJid = msg.key.remoteJid; 
-            let senderJid = msg.key.remoteJid; // BISA SAJA 247922893566044@lid
+            let senderJid = msg.key.remoteJid; 
             if (senderJid.endsWith('@g.us')) senderJid = msg.key.participant || senderJid;
 
-            // Untuk dicocokkan dengan Database jika JID tidak ditemukan
-            const userWaFormat = formatWaNumber(senderJid); // Jadi 628...
-            const cleanJid = encodeURIComponent(senderJid); // Persiapan buat URL Fetch
+            // PENTING: Melempar ID mentah (bisa @lid atau @s.whatsapp) untuk dicocokkan dengan Sheet Kolom F
+            const cleanJid = encodeURIComponent(senderJid); 
+            // Sebagai Backup: Melempar format angka saja untuk dicocokkan dengan Sheet Kolom G
+            const userWaFormat = senderJid.replace(/[^0-9]/g, ''); 
             
             console.log(`[COMMAND Publik] ${command} diakses oleh ID: ${senderJid}`);
 
