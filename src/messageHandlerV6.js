@@ -8,6 +8,7 @@ import handleStickerCommand from './commands/sticker.js';
 // ====================================================================
 // 🚀 KONFIGURASI API E-VOTING BEM FKG UMI
 // ====================================================================
+// PASTE URL ENDPOINT GAS ANDA DI SINI (Pastikan yang paling baru di-deploy)
 const EVOT_API_URL = process.env.EVOT_API_URL || "https://script.google.com/macros/s/AKfycbxw3v9--RsgQoXMRpwTvApotQZ-UmlTuH_mHpRGZIiMryxirWPSJjPcSwdtMUngcBEn/exec";
 
 // ====================================================================
@@ -32,12 +33,11 @@ function getRelativeTime(seconds) {
 // ====================================================================
 export default async function setupMessageHandler(sock) {
     console.log("[System] BOT E-VOTING MURNI PUBLIK Aktif!");
-    console.log("[System] Fitur PULL Berjalan di Background (Menolak akses LID/WA Web).");
+    console.log("[System] Fitur PULL Berjalan di Background (Menolak akses WA Web).");
 
     // ====================================================================
     // 🔄 AUTO-POLLING API (PULL METHOD SETIAP 5 DETIK)
     // ====================================================================
-    /* STREAMING_CHUNK:Initializing Auto-Pull interval... */
     setInterval(async () => {
         try {
             const res = await fetch(`${EVOT_API_URL}?action=botApi&command=GET_PENDING_MESSAGES`);
@@ -54,12 +54,12 @@ export default async function setupMessageHandler(sock) {
                     let targetWaLid = rawWa + '@s.whatsapp.net';
                     let finalLid = targetWaLid;
 
-                    // Mencari ID Utama dari Server WA
+                    // Mencari ID Utama dari Server WA (Ini akan mengembalikan JID utama/ID asli perangkat HP)
                     try {
                         const [result] = await sock.onWhatsApp(targetWaLid);
                         if (result && result.exists) {
                             finalLid = result.jid; 
-                            console.log(`[Resolver] Nomor ${rawWa} dipetakan ke JID Utama: ${finalLid}`);
+                            console.log(`[Resolver] Nomor ${rawWa} dipetakan ke ID Utama: ${finalLid}`);
                         }
                     } catch (e) {
                         console.log(`[Resolver] Gagal resolve untuk ${rawWa}, mencoba format standar.`);
@@ -112,7 +112,6 @@ export default async function setupMessageHandler(sock) {
     // ====================================================================
     // INCOMING CHAT HANDLER (BOT PUBLIK)
     // ====================================================================
-    /* STREAMING_CHUNK:Configuring incoming message handler... */
     sock.ev.on('messages.upsert', async (m) => {
         try {
             const msg = m.messages[0];
@@ -202,7 +201,6 @@ export default async function setupMessageHandler(sock) {
                     }
                     break;
 
-                /* STREAMING_CHUNK:Handling other commands... */
                 case 'status':
                 case 'ceksuara':
                     try {
