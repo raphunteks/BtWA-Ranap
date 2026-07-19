@@ -8,17 +8,21 @@ import handleStickerCommand from './commands/sticker.js';
 // ====================================================================
 // 🚀 KONFIGURASI API E-VOTING BEM FKG UMI
 // ====================================================================
-// PASTE URL ENDPOINT GAS ANDA DI SINI (Pastikan yang paling baru di-deploy)
 const EVOT_API_URL = process.env.EVOT_API_URL || "https://script.google.com/macros/s/AKfycbxw3v9--RsgQoXMRpwTvApotQZ-UmlTuH_mHpRGZIiMryxirWPSJjPcSwdtMUngcBEn/exec";
 
 // ====================================================================
 // 📁 FORMATTER UTILITIES
 // ====================================================================
-function formatWaNumber(lid) {
-    if (!lid) return "";
-    let p = String(lid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+function formatWaNumber(id) {
+    if (!id) return "";
+    // Membuang @s.whatsapp.net, @lid, atau : dari string ID
+    let p = String(id).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    
+    // Konversi cerdas: Hanya konversi ke 62 jika itu terlihat seperti nomor HP lokal
+    // (Abaikan jika itu adalah deretan angka LID acak)
     if (p.startsWith('0')) p = '62' + p.slice(1);
     else if (p.startsWith('8')) p = '62' + p;
+    
     return p;
 }
 
@@ -33,7 +37,7 @@ function getRelativeTime(seconds) {
 // ====================================================================
 export default async function setupMessageHandler(sock) {
     console.log("[System] BOT E-VOTING MURNI PUBLIK Aktif!");
-    console.log("[System] Fitur PULL Berjalan di Background (Menolak akses WA Web).");
+    console.log("[System] Fitur Auto-Pull & Dual JID/LID Resolver Berjalan di Background.");
 
     // ====================================================================
     // 🔄 AUTO-POLLING API (PULL METHOD SETIAP 5 DETIK)
@@ -47,65 +51,73 @@ export default async function setupMessageHandler(sock) {
                 console.log(`[Auto-Pull 📥] Ditemukan ${json.data.length} antrian pesan WA!`);
                 
                 for (const msgData of json.data) {
-                    // 1. Mengubah format WA (cth: 62852...)
-                    let rawWa = msgData.wa;
-                    if (rawWa.startsWith('0')) rawWa = '62' + rawWa.substring(1);
-                    
-                    let targetWaLid = rawWa + '@s.whatsapp.net';
-                    let finalLid = targetWaLid;
-
-                    // Mencari ID Utama dari Server WA (Ini akan mengembalikan JID utama/ID asli perangkat HP)
+                    // SUPER UPGRADE: Membungkus eksekusi pengiriman dengan Try-Catch Anti-Crash
                     try {
-                        const [result] = await sock.onWhatsApp(targetWaLid);
-                        if (result && result.exists) {
-                            finalLid = result.jid; 
-                            console.log(`[Resolver] Nomor ${rawWa} dipetakan ke ID Utama: ${finalLid}`);
+                        // 1. Standarisasi Format WA untuk Pengiriman (Memastikan 62...)
+                        let rawWa = msgData.wa;
+                        if (rawWa.startsWith('0')) rawWa = '62' + rawWa.substring(1);
+                        
+                        let targetWaLid = rawWa + '@s.whatsapp.net';
+                        let finalLid = targetWaLid;
+
+                        // Mencari ID Utama / Resolve ke server WA
+                        try {
+                            const [result] = await sock.onWhatsApp(targetWaLid);
+                            if (result && result.exists) {
+                                finalLid = result.jid; 
+                                console.log(`[Resolver] Nomor ${rawWa} dipetakan ke JID Utama: ${finalLid}`);
+                            }
+                        } catch (e) {
+                            console.log(`[Resolver] Gagal resolve untuk ${rawWa}, mencoba format standar.`);
                         }
-                    } catch (e) {
-                        console.log(`[Resolver] Gagal resolve untuk ${rawWa}, mencoba format standar.`);
-                    }
 
-                    // 2. Menyusun Template Pesan
-                    let txt = '';
-                    if (msgData.context === 'lupa_token') {
-                        txt = `🔄 *PERMINTAAN RESET TOKEN KPU* 🔄\n\n`;
-                        txt += `Halo *${msgData.nama.toUpperCase()}*,\n`;
-                        txt += `Sistem telah mereset dan menerbitkan ulang Token Anda sesuai permintaan dari Website Pemilihan.\n\n`;
-                    } else {
-                        txt = `🎓 *SELAMAT, AKTIVASI BERHASIL!* 🎓\n\n`;
-                        txt += `Halo *${msgData.nama.toUpperCase()}*,\n`;
-                        txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah berhasil dikonfirmasi.\n\n`;
+                        // 2. Menyusun Template Pesan
+                        let txt = '';
+                        if (msgData.context === 'lupa_token') {
+                            txt = `🔄 *PERMINTAAN RESET TOKEN KPU* 🔄\n\n`;
+                            txt += `Halo *${msgData.nama.toUpperCase()}*,\n`;
+                            txt += `Sistem telah mereset dan menerbitkan ulang Token Anda sesuai permintaan dari Website Pemilihan.\n\n`;
+                        } else {
+                            txt = `🎓 *SELAMAT, AKTIVASI BERHASIL!* 🎓\n\n`;
+                            txt += `Halo *${msgData.nama.toUpperCase()}*,\n`;
+                            txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah berhasil dikonfirmasi.\n\n`;
+                        }
+                        
+                        txt += `🆔 *NIM:* ${msgData.nim}\n`;
+                        txt += `🔑 *TOKEN RAHASIA:* \n*${msgData.token}*\n\n`;
+                        txt += `_Gunakan NIM dan Token di atas untuk login ke website pemilihan. Jangan bagikan token ini kepada siapapun demi kerahasiaan suara Anda!_\n\n`;
+                        txt += `Ketik *!menu* untuk melihat layanan bantuan.`;
+
+                        // 3. Eksekusi Pengiriman Pesan
+                        await sock.sendMessage(finalLid, { text: txt });
+                        console.log(`[Auto-Send 🚀] Pesan (${msgData.context}) terkirim sukses ke ${rawWa}.`);
+
+                        // 4. POST KE GOOGLE SHEETS UNTUK MENYIMPAN ID UTAMA (KOLOM F)
+                        try {
+                            await fetch(EVOT_API_URL, {
+                                method: "POST",
+                                headers: { "Content-Type": "text/plain;charset=utf-8" },
+                                body: JSON.stringify({
+                                    action: "update_lid",
+                                    data: { nim: msgData.nim, lid: finalLid }
+                                })
+                            });
+                        } catch (err) {
+                            console.log(`[Database Error] Gagal simpan LID ke Sheets: ${err.message}`);
+                        }
+
+                    } catch (fatalErr) {
+                        // TANGKAPAN ERROR FATAL (Nomor tidak terdaftar, nomor hangus, dsb)
+                        // Bot tidak akan mati, hanya melompati nomor yang error ini.
+                        console.log(`[Auto-Send ❌ GAGAL] Tidak dapat mengirim pesan ke WA: ${msgData.wa}. Alasan: ${fatalErr.message}`);
                     }
                     
-                    txt += `🆔 *NIM:* ${msgData.nim}\n`;
-                    txt += `🔑 *TOKEN RAHASIA:* \n*${msgData.token}*\n\n`;
-                    txt += `_Gunakan NIM dan Token di atas untuk login ke website pemilihan. Jangan bagikan token ini kepada siapapun demi kerahasiaan suara Anda!_\n\n`;
-                    txt += `Ketik *!menu* untuk melihat layanan bantuan.`;
-
-                    // 3. Eksekusi Pengiriman
-                    await sock.sendMessage(finalLid, { text: txt });
-                    console.log(`[Auto-Send 🚀] Pesan (${msgData.context}) terkirim sukses.`);
-
-                    // 4. POST KE GOOGLE SHEETS UNTUK MENYIMPAN ID UTAMA (KOLOM F)
-                    try {
-                        await fetch(EVOT_API_URL, {
-                            method: "POST",
-                            headers: { "Content-Type": "text/plain;charset=utf-8" },
-                            body: JSON.stringify({
-                                action: "update_lid",
-                                data: { nim: msgData.nim, lid: finalLid }
-                            })
-                        });
-                    } catch (err) {
-                        console.log(`[Database Error] Gagal simpan LID ke Sheets: ${err.message}`);
-                    }
-                    
-                    // Jeda 2 detik anti-spam/banned
+                    // Jeda 2 detik antar pesan agar tidak terkena ban spam WhatsApp
                     await new Promise(resolve => setTimeout(resolve, 2000));
                 }
             }
         } catch (err) {
-            // Error di-silence agar bot tetap berjalan mulus
+            // Error request fetch API di-silence agar bot tetap berjalan mulus walau jaringan fluktuatif
         }
     }, 5000); 
 
@@ -128,29 +140,29 @@ export default async function setupMessageHandler(sock) {
             const command = args.shift().toLowerCase();
             
             const replyJid = msg.key.remoteJid; 
-            let senderLid = msg.key.remoteJid; 
-            if (senderLid.endsWith('@g.us')) senderLid = msg.key.participant || senderLid;
-
-            // ====================================================
-            // 🔒 SUPER UPGRADE: SISTEM KEAMANAN PEMBLOKIRAN WA WEB (LID)
-            // ====================================================
-            if (senderLid.endsWith('@lid')) {
-                const securityMsg = `🔒 *SISTEM KEAMANAN KPU AKTIF*\n\nMohon maaf, demi menjamin kerahasiaan & keamanan Token E-Voting Anda, sistem otomatis *menolak akses dari WhatsApp Web / Perangkat Tertaut*.\n\n📱 Silakan buka *WhatsApp Utama di HP Anda*, lalu ketik ulang perintah *${text}* untuk melanjutkan.`;
-                return await sock.sendMessage(replyJid, { text: securityMsg }, { quoted: msg });
-            }
-            // ====================================================
-
-            const userWaFormat = formatWaNumber(senderLid); 
-            const cleanLid = encodeURIComponent(senderLid); 
             
-            console.log(`[COMMAND Publik] ${command} diakses oleh ID Utama: ${senderLid}`);
+            // Ekstraksi ID Pengirim
+            let senderId = msg.key.remoteJid; 
+            if (senderId.endsWith('@g.us')) senderId = msg.key.participant || senderId;
+
+            // ====================================================
+            // 🌟 SUPER UPGRADE: DUAL-RESOLVER JID & LID SEKALIGUS
+            // ====================================================
+            // Semua jenis perangkat yang digunakan mahasiswa (WA Web, Aplikasi HP, Perangkat Taut)
+            // Dapat langsung terdeteksi. Tidak ada lagi pemblokiran.
+            
+            const userWaFormat = formatWaNumber(senderId); // Menghasilkan 628... murni (Nomor WA Asli)
+            const cleanId = encodeURIComponent(senderId); // Menghasilkan format URL-Safe (JID/LID utuh)
+            
+            console.log(`[COMMAND Publik] ${command} diakses oleh ID: ${senderId} (Parsed WA: ${userWaFormat})`);
 
             switch (command) {
                 case 'token':
                 case 'minta-token':
                     await sock.sendMessage(replyJid, { text: "⏳ _Mencari identitas Anda di sistem KPU..._" }, { quoted: msg });
                     try {
-                        const res = await fetch(`${EVOT_API_URL}?action=botApi&command=GET_TOKEN&lid=${cleanLid}&wa=${userWaFormat}`);
+                        // API Akan mengecek KEDUA parameter ini sekaligus ke Spreadsheet
+                        const res = await fetch(`${EVOT_API_URL}?action=botApi&command=GET_TOKEN&lid=${cleanId}&wa=${userWaFormat}`);
                         const data = await res.json();
                         
                         if(data.status === 'success') {
@@ -175,7 +187,7 @@ export default async function setupMessageHandler(sock) {
                 case 'lupatoken':
                     await sock.sendMessage(replyJid, { text: "⏳ _Memproses reset token keamanan Anda..._" }, { quoted: msg });
                     try {
-                        const checkReq = await fetch(`${EVOT_API_URL}?action=botApi&command=CHECK_STATUS&lid=${cleanLid}&wa=${userWaFormat}`);
+                        const checkReq = await fetch(`${EVOT_API_URL}?action=botApi&command=CHECK_STATUS&lid=${cleanId}&wa=${userWaFormat}`);
                         const checkData = await checkReq.json();
 
                         if (checkData.status === 'success') {
@@ -183,7 +195,7 @@ export default async function setupMessageHandler(sock) {
                                 return await sock.sendMessage(replyJid, { text: `⚠️ *Akses Ditolak*\nAnda sudah memberikan suara! Token tidak dapat di-reset kembali.` }, { quoted: msg });
                             }
 
-                            const res = await fetch(`${EVOT_API_URL}?action=botApi&command=RESET_TOKEN&lid=${cleanLid}&wa=${userWaFormat}`);
+                            const res = await fetch(`${EVOT_API_URL}?action=botApi&command=RESET_TOKEN&lid=${cleanId}&wa=${userWaFormat}`);
                             const data = await res.json();
                             
                             if(data.status === 'success') {
@@ -204,7 +216,7 @@ export default async function setupMessageHandler(sock) {
                 case 'status':
                 case 'ceksuara':
                     try {
-                        const res = await fetch(`${EVOT_API_URL}?action=botApi&command=CHECK_STATUS&lid=${cleanLid}&wa=${userWaFormat}`);
+                        const res = await fetch(`${EVOT_API_URL}?action=botApi&command=CHECK_STATUS&lid=${cleanId}&wa=${userWaFormat}`);
                         const data = await res.json();
                         
                         if(data.status === 'success') {
@@ -231,7 +243,7 @@ export default async function setupMessageHandler(sock) {
                 case 'menu':
                 case 'help':
                     let manualMenuText = `🎓 *LAYANAN BOT KPU BEM FKG UMI* 🎓\n\n`;
-                    manualMenuText += `Halo! Saya adalah Asisten Virtual E-Voting. Silakan gunakan perintah publik berikut dari HP Anda:\n\n`;
+                    manualMenuText += `Halo! Saya adalah Asisten Virtual E-Voting. Silakan gunakan perintah publik berikut:\n\n`;
                     manualMenuText += `*👤 PESERTA / DPT:*\n`;
                     manualMenuText += `> *!token* (Cek NIM & Token Anda)\n`;
                     manualMenuText += `> *!reset* (Acak ulang token keamanan)\n`;
@@ -241,7 +253,7 @@ export default async function setupMessageHandler(sock) {
                     break;
 
                 case 'myid': case 'cekid':
-                    await sock.sendMessage(replyJid, { text: `*ℹ️ INFORMASI ID ANDA*\n\n*ID Sistem:* \n${senderLid}\n*Nomor Terdeteksi:* ${userWaFormat}` }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: `*ℹ️ INFORMASI SINKRONISASI ID*\n\n*ID Platform:* \n${senderId}\n*WA Asli Terdeteksi:* ${userWaFormat}` }, { quoted: msg });
                     break;
 
                 case 'ping':
