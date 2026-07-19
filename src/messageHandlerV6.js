@@ -8,7 +8,6 @@ import handleStickerCommand from './commands/sticker.js';
 // ====================================================================
 // 🚀 KONFIGURASI API E-VOTING BEM FKG UMI
 // ====================================================================
-// PASTE URL ENDPOINT GAS ANDA DI SINI (Pastikan yang paling baru di-deploy)
 const EVOT_API_URL = process.env.EVOT_API_URL || "https://script.google.com/macros/s/AKfycbxw3v9--RsgQoXMRpwTvApotQZ-UmlTuH_mHpRGZIiMryxirWPSJjPcSwdtMUngcBEn/exec";
 
 // ====================================================================
@@ -22,12 +21,6 @@ function formatWaNumber(lid) {
     return p;
 }
 
-function formatLidToLocal(lid) {
-    let p = formatWaNumber(lid);
-    if (p.startsWith('62')) p = '0' + p.slice(2);
-    return p;
-}
-
 function getRelativeTime(seconds) {
     const m = Math.floor(seconds / 60); const h = Math.floor(seconds / 3600); const d = Math.floor(seconds / 86400);
     if (d > 0) return `${d} hari yang lalu`; if (h > 0) return `${h} jam yang lalu`; if (m > 0) return `${m} menit yang lalu`;
@@ -35,15 +28,16 @@ function getRelativeTime(seconds) {
 }
 
 // ====================================================================
-// 🚀 MAIN HANDLER BOT E-VOTING (PULL ARCHITECTURE + LID RESOLVER)
+// 🚀 MAIN HANDLER BOT E-VOTING (PULL ARCHITECTURE)
 // ====================================================================
 export default async function setupMessageHandler(sock) {
     console.log("[System] BOT E-VOTING MURNI PUBLIK Aktif!");
-    console.log("[System] Fitur PULL & Auto LID-Resolver Berjalan di Background.");
+    console.log("[System] Fitur PULL Berjalan di Background (Menolak akses LID/WA Web).");
 
     // ====================================================================
     // 🔄 AUTO-POLLING API (PULL METHOD SETIAP 5 DETIK)
     // ====================================================================
+    /* STREAMING_CHUNK:Initializing Auto-Pull interval... */
     setInterval(async () => {
         try {
             const res = await fetch(`${EVOT_API_URL}?action=botApi&command=GET_PENDING_MESSAGES`);
@@ -58,19 +52,17 @@ export default async function setupMessageHandler(sock) {
                     if (rawWa.startsWith('0')) rawWa = '62' + rawWa.substring(1);
                     
                     let targetWaLid = rawWa + '@s.whatsapp.net';
-                    let finalLid = targetWaLid; // Fallback jika gagal dideteksi
+                    let finalLid = targetWaLid;
 
-                    // ====================================================
-                    // 🌟 SUPER FITUR: MENCARI LID ASLI (RESOLVER BAILEYS)
-                    // ====================================================
+                    // Mencari ID Utama dari Server WA
                     try {
                         const [result] = await sock.onWhatsApp(targetWaLid);
                         if (result && result.exists) {
-                            finalLid = result.jid; // Mengambil JID Asli/Official (bisa berakhiran @lid dsb)
-                            console.log(`[LID Resolver] Nomor ${rawWa} terdeteksi sebagai LID: ${finalLid}`);
+                            finalLid = result.jid; 
+                            console.log(`[Resolver] Nomor ${rawWa} dipetakan ke JID Utama: ${finalLid}`);
                         }
                     } catch (e) {
-                        console.log(`[LID Resolver] Gagal resolve LID untuk ${rawWa}, mencoba mengirim dengan format standar.`);
+                        console.log(`[Resolver] Gagal resolve untuk ${rawWa}, mencoba format standar.`);
                     }
 
                     // 2. Menyusun Template Pesan
@@ -82,7 +74,7 @@ export default async function setupMessageHandler(sock) {
                     } else {
                         txt = `🎓 *SELAMAT, AKTIVASI BERHASIL!* 🎓\n\n`;
                         txt += `Halo *${msgData.nama.toUpperCase()}*,\n`;
-                        txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah berhasil dikonfirmasi oleh sistem.\n\n`;
+                        txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah berhasil dikonfirmasi.\n\n`;
                     }
                     
                     txt += `🆔 *NIM:* ${msgData.nim}\n`;
@@ -90,13 +82,11 @@ export default async function setupMessageHandler(sock) {
                     txt += `_Gunakan NIM dan Token di atas untuk login ke website pemilihan. Jangan bagikan token ini kepada siapapun demi kerahasiaan suara Anda!_\n\n`;
                     txt += `Ketik *!menu* untuk melihat layanan bantuan.`;
 
-                    // 3. Eksekusi Pengiriman ke LID ASLI
+                    // 3. Eksekusi Pengiriman
                     await sock.sendMessage(finalLid, { text: txt });
-                    console.log(`[Auto-Send 🚀] Pesan (${msgData.context}) terkirim sukses ke LID: ${finalLid}`);
+                    console.log(`[Auto-Send 🚀] Pesan (${msgData.context}) terkirim sukses.`);
 
-                    // ====================================================
-                    // 🌟 POST KE GOOGLE SHEETS UNTUK MENYIMPAN LID (KOLOM F)
-                    // ====================================================
+                    // 4. POST KE GOOGLE SHEETS UNTUK MENYIMPAN ID UTAMA (KOLOM F)
                     try {
                         await fetch(EVOT_API_URL, {
                             method: "POST",
@@ -106,7 +96,6 @@ export default async function setupMessageHandler(sock) {
                                 data: { nim: msgData.nim, lid: finalLid }
                             })
                         });
-                        console.log(`[Database 💾] LID ${finalLid} berhasil disinkronisasi ke Google Sheets.`);
                     } catch (err) {
                         console.log(`[Database Error] Gagal simpan LID ke Sheets: ${err.message}`);
                     }
@@ -116,19 +105,19 @@ export default async function setupMessageHandler(sock) {
                 }
             }
         } catch (err) {
-            // Error di-silence agar bot tetap berjalan mulus walau jaringan fluktuatif
+            // Error di-silence agar bot tetap berjalan mulus
         }
     }, 5000); 
 
     // ====================================================================
     // INCOMING CHAT HANDLER (BOT PUBLIK)
     // ====================================================================
+    /* STREAMING_CHUNK:Configuring incoming message handler... */
     sock.ev.on('messages.upsert', async (m) => {
         try {
             const msg = m.messages[0];
             if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
-            // Membaca Teks
             let text = '';
             if (msg.message.conversation) text = msg.message.conversation;
             else if (msg.message.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
@@ -139,23 +128,29 @@ export default async function setupMessageHandler(sock) {
             const args = text.slice(prefix.length).trim().split(/ +/);
             const command = args.shift().toLowerCase();
             
-            // Mengambil LID dari Bot dan memformat WA-nya
-            const replyLid = msg.key.remoteJid; 
-            let senderLid = msg.key.remoteJid; // BISA SAJA 247922893566044@lid
+            const replyJid = msg.key.remoteJid; 
+            let senderLid = msg.key.remoteJid; 
             if (senderLid.endsWith('@g.us')) senderLid = msg.key.participant || senderLid;
 
-            // Untuk dicocokkan dengan Database jika LID tidak ditemukan
-            const userWaFormat = formatWaNumber(senderLid); // Jadi 628...
-            const cleanLid = encodeURIComponent(senderLid); // Persiapan buat URL Fetch
+            // ====================================================
+            // 🔒 SUPER UPGRADE: SISTEM KEAMANAN PEMBLOKIRAN WA WEB (LID)
+            // ====================================================
+            if (senderLid.endsWith('@lid')) {
+                const securityMsg = `🔒 *SISTEM KEAMANAN KPU AKTIF*\n\nMohon maaf, demi menjamin kerahasiaan & keamanan Token E-Voting Anda, sistem otomatis *menolak akses dari WhatsApp Web / Perangkat Tertaut*.\n\n📱 Silakan buka *WhatsApp Utama di HP Anda*, lalu ketik ulang perintah *${text}* untuk melanjutkan.`;
+                return await sock.sendMessage(replyJid, { text: securityMsg }, { quoted: msg });
+            }
+            // ====================================================
+
+            const userWaFormat = formatWaNumber(senderLid); 
+            const cleanLid = encodeURIComponent(senderLid); 
             
-            console.log(`[COMMAND Publik] ${command} diakses oleh ID: ${senderLid}`);
+            console.log(`[COMMAND Publik] ${command} diakses oleh ID Utama: ${senderLid}`);
 
             switch (command) {
                 case 'token':
                 case 'minta-token':
-                    await sock.sendMessage(replyLid, { text: "⏳ _Mencari identitas Anda di sistem KPU..._" }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: "⏳ _Mencari identitas Anda di sistem KPU..._" }, { quoted: msg });
                     try {
-                        // KITA LEMPAR KEDUANYA (LID DAN WA) KE GAS, GAS AKAN MENCOCOKKAN SALAH SATUNYA!
                         const res = await fetch(`${EVOT_API_URL}?action=botApi&command=GET_TOKEN&lid=${cleanLid}&wa=${userWaFormat}`);
                         const data = await res.json();
                         
@@ -168,25 +163,25 @@ export default async function setupMessageHandler(sock) {
                             txt += `📊 *Status Pemilihan:* ${statusText}\n\n`;
                             txt += `_Gunakan NIM dan Token di atas untuk masuk ke website pemilihan. Jangan bagikan token ini kepada siapapun!_`;
                             
-                            await sock.sendMessage(replyLid, { text: txt }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: txt }, { quoted: msg });
                         } else {
-                            await sock.sendMessage(replyLid, { text: `❌ *Data Tidak Ditemukan*\nNomor/ID WhatsApp Anda belum diaktivasi di website. Silakan aktivasi akun terlebih dahulu di web E-Voting.` }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: `❌ *Data Tidak Ditemukan*\nNomor WhatsApp Anda belum diaktivasi di website. Silakan aktivasi akun terlebih dahulu di web E-Voting.` }, { quoted: msg });
                         }
                     } catch(err) {
-                        await sock.sendMessage(replyLid, { text: "❌ Sistem Server sedang sibuk. Coba beberapa saat lagi." }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: "❌ Sistem Server sedang sibuk. Coba beberapa saat lagi." }, { quoted: msg });
                     }
                     break;
 
                 case 'reset':
                 case 'lupatoken':
-                    await sock.sendMessage(replyLid, { text: "⏳ _Memproses reset token keamanan Anda..._" }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: "⏳ _Memproses reset token keamanan Anda..._" }, { quoted: msg });
                     try {
                         const checkReq = await fetch(`${EVOT_API_URL}?action=botApi&command=CHECK_STATUS&lid=${cleanLid}&wa=${userWaFormat}`);
                         const checkData = await checkReq.json();
 
                         if (checkData.status === 'success') {
                             if (checkData.data.status_vote === "Sudah") {
-                                return await sock.sendMessage(replyLid, { text: `⚠️ *Akses Ditolak*\nAnda sudah memberikan suara! Token tidak dapat di-reset kembali.` }, { quoted: msg });
+                                return await sock.sendMessage(replyJid, { text: `⚠️ *Akses Ditolak*\nAnda sudah memberikan suara! Token tidak dapat di-reset kembali.` }, { quoted: msg });
                             }
 
                             const res = await fetch(`${EVOT_API_URL}?action=botApi&command=RESET_TOKEN&lid=${cleanLid}&wa=${userWaFormat}`);
@@ -197,16 +192,17 @@ export default async function setupMessageHandler(sock) {
                                 txt += `Sistem telah mengacak ulang token keamanan Anda:\n\n`;
                                 txt += `🔑 *TOKEN BARU:* \n*${data.data.token}*\n\n`;
                                 txt += `_Silakan gunakan token baru ini untuk login. Token lama Anda sudah hangus._`;
-                                await sock.sendMessage(replyLid, { text: txt }, { quoted: msg });
+                                await sock.sendMessage(replyJid, { text: txt }, { quoted: msg });
                             }
                         } else {
-                            await sock.sendMessage(replyLid, { text: `❌ Nomor/ID WhatsApp Anda belum terdaftar di sistem. Silakan aktivasi dulu di web.` }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: `❌ Nomor WhatsApp Anda belum terdaftar di sistem. Silakan aktivasi dulu di web.` }, { quoted: msg });
                         }
                     } catch(err) {
-                        await sock.sendMessage(replyLid, { text: "❌ Gagal mereset token, server sedang sibuk." }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: "❌ Gagal mereset token, server sedang sibuk." }, { quoted: msg });
                     }
                     break;
 
+                /* STREAMING_CHUNK:Handling other commands... */
                 case 'status':
                 case 'ceksuara':
                     try {
@@ -225,40 +221,39 @@ export default async function setupMessageHandler(sock) {
                             } else {
                                 txt += `_Ketik *!token* untuk melihat token Anda dan segera selesaikan pemilihan._`;
                             }
-                            await sock.sendMessage(replyLid, { text: txt }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: txt }, { quoted: msg });
                         } else {
-                            await sock.sendMessage(replyLid, { text: `❌ Nomor Anda belum diaktivasi.` }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: `❌ Nomor Anda belum diaktivasi.` }, { quoted: msg });
                         }
                     } catch(err) {
-                        await sock.sendMessage(replyLid, { text: "❌ Server timeout." }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: "❌ Server timeout." }, { quoted: msg });
                     }
                     break;
 
                 case 'menu':
                 case 'help':
                     let manualMenuText = `🎓 *LAYANAN BOT KPU BEM FKG UMI* 🎓\n\n`;
-                    manualMenuText += `Halo! Saya adalah Asisten Virtual E-Voting. Silakan gunakan perintah publik berikut:\n\n`;
+                    manualMenuText += `Halo! Saya adalah Asisten Virtual E-Voting. Silakan gunakan perintah publik berikut dari HP Anda:\n\n`;
                     manualMenuText += `*👤 PESERTA / DPT:*\n`;
                     manualMenuText += `> *!token* (Cek NIM & Token Anda)\n`;
                     manualMenuText += `> *!reset* (Acak ulang token keamanan)\n`;
                     manualMenuText += `> *!status* (Cek status pemilihan)\n\n`;
                     manualMenuText += `*✨ LAINNYA:*\n> !ai <pertanyaan> (Tanya AI)\n> !s (Buat Stiker)\n> !runtime (Status Server)`;
-
-                    await sock.sendMessage(replyLid, { text: manualMenuText }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: manualMenuText }, { quoted: msg });
                     break;
 
                 case 'myid': case 'cekid':
-                    await sock.sendMessage(replyLid, { text: `*ℹ️ INFORMASI ID ANDA*\n\n*ID Sistem:* \n${senderLid}\n*Nomor Terdeteksi:* ${userWaFormat}` }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: `*ℹ️ INFORMASI ID ANDA*\n\n*ID Sistem:* \n${senderLid}\n*Nomor Terdeteksi:* ${userWaFormat}` }, { quoted: msg });
                     break;
 
                 case 'ping':
                     const pingProcess = Date.now() - (msg.messageTimestamp * 1000);
-                    await sock.sendMessage(replyLid, { text: `🏓 *Pong!*\n⚡ *Response:* ${pingProcess} ms` }, { quoted: msg }); 
+                    await sock.sendMessage(replyJid, { text: `🏓 *Pong!*\n⚡ *Response:* ${pingProcess} ms` }, { quoted: msg }); 
                     break;
                     
                 case 'runtime':
                     const uptime = process.uptime();
-                    await sock.sendMessage(replyLid, { text: `⏳ *Uptime:* ${getRelativeTime(uptime)}\n🖥️ *Memory:* ${Math.round(os.freemem()/1024/1024)}MB / ${Math.round(os.totalmem()/1024/1024)}MB` }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: `⏳ *Uptime:* ${getRelativeTime(uptime)}\n🖥️ *Memory:* ${Math.round(os.freemem()/1024/1024)}MB / ${Math.round(os.totalmem()/1024/1024)}MB` }, { quoted: msg });
                     break;
                 
                 case 'ai': if(typeof handleAiCommand === 'function') await handleAiCommand(sock, msg, args); break;
