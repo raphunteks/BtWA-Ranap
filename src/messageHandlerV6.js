@@ -2,6 +2,7 @@ import fs from 'fs';
 import process from 'process';
 import os from 'os';
 import { generateWAMessageFromContent } from '@whiskeysockets/baileys'; 
+import express from 'express'; // 🚀 UPGRADE: Tambahkan library express untuk menerima Webhook dari Google Apps Script
 
 // Handler perintah eksternal (Pastikan file ini ada di folder /commands Anda)
 // Jika tidak ada, bisa di-comment saja agar tidak error
@@ -67,6 +68,51 @@ function getRelativeTime(seconds) {
 // ====================================================================
 export default async function setupMessageHandler(sock) {
     console.log("[System] BOT E-VOTING BEM FKG UMI Handler Aktif!");
+
+    // ====================================================================
+    // 🌐 WEBHOOK SERVER: MENERIMA TRIGGER OTOMATIS DARI GOOGLE APPS SCRIPT
+    // ====================================================================
+    const app = express();
+    app.use(express.json());
+    const WEBHOOK_PORT = process.env.WEBHOOK_PORT || 3000;
+
+    app.post('/webhook/evot', async (req, res) => {
+        try {
+            const data = req.body;
+            if (data && data.action === 'send_token') {
+                
+                // 1. Konversi format nomor web (08...) ke format JID WhatsApp (628...@s.whatsapp.net)
+                let targetWa = data.wa;
+                if (targetWa.startsWith('0')) targetWa = '62' + targetWa.slice(1);
+                if (!targetWa.includes('@')) targetWa = targetWa + '@s.whatsapp.net';
+
+                // 2. Template Pesan WA yang akan dikirim OTOMATIS
+                let txt = `🎓 *SELAMAT, AKTIVASI BERHASIL!* 🎓\n\n`;
+                txt += `Halo *${data.nama.toUpperCase()}*,\n`;
+                txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah berhasil dikonfirmasi oleh sistem.\n\n`;
+                txt += `🆔 *NIM:* ${data.nim}\n`;
+                txt += `🔑 *TOKEN RAHASIA:* \n*${data.token}*\n\n`;
+                txt += `_Gunakan NIM dan Token di atas untuk login ke website pemilihan. Jangan bagikan token ini kepada siapapun demi kerahasiaan suara Anda!_\n\n`;
+                txt += `Ketik *!menu* untuk melihat layanan bantuan.`;
+
+                // 3. Eksekusi pengiriman pesan tanpa delay
+                await sock.sendMessage(targetWa, { text: txt });
+                console.log(`[Webhook 🚀] Token otomatis terkirim ke: ${data.nama} (${data.wa})`);
+                
+                return res.status(200).json({ status: 'success', message: 'Pesan otomatis berhasil dikirim' });
+            }
+            res.status(400).json({ status: 'error', message: 'Action webhook tidak valid' });
+        } catch (error) {
+            console.error('[Webhook Error ❌]', error);
+            res.status(500).json({ status: 'error', message: error.message });
+        }
+    });
+
+    app.listen(WEBHOOK_PORT, () => {
+        console.log(`[System 🌐] Webhook Listener KPU Aktif!`);
+        console.log(`[System 🌐] Menunggu trigger dari GAS di port ${WEBHOOK_PORT} (http://localhost:${WEBHOOK_PORT}/webhook/evot)`);
+    });
+    // ====================================================================
 
     sock.ev.on('messages.upsert', async (m) => {
         try {
