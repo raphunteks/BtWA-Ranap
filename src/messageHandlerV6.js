@@ -1,45 +1,46 @@
 import process from 'process';
 import os from 'os';
 import { generateWAMessageFromContent } from '@whiskeysockets/baileys'; 
-import express from 'express'; // 🚀 Express untuk menangkap webhook dari GAS
+import express from 'express'; 
 
 // Handler perintah eksternal (Pastikan file ini ada di folder /commands Anda)
+// Jika tidak ada, bisa di-comment saja agar tidak error
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
 // ====================================================================
 // 🚀 KONFIGURASI API E-VOTING BEM FKG UMI
 // ====================================================================
-// Murni hanya 1 Admin (Pemilik Bot) agar lebih aman dan Script bisa Publik
-const ownerNumber = process.env.OWNER_NUMBER || "6282122224408@s.whatsapp.net";
-
 // PASTE URL ENDPOINT GAS ANDA DI SINI
 const EVOT_API_URL = process.env.EVOT_API_URL || "https://script.google.com/macros/s/AKfycbxw3v9--RsgQoXMRpwTvApotQZ-UmlTuH_mHpRGZIiMryxirWPSJjPcSwdtMUngcBEn/exec";
 
 // ====================================================================
 // 📁 UTILITY & FORMATTER
 // ====================================================================
+// Sinkronisasi Sempurna: Paksa nomor pengirim menjadi format Internasional (628...) 
+// Agar 100% cocok dengan Database GAS yang telah distandarisasi
+function formatWaNumber(jid) {
+    let p = String(jid).split('@')[0].replace(/[^0-9]/g, '');
+    if (p.startsWith('0')) p = '62' + p.slice(1);
+    else if (p.startsWith('8')) p = '62' + p;
+    return p;
+}
+
 function getRelativeTime(seconds) {
     const m = Math.floor(seconds / 60); const h = Math.floor(seconds / 3600); const d = Math.floor(seconds / 86400);
     if (d > 0) return `${d} hari yang lalu`; if (h > 0) return `${h} jam yang lalu`; if (m > 0) return `${m} menit yang lalu`;
     return `${Math.floor(seconds)} detik yang lalu`;
 }
 
-// Convert JID (628...) ke format Lokal (08...) untuk pencocokan API GAS
-function formatJidToLocal(jid) {
-    let p = String(jid).split('@')[0].replace(/[^0-9]/g, '');
-    if (p.startsWith('62')) p = '0' + p.slice(2);
-    return p;
-}
-
 // ====================================================================
-// 🚀 MAIN HANDLER BOT E-VOTING
+// 🚀 MAIN HANDLER BOT E-VOTING (100% PUBLIC SYSTEM)
 // ====================================================================
 export default async function setupMessageHandler(sock) {
     console.log("[System] BOT E-VOTING BEM FKG UMI Handler Aktif!");
+    console.log("[System] Mode: PUBLIK (Fitur Admin Dihapus Total)");
 
     // ====================================================================
-    // 🌐 WEBHOOK SERVER: MENERIMA TRIGGER OTOMATIS DARI GOOGLE APPS SCRIPT
+    // 🌐 WEBHOOK SERVER: MENERIMA TRIGGER PUSH DARI GOOGLE APPS SCRIPT
     // ====================================================================
     const app = express();
     app.use(express.json());
@@ -50,22 +51,19 @@ export default async function setupMessageHandler(sock) {
             const data = req.body;
             if (data && data.action === 'send_token') {
                 
-                // CORE FIX: Pastikan memformat nomor apapun (08..., 852...) menjadi standar WA Internasional
-                let targetWa = String(data.wa).replace(/[^0-9]/g, ''); // Buang spasi, strip dll
-                if (targetWa.startsWith('0')) {
-                    targetWa = '62' + targetWa.slice(1);
-                } else if (targetWa.startsWith('8')) { // PENYEBAB UTAMA MASALAH: Handle jika awalannya 8
-                    targetWa = '62' + targetWa;
-                }
+                // Standarisasi WA Target
+                let targetWa = String(data.wa).replace(/[^0-9]/g, ''); 
+                if (targetWa.startsWith('0')) targetWa = '62' + targetWa.slice(1);
+                else if (targetWa.startsWith('8')) targetWa = '62' + targetWa;
                 
                 if (!targetWa.includes('@')) targetWa = targetWa + '@s.whatsapp.net';
 
-                // Template Pesan WA Berdasarkan Context (Aktivasi vs Lupa Token)
+                // Template Pesan Dinamis (Aktivasi vs Lupa Token)
                 let txt = '';
                 if (data.context === 'lupa_token') {
                     txt = `🔄 *PERMINTAAN RESET TOKEN KPU* 🔄\n\n`;
                     txt += `Halo *${data.nama.toUpperCase()}*,\n`;
-                    txt += `Sistem menerima permintaan "Lupa Token" dari Website E-Voting untuk identitas Anda.\n\n`;
+                    txt += `Sistem telah mereset dan menerbitkan ulang Token Anda sesuai permintaan dari Website.\n\n`;
                 } else {
                     txt = `🎓 *SELAMAT, AKTIVASI BERHASIL!* 🎓\n\n`;
                     txt += `Halo *${data.nama.toUpperCase()}*,\n`;
@@ -79,7 +77,7 @@ export default async function setupMessageHandler(sock) {
 
                 // Eksekusi pengiriman pesan otomatis
                 await sock.sendMessage(targetWa, { text: txt });
-                console.log(`[Webhook 🚀] Token (${data.context}) terkirim ke: ${data.nama} (JID: ${targetWa})`);
+                console.log(`[Webhook 🚀] Token (${data.context}) terkirim sukses ke: ${data.nama} (JID: ${targetWa})`);
                 
                 return res.status(200).json({ status: 'success', message: 'Pesan otomatis berhasil dikirim' });
             }
@@ -91,8 +89,7 @@ export default async function setupMessageHandler(sock) {
     });
 
     app.listen(WEBHOOK_PORT, () => {
-        console.log(`[System 🌐] Webhook Listener KPU Aktif!`);
-        console.log(`[System 🌐] Menunggu trigger dari GAS di port ${WEBHOOK_PORT} (http://localhost:${WEBHOOK_PORT}/webhook/evot)`);
+        console.log(`[System 🌐] Webhook Listener KPU Aktif! (Port: ${WEBHOOK_PORT})`);
     });
 
     // ====================================================================
@@ -126,18 +123,11 @@ export default async function setupMessageHandler(sock) {
             const replyJid = msg.key.remoteJid; 
             let senderJid = msg.key.remoteJid; 
             if (senderJid.endsWith('@g.us')) senderJid = msg.key.participant || senderJid;
-            if (senderJid.includes(':')) senderJid = senderJid.substring(0, senderJid.indexOf(':')) + '@s.whatsapp.net';
 
-            const userWaLocal = formatJidToLocal(senderJid); // Hasil: 081234567890
-            const isAdmin = (senderJid === ownerNumber); // Simple Ownership Check
-            
-            // 🚀 PROTEKSI COMMAND ADMIN 
-            const adminCommands = ['restart'];
-            if (adminCommands.includes(command) && !isAdmin) {
-                return await sock.sendMessage(replyJid, { text: "⚠️ *Akses Ditolak*\nMaaf, perintah tersebut khusus untuk Developer Bot." }, { quoted: msg });
-            }
+            // Format nomor pengirim (Membuang @lid atau s.whatsapp.net dan memastikan berformat 628...)
+            const userWaFormat = formatWaNumber(senderJid); 
 
-            console.log(`[COMMAND] ${command} dieksekusi oleh: ${senderJid} (Lokal: ${userWaLocal})`);
+            console.log(`[COMMAND] ${command} dieksekusi oleh ID: ${senderJid} (Parsed Format: ${userWaFormat})`);
 
             switch (command) {
                 // ==========================================
@@ -147,13 +137,14 @@ export default async function setupMessageHandler(sock) {
                 case 'minta-token':
                     await sock.sendMessage(replyJid, { text: "⏳ _Mencari data aktivasi Anda di sistem KPU..._" }, { quoted: msg });
                     try {
-                        const res = await fetch(`${EVOT_API_URL}?action=botApi&command=GET_TOKEN&wa=${userWaLocal}`);
+                        // Mencocokkan dengan parameter WA yang 100% berformat 628...
+                        const res = await fetch(`${EVOT_API_URL}?action=botApi&command=GET_TOKEN&wa=${userWaFormat}`);
                         const data = await res.json();
                         
                         if(data.status === 'success') {
                             let statusText = data.data.status_vote === "Sudah" ? "✅ SUDAH MEMILIH" : "⚠️ BELUM MEMILIH";
                             let txt = `🎓 *HALO, ${data.data.nama.toUpperCase()}*\n\n`;
-                            txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah berhasil dikonfirmasi.\n\n`;
+                            txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah terkonfirmasi.\n\n`;
                             txt += `🆔 *NIM:* ${data.data.nim}\n`;
                             txt += `🔑 *TOKEN RAHASIA:* \n*${data.data.token}*\n\n`;
                             txt += `📊 *Status Pemilihan:* ${statusText}\n\n`;
@@ -161,10 +152,11 @@ export default async function setupMessageHandler(sock) {
                             
                             await sock.sendMessage(replyJid, { text: txt }, { quoted: msg });
                         } else {
-                            await sock.sendMessage(replyJid, { text: `❌ *Data Tidak Ditemukan*\nNomor WhatsApp Anda (*${userWaLocal}*) belum diaktivasi di website. Silakan aktivasi akun terlebih dahulu di web E-Voting.` }, { quoted: msg });
+                            // Pesan error kini menampilkan Format Standar WA
+                            await sock.sendMessage(replyJid, { text: `❌ *Data Tidak Ditemukan*\nNomor WhatsApp Anda (${userWaFormat}) belum diaktivasi di website. Silakan aktivasi akun terlebih dahulu di web E-Voting.` }, { quoted: msg });
                         }
                     } catch(err) {
-                        await sock.sendMessage(replyJid, { text: "❌ Sistem sedang sibuk. Coba beberapa saat lagi." }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: "❌ Sistem GAS sedang sibuk. Coba beberapa saat lagi." }, { quoted: msg });
                     }
                     break;
 
@@ -172,7 +164,7 @@ export default async function setupMessageHandler(sock) {
                 case 'lupatoken':
                     await sock.sendMessage(replyJid, { text: "⏳ _Memproses reset token keamanan Anda..._" }, { quoted: msg });
                     try {
-                        const checkReq = await fetch(`${EVOT_API_URL}?action=botApi&command=CHECK_STATUS&wa=${userWaLocal}`);
+                        const checkReq = await fetch(`${EVOT_API_URL}?action=botApi&command=CHECK_STATUS&wa=${userWaFormat}`);
                         const checkData = await checkReq.json();
 
                         if (checkData.status === 'success') {
@@ -180,7 +172,7 @@ export default async function setupMessageHandler(sock) {
                                 return await sock.sendMessage(replyJid, { text: `⚠️ *Akses Ditolak*\nAnda sudah memberikan suara! Token tidak dapat di-reset kembali.` }, { quoted: msg });
                             }
 
-                            const res = await fetch(`${EVOT_API_URL}?action=botApi&command=RESET_TOKEN&wa=${userWaLocal}`);
+                            const res = await fetch(`${EVOT_API_URL}?action=botApi&command=RESET_TOKEN&wa=${userWaFormat}`);
                             const data = await res.json();
                             
                             if(data.status === 'success') {
@@ -191,7 +183,7 @@ export default async function setupMessageHandler(sock) {
                                 await sock.sendMessage(replyJid, { text: txt }, { quoted: msg });
                             }
                         } else {
-                            await sock.sendMessage(replyJid, { text: `❌ Nomor WhatsApp Anda belum terdaftar di sistem. Silakan aktivasi dulu di web.` }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: `❌ Nomor WhatsApp (${userWaFormat}) belum terdaftar di sistem. Silakan aktivasi dulu di web.` }, { quoted: msg });
                         }
                     } catch(err) {
                         await sock.sendMessage(replyJid, { text: "❌ Gagal mereset token, server sedang sibuk." }, { quoted: msg });
@@ -201,7 +193,7 @@ export default async function setupMessageHandler(sock) {
                 case 'status':
                 case 'ceksuara':
                     try {
-                        const res = await fetch(`${EVOT_API_URL}?action=botApi&command=CHECK_STATUS&wa=${userWaLocal}`);
+                        const res = await fetch(`${EVOT_API_URL}?action=botApi&command=CHECK_STATUS&wa=${userWaFormat}`);
                         const data = await res.json();
                         
                         if(data.status === 'success') {
@@ -218,7 +210,7 @@ export default async function setupMessageHandler(sock) {
                             }
                             await sock.sendMessage(replyJid, { text: txt }, { quoted: msg });
                         } else {
-                            await sock.sendMessage(replyJid, { text: `❌ Nomor Anda belum diaktivasi.` }, { quoted: msg });
+                            await sock.sendMessage(replyJid, { text: `❌ Nomor Anda (${userWaFormat}) belum diaktivasi.` }, { quoted: msg });
                         }
                     } catch(err) {
                         await sock.sendMessage(replyJid, { text: "❌ Server timeout." }, { quoted: msg });
@@ -226,29 +218,23 @@ export default async function setupMessageHandler(sock) {
                     break;
 
                 // ==========================================
-                // ⚙️ MENU UTAMA & SISTEM 
+                // ⚙️ MENU & TOOLS UTAMA
                 // ==========================================
                 case 'menu':
                 case 'help':
                     let manualMenuText = `🎓 *LAYANAN BOT KPU BEM FKG UMI* 🎓\n\n`;
-                    manualMenuText += `Halo! Saya adalah Asisten Virtual E-Voting BEM FKG UMI. Silakan gunakan perintah berikut:\n\n`;
+                    manualMenuText += `Halo! Saya adalah Asisten Virtual E-Voting. Silakan gunakan perintah berikut:\n\n`;
                     manualMenuText += `*👤 PESERTA / DPT:*\n`;
                     manualMenuText += `> *!token* (Cek NIM & Token Anda)\n`;
                     manualMenuText += `> *!reset* (Acak ulang token keamanan)\n`;
                     manualMenuText += `> *!status* (Cek status pemilihan)\n\n`;
-                    
-                    if (isAdmin) {
-                        manualMenuText += `*⚙️ PENGATURAN DEV:*\n`;
-                        manualMenuText += `> *!restart*\n\n`;
-                    }
-                    
-                    manualMenuText += `*✨ LAINNYA:*\n> !ai <pertanyaan> (Tanya AI)\n> !s (Buat Stiker)\n> !runtime (Status Server)`;
+                    manualMenuText += `*✨ LAINNYA:*\n> !ai <pertanyaan> (Tanya AI)\n> !s (Buat Stiker)\n> !runtime (Status Server)\n> !myid (Cek ID Anda)`;
 
                     await sock.sendMessage(replyJid, { text: manualMenuText }, { quoted: msg });
                     break;
 
                 case 'myid': case 'cekid':
-                    await sock.sendMessage(replyJid, { text: `*ℹ️ INFORMASI ID ANDA*\n\n*ID Pengirim:* \n${senderJid}\n*Nomor Lokal:* ${userWaLocal}` }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: `*ℹ️ INFORMASI ID ANDA*\n\n*ID Mentah:* \n${senderJid}\n*Parsed Format (Yang Dikenali Database):*\n${userWaFormat}` }, { quoted: msg });
                     break;
 
                 case 'ping':
@@ -263,16 +249,11 @@ export default async function setupMessageHandler(sock) {
                 
                 case 'ai': if(typeof handleAiCommand === 'function') await handleAiCommand(sock, msg, args); break;
                 case 'sticker': case 's': if(typeof handleStickerCommand === 'function') await handleStickerCommand(sock, msg); break;
-                    
-                case 'restart':
-                    await sock.sendMessage(replyJid, { text: "🔄 *Restarting Bot...*\nSistem sedang dimuat ulang." }, { quoted: msg });
-                    setTimeout(() => { process.exit(1); }, 2000);
-                    break;
 
                 default:
-                    // Fallback jika tidak ada perintah yang cocok
+                    // Mengabaikan pesan yang bukan command terdaftar tanpa spam
                     break;
             }
-        } catch (error) { console.error('Error proses pesan:', error); }
+        } catch (error) { console.error('[Handler Error]', error); }
     });
 }
