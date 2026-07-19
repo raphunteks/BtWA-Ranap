@@ -1,22 +1,21 @@
 import process from 'process';
 import os from 'os';
 import { generateWAMessageFromContent } from '@whiskeysockets/baileys'; 
-import express from 'express'; 
 
 // Handler perintah eksternal (Pastikan file ini ada di folder /commands Anda)
+// Jika tidak ada, bisa di-comment saja agar tidak error
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
 // ====================================================================
 // 🚀 KONFIGURASI API E-VOTING BEM FKG UMI
 // ====================================================================
-// PASTE URL ENDPOINT GAS ANDA DI SINI (Yang berakhir dengan /exec)
+// PASTE URL ENDPOINT GAS ANDA DI SINI
 const EVOT_API_URL = process.env.EVOT_API_URL || "https://script.google.com/macros/s/AKfycbxw3v9--RsgQoXMRpwTvApotQZ-UmlTuH_mHpRGZIiMryxirWPSJjPcSwdtMUngcBEn/exec";
 
 // ====================================================================
-// 📁 UTILITY & FORMATTER (ANTI-CRASH)
+// 📁 UTILITY & FORMATTER
 // ====================================================================
-// Standarisasi Sempurna: Paksa nomor WA menjadi format Internasional (628...) 
 function formatWaNumber(jid) {
     if (!jid) return "";
     let p = String(jid).split('@')[0].replace(/[^0-9]/g, '');
@@ -32,97 +31,71 @@ function getRelativeTime(seconds) {
 }
 
 // ====================================================================
-// 🚀 MAIN HANDLER BOT E-VOTING (100% PUBLIC SYSTEM + RAILWAY READY)
+// 🚀 MAIN HANDLER BOT E-VOTING (PURE POLLING/PULL ARCHITECTURE)
 // ====================================================================
 export default async function setupMessageHandler(sock) {
-    console.log("[System] BOT E-VOTING BEM FKG UMI Handler Aktif!");
-    console.log("[System] Mode: PUBLIK MURNI (Standarisasi 628... & Railway Webhook Ready)");
+    console.log("[System] BOT E-VOTING BEM FKG UMI Aktif!");
+    console.log("[System] Mode: PULL API - Bot akan memeriksa antrean token baru secara otomatis setiap 5 detik.");
 
     // ====================================================================
-    // 🌐 WEBHOOK SERVER: MENERIMA TRIGGER PUSH DARI GOOGLE APPS SCRIPT
+    // 🔄 AUTO-POLLING API (PULL METHOD) - PENGGANTI WEBHOOK!
+    // MENGAMBIL ANTREAN PESAN DARI GOOGLE SCRIPT SETIAP 5 DETIK
     // ====================================================================
-    const app = express();
-    app.use(express.json()); // Wajib agar bisa baca payload JSON dari GAS
-    
-    // UPGRADE RAILWAY: Deteksi Port Dinamis 
-    const WEBHOOK_PORT = process.env.PORT || process.env.WEBHOOK_PORT || 3000;
-
-    // 🚀 RAILWAY HEALTH CHECK (SANGAT WAJIB!)
-    // Mencegah Railway mematikan server bot Anda karena dianggap "Unhealthy"
-    app.get('/', (req, res) => {
-        res.status(200).send("Bot WA KPU UMI is Running and Healthy!");
-    });
-
-    // 🚀 ENDPOINT UTAMA UNTUK MENERIMA TEMBAKAN DARI GAS
-    app.post('/webhook/evot', async (req, res) => {
+    setInterval(async () => {
         try {
-            const data = req.body;
-            console.log(`[Webhook Masuk 📥] Action: ${data.action} | Context: ${data.context} | Target: ${data.wa}`);
-
-            // Validasi keamanan: Pastikan payload dari code.gs memiliki action 'send_token'
-            if (data && data.action === 'send_token') {
+            // Tembak API GAS untuk meminta list "Siapa saja yang baru aktivasi/reset?"
+            const res = await fetch(`${EVOT_API_URL}?action=botApi&command=GET_PENDING_MESSAGES`);
+            const json = await res.json();
+            
+            // Jika ada antrean masuk...
+            if (json.status === 'success' && json.data && json.data.length > 0) {
+                console.log(`[Auto-Pull 📥] Ditemukan ${json.data.length} antrian pesan WA! Memproses pengiriman...`);
                 
-                // Pastikan format tujuan adalah JID WhatsApp yang sah (628...@s.whatsapp.net)
-                let targetWaBase = formatWaNumber(data.wa); 
-                let targetWaJid = targetWaBase + '@s.whatsapp.net';
+                for (const msgData of json.data) {
+                    let targetWaJid = msgData.wa + '@s.whatsapp.net';
+                    
+                    // Susun Template Pesan
+                    let txt = '';
+                    if (msgData.context === 'lupa_token') {
+                        txt = `🔄 *PERMINTAAN RESET TOKEN KPU* 🔄\n\n`;
+                        txt += `Halo *${msgData.nama.toUpperCase()}*,\n`;
+                        txt += `Sistem telah mereset dan menerbitkan ulang Token Anda sesuai permintaan dari Website Pemilihan.\n\n`;
+                    } else {
+                        txt = `🎓 *SELAMAT, AKTIVASI BERHASIL!* 🎓\n\n`;
+                        txt += `Halo *${msgData.nama.toUpperCase()}*,\n`;
+                        txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah berhasil dikonfirmasi oleh sistem.\n\n`;
+                    }
+                    
+                    txt += `🆔 *NIM:* ${msgData.nim}\n`;
+                    txt += `🔑 *TOKEN RAHASIA:* \n*${msgData.token}*\n\n`;
+                    txt += `_Gunakan NIM dan Token di atas untuk login ke website pemilihan. Jangan bagikan token ini kepada siapapun demi kerahasiaan suara Anda!_\n\n`;
+                    txt += `Ketik *!menu* untuk melihat layanan bantuan.`;
 
-                // Susun Template Pesan
-                let txt = '';
-                if (data.context === 'lupa_token') {
-                    txt = `🔄 *PERMINTAAN RESET TOKEN KPU* 🔄\n\n`;
-                    txt += `Halo *${data.nama.toUpperCase()}*,\n`;
-                    txt += `Sistem telah mereset dan menerbitkan ulang Token Anda sesuai permintaan dari Website Pemilihan.\n\n`;
-                } else {
-                    txt = `🎓 *SELAMAT, AKTIVASI BERHASIL!* 🎓\n\n`;
-                    txt += `Halo *${data.nama.toUpperCase()}*,\n`;
-                    txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah berhasil dikonfirmasi oleh sistem.\n\n`;
+                    // Kirim Pesan ke Mahasiswa
+                    await sock.sendMessage(targetWaJid, { text: txt });
+                    console.log(`[Auto-Send 🚀] Pesan (${msgData.context}) terkirim ke: ${msgData.nama} (${targetWaJid})`);
+                    
+                    // Jeda 2 detik per pesan untuk menghindari banned dari WhatsApp (Anti-Spam Filter)
+                    await new Promise(resolve => setTimeout(resolve, 2000));
                 }
-                
-                txt += `🆔 *NIM:* ${data.nim}\n`;
-                txt += `🔑 *TOKEN RAHASIA:* \n*${data.token}*\n\n`;
-                txt += `_Gunakan NIM dan Token di atas untuk login ke website pemilihan. Jangan bagikan token ini kepada siapapun demi kerahasiaan suara Anda!_\n\n`;
-                txt += `Ketik *!menu* untuk melihat layanan bantuan.`;
-
-                // Eksekusi pengiriman pesan langsung ke Mahasiswa (Tanpa perlu Mahasiswa chat duluan)
-                await sock.sendMessage(targetWaJid, { text: txt });
-                console.log(`[Webhook 🚀] Token BERHASIL TERKIRIM ke: ${data.nama} (${targetWaJid})`);
-                
-                // Beri respon ke GAS agar script GAS selesai dengan status OK
-                return res.status(200).json({ status: 'success', message: 'Pesan otomatis berhasil dikirim' });
             }
-            res.status(400).json({ status: 'error', message: 'Action webhook tidak valid' });
-        } catch (error) {
-            console.error('[Webhook Error ❌]', error);
-            res.status(500).json({ status: 'error', message: error.message });
+        } catch (err) {
+            // Silent error: Jika koneksi Railway putus sesaat, biarkan interval jalan terus tanpa merusak bot
         }
-    });
-
-    // Binding ke 0.0.0.0 agar port terbuka ke jaringan publik Railway
-    app.listen(WEBHOOK_PORT, '0.0.0.0', () => {
-        console.log(`[System 🌐] Webhook Listener KPU Aktif Terbuka di Port: ${WEBHOOK_PORT}`);
-    });
+    }, 5000); // <-- Polling / Penarikan setiap 5 detik
 
     // ====================================================================
-    // INCOMING CHAT HANDLER (BOT COMMANDS) - PUBLIK MURNI
+    // INCOMING CHAT HANDLER (JIKA MAHASISWA NGE-CHAT BOT DULUAN)
     // ====================================================================
     sock.ev.on('messages.upsert', async (m) => {
         try {
             const msg = m.messages[0];
             if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
-            // Tangkap Input Teks atau Interaktif (Buttons/List)
+            // Tangkap Input Teks
             let text = '';
             if (msg.message.conversation) text = msg.message.conversation;
             else if (msg.message.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
-            else if (msg.message.listResponseMessage?.singleSelectReply?.selectedRowId) text = msg.message.listResponseMessage.singleSelectReply.selectedRowId;
-            else if (msg.message.buttonsResponseMessage?.selectedButtonId) text = msg.message.buttonsResponseMessage.selectedButtonId;
-            else if (msg.message.templateButtonReplyMessage?.selectedId) text = msg.message.templateButtonReplyMessage.selectedId;
-            else if (msg.message.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson) {
-                try { 
-                    let params = JSON.parse(msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson); 
-                    text = params.id || ''; 
-                } catch(e) {}
-            }
                          
             const prefix = '!'; 
             if (!text || !text.startsWith(prefix)) return;
@@ -134,20 +107,16 @@ export default async function setupMessageHandler(sock) {
             let senderJid = msg.key.remoteJid; 
             if (senderJid.endsWith('@g.us')) senderJid = msg.key.participant || senderJid;
 
-            // Standarisasi nomor user yang nge-chat bot, pasti jadi format 628...
+            // Memaksa nomor user menjadi 628... agar cocok 100% dengan Sheet
             const userWaFormat = formatWaNumber(senderJid); 
 
-            console.log(`[COMMAND] ${command} dieksekusi oleh ID: ${senderJid} (Parsed Standar: ${userWaFormat})`);
+            console.log(`[COMMAND] ${command} dieksekusi oleh ID: ${senderJid} (Parsed: ${userWaFormat})`);
 
             switch (command) {
-                // ==========================================
-                // 🎓 FITUR MAHASISWA / PEMILIH
-                // ==========================================
                 case 'token':
                 case 'minta-token':
                     await sock.sendMessage(replyJid, { text: "⏳ _Mencari data aktivasi Anda di sistem KPU..._" }, { quoted: msg });
                     try {
-                        // Mencocokkan dengan parameter WA yang 100% berformat 628...
                         const res = await fetch(`${EVOT_API_URL}?action=botApi&command=GET_TOKEN&wa=${userWaFormat}`);
                         const data = await res.json();
                         
@@ -213,7 +182,7 @@ export default async function setupMessageHandler(sock) {
                             txt += `Status Vote: ${icon} *${data.data.status_vote.toUpperCase()}*\n\n`;
                             
                             if(data.data.status_vote === "Sudah") {
-                                txt += `_Terima kasih telah berpartisipasi dalam pemilihan BEM FKG UMI. Suara Anda menentukan masa depan fakultas._`;
+                                txt += `_Terima kasih telah berpartisipasi dalam pemilihan BEM FKG UMI._`;
                             } else {
                                 txt += `_Ketik *!token* untuk melihat token Anda dan segera selesaikan pemilihan._`;
                             }
@@ -226,9 +195,6 @@ export default async function setupMessageHandler(sock) {
                     }
                     break;
 
-                // ==========================================
-                // ⚙️ MENU & TOOLS UTAMA
-                // ==========================================
                 case 'menu':
                 case 'help':
                     let manualMenuText = `🎓 *LAYANAN BOT KPU BEM FKG UMI* 🎓\n\n`;
@@ -237,32 +203,25 @@ export default async function setupMessageHandler(sock) {
                     manualMenuText += `> *!token* (Cek NIM & Token Anda)\n`;
                     manualMenuText += `> *!reset* (Acak ulang token keamanan)\n`;
                     manualMenuText += `> *!status* (Cek status pemilihan)\n\n`;
-                    manualMenuText += `*✨ LAINNYA:*\n> !ai <pertanyaan> (Tanya AI)\n> !s (Buat Stiker)\n> !runtime (Status Server)\n> !myid (Cek ID Anda)`;
+                    manualMenuText += `*✨ LAINNYA:*\n> !ai <pertanyaan> (Tanya AI)\n> !s (Buat Stiker)\n> !runtime (Status Server)`;
 
                     await sock.sendMessage(replyJid, { text: manualMenuText }, { quoted: msg });
                     break;
 
-                case 'myid': case 'cekid':
-                    await sock.sendMessage(replyJid, { text: `*ℹ️ INFORMASI ID ANDA*\n\n*ID Mentah:* \n${senderJid}\n*Parsed Format (Yang Dikenali Database):*\n${userWaFormat}` }, { quoted: msg });
-                    break;
-
                 case 'ping':
                     const pingProcess = Date.now() - (msg.messageTimestamp * 1000);
-                    await sock.sendMessage(replyJid, { text: `🏓 *Pong!*\n⚡ *Kecepatan Response:* ${pingProcess} ms` }, { quoted: msg }); 
+                    await sock.sendMessage(replyJid, { text: `🏓 *Pong!*\n⚡ *Response:* ${pingProcess} ms` }, { quoted: msg }); 
                     break;
                     
                 case 'runtime':
                     const uptime = process.uptime();
-                    await sock.sendMessage(replyJid, { text: `⏳ *Bot Uptime:* ${getRelativeTime(uptime)}\n🖥️ *OS Memory:* ${Math.round(os.freemem()/1024/1024)}MB / ${Math.round(os.totalmem()/1024/1024)}MB` }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: `⏳ *Uptime:* ${getRelativeTime(uptime)}\n🖥️ *Memory:* ${Math.round(os.freemem()/1024/1024)}MB / ${Math.round(os.totalmem()/1024/1024)}MB` }, { quoted: msg });
                     break;
                 
-                // Eksekusi Command Eksternal jika ada (Pastikan file ada di folder commands/)
                 case 'ai': if(typeof handleAiCommand === 'function') await handleAiCommand(sock, msg, args); break;
                 case 'sticker': case 's': if(typeof handleStickerCommand === 'function') await handleStickerCommand(sock, msg); break;
 
-                default:
-                    // Mengabaikan pesan yang bukan command terdaftar tanpa spam
-                    break;
+                default: break;
             }
         } catch (error) { console.error('[Handler Error]', error); }
     });
