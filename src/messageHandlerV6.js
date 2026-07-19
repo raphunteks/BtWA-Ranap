@@ -86,10 +86,18 @@ export default async function setupMessageHandler(sock) {
                 if (targetWa.startsWith('0')) targetWa = '62' + targetWa.slice(1);
                 if (!targetWa.includes('@')) targetWa = targetWa + '@s.whatsapp.net';
 
-                // 2. Template Pesan WA yang akan dikirim OTOMATIS
-                let txt = `🎓 *SELAMAT, AKTIVASI BERHASIL!* 🎓\n\n`;
-                txt += `Halo *${data.nama.toUpperCase()}*,\n`;
-                txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah berhasil dikonfirmasi oleh sistem.\n\n`;
+                // 2. Template Pesan WA Berdasarkan Context (Aktivasi vs Lupa Token)
+                let txt = '';
+                if (data.context === 'lupa_token') {
+                    txt = `🔄 *PERMINTAAN RESET TOKEN KPU* 🔄\n\n`;
+                    txt += `Halo *${data.nama.toUpperCase()}*,\n`;
+                    txt += `Sistem menerima permintaan "Lupa Token" dari Website E-Voting untuk identitas Anda.\n\n`;
+                } else {
+                    txt = `🎓 *SELAMAT, AKTIVASI BERHASIL!* 🎓\n\n`;
+                    txt += `Halo *${data.nama.toUpperCase()}*,\n`;
+                    txt += `Pendaftaran DPT E-Voting BEM FKG UMI Anda telah berhasil dikonfirmasi oleh sistem.\n\n`;
+                }
+                
                 txt += `🆔 *NIM:* ${data.nim}\n`;
                 txt += `🔑 *TOKEN RAHASIA:* \n*${data.token}*\n\n`;
                 txt += `_Gunakan NIM dan Token di atas untuk login ke website pemilihan. Jangan bagikan token ini kepada siapapun demi kerahasiaan suara Anda!_\n\n`;
@@ -97,7 +105,7 @@ export default async function setupMessageHandler(sock) {
 
                 // 3. Eksekusi pengiriman pesan tanpa delay
                 await sock.sendMessage(targetWa, { text: txt });
-                console.log(`[Webhook 🚀] Token otomatis terkirim ke: ${data.nama} (${data.wa})`);
+                console.log(`[Webhook 🚀] Token (${data.context}) terkirim ke: ${data.nama} (${data.wa})`);
                 
                 return res.status(200).json({ status: 'success', message: 'Pesan otomatis berhasil dikirim' });
             }
