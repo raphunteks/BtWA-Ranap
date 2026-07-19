@@ -8,7 +8,7 @@ import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
 // ====================================================================
-// 🚀 KONFIGURASI API E-VOTING BEM FKG UMI (VERCEL & GAS)
+// 🚀 KONFIGURASI API E-VOTING BEM FKG UMI
 // ====================================================================
 // PASTE URL ENDPOINT GAS ANDA DI SINI (Yang berakhir dengan /exec)
 const EVOT_API_URL = process.env.EVOT_API_URL || "https://script.google.com/macros/s/AKfycbxw3v9--RsgQoXMRpwTvApotQZ-UmlTuH_mHpRGZIiMryxirWPSJjPcSwdtMUngcBEn/exec";
@@ -17,7 +17,6 @@ const EVOT_API_URL = process.env.EVOT_API_URL || "https://script.google.com/macr
 // 📁 UTILITY & FORMATTER (ANTI-CRASH)
 // ====================================================================
 // Standarisasi Sempurna: Paksa nomor WA menjadi format Internasional (628...) 
-// Menghilangkan spasi, @lid, tanda strip, atau karakter aneh lainnya.
 function formatWaNumber(jid) {
     if (!jid) return "";
     let p = String(jid).split('@')[0].replace(/[^0-9]/g, '');
@@ -33,7 +32,7 @@ function getRelativeTime(seconds) {
 }
 
 // ====================================================================
-// 🚀 MAIN HANDLER BOT E-VOTING (100% PUBLIC SYSTEM)
+// 🚀 MAIN HANDLER BOT E-VOTING (100% PUBLIC SYSTEM + RAILWAY READY)
 // ====================================================================
 export default async function setupMessageHandler(sock) {
     console.log("[System] BOT E-VOTING BEM FKG UMI Handler Aktif!");
@@ -43,23 +42,31 @@ export default async function setupMessageHandler(sock) {
     // 🌐 WEBHOOK SERVER: MENERIMA TRIGGER PUSH DARI GOOGLE APPS SCRIPT
     // ====================================================================
     const app = express();
-    app.use(express.json());
+    app.use(express.json()); // Wajib agar bisa baca payload JSON dari GAS
     
-    // UPGRADE RAILWAY: Deteksi Port Dinamis (Wajib agar Webhook masuk dari luar)
+    // UPGRADE RAILWAY: Deteksi Port Dinamis 
     const WEBHOOK_PORT = process.env.PORT || process.env.WEBHOOK_PORT || 3000;
 
+    // 🚀 RAILWAY HEALTH CHECK (SANGAT WAJIB!)
+    // Mencegah Railway mematikan server bot Anda karena dianggap "Unhealthy"
+    app.get('/', (req, res) => {
+        res.status(200).send("Bot WA KPU UMI is Running and Healthy!");
+    });
+
+    // 🚀 ENDPOINT UTAMA UNTUK MENERIMA TEMBAKAN DARI GAS
     app.post('/webhook/evot', async (req, res) => {
         try {
             const data = req.body;
+            console.log(`[Webhook Masuk 📥] Action: ${data.action} | Context: ${data.context} | Target: ${data.wa}`);
+
             // Validasi keamanan: Pastikan payload dari code.gs memiliki action 'send_token'
             if (data && data.action === 'send_token') {
                 
-                // Standarisasi Target WA yang masuk dari GAS menggunakan fungsi anti-crash kita
+                // Pastikan format tujuan adalah JID WhatsApp yang sah (628...@s.whatsapp.net)
                 let targetWaBase = formatWaNumber(data.wa); 
                 let targetWaJid = targetWaBase + '@s.whatsapp.net';
 
-                // Template Pesan Dinamis (Aktivasi vs Lupa Token) 
-                // Tergantung dari 'context' yang dikirim oleh code.gs
+                // Susun Template Pesan
                 let txt = '';
                 if (data.context === 'lupa_token') {
                     txt = `🔄 *PERMINTAAN RESET TOKEN KPU* 🔄\n\n`;
@@ -76,11 +83,11 @@ export default async function setupMessageHandler(sock) {
                 txt += `_Gunakan NIM dan Token di atas untuk login ke website pemilihan. Jangan bagikan token ini kepada siapapun demi kerahasiaan suara Anda!_\n\n`;
                 txt += `Ketik *!menu* untuk melihat layanan bantuan.`;
 
-                // Eksekusi pengiriman pesan otomatis ke Mahasiswa
+                // Eksekusi pengiriman pesan langsung ke Mahasiswa (Tanpa perlu Mahasiswa chat duluan)
                 await sock.sendMessage(targetWaJid, { text: txt });
-                console.log(`[Webhook 🚀] Token (${data.context}) terkirim sukses ke: ${data.nama} (JID: ${targetWaJid})`);
+                console.log(`[Webhook 🚀] Token BERHASIL TERKIRIM ke: ${data.nama} (${targetWaJid})`);
                 
-                // Beri respon JSON ke GAS agar eksekusi HTTP POST di GAS selesai dengan rapi
+                // Beri respon ke GAS agar script GAS selesai dengan status OK
                 return res.status(200).json({ status: 'success', message: 'Pesan otomatis berhasil dikirim' });
             }
             res.status(400).json({ status: 'error', message: 'Action webhook tidak valid' });
@@ -90,13 +97,13 @@ export default async function setupMessageHandler(sock) {
         }
     });
 
-    // Wajib Binding ke 0.0.0.0 agar port terbuka ke jaringan publik (Internet)
+    // Binding ke 0.0.0.0 agar port terbuka ke jaringan publik Railway
     app.listen(WEBHOOK_PORT, '0.0.0.0', () => {
-        console.log(`[System 🌐] Webhook Listener KPU Aktif! (Railway Port: ${WEBHOOK_PORT})`);
+        console.log(`[System 🌐] Webhook Listener KPU Aktif Terbuka di Port: ${WEBHOOK_PORT}`);
     });
 
     // ====================================================================
-    // INCOMING CHAT HANDLER (BOT COMMANDS)
+    // INCOMING CHAT HANDLER (BOT COMMANDS) - PUBLIK MURNI
     // ====================================================================
     sock.ev.on('messages.upsert', async (m) => {
         try {
