@@ -16,9 +16,10 @@ const EVOT_API_URL = process.env.EVOT_API_URL || "https://script.google.com/macr
 // ====================================================================
 // 📁 UTILITY & FORMATTER
 // ====================================================================
+// BRUTAL FORMATTER: Memaksa ID apapun (LID, s.whatsapp.net) menjadi murni 628...
 function formatWaNumber(jid) {
     if (!jid) return "";
-    let p = String(jid).split('@')[0].replace(/[^0-9]/g, '');
+    let p = String(jid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
     if (p.startsWith('0')) p = '62' + p.slice(1);
     else if (p.startsWith('8')) p = '62' + p;
     return p;
@@ -52,6 +53,7 @@ export default async function setupMessageHandler(sock) {
                 console.log(`[Auto-Pull 📥] Ditemukan ${json.data.length} antrian pesan WA! Memproses pengiriman...`);
                 
                 for (const msgData of json.data) {
+                    // Wajib ditambah @s.whatsapp.net HANYA untuk mengirim pesan (aturan WhatsApp)
                     let targetWaJid = msgData.wa + '@s.whatsapp.net';
                     
                     // Susun Template Pesan
@@ -73,7 +75,7 @@ export default async function setupMessageHandler(sock) {
 
                     // Kirim Pesan ke Mahasiswa
                     await sock.sendMessage(targetWaJid, { text: txt });
-                    console.log(`[Auto-Send 🚀] Pesan (${msgData.context}) terkirim ke: ${msgData.nama} (${targetWaJid})`);
+                    console.log(`[Auto-Send 🚀] Pesan (${msgData.context}) terkirim ke: ${msgData.nama} (${msgData.wa})`);
                     
                     // Jeda 2 detik per pesan untuk menghindari banned dari WhatsApp (Anti-Spam Filter)
                     await new Promise(resolve => setTimeout(resolve, 2000));
@@ -107,10 +109,10 @@ export default async function setupMessageHandler(sock) {
             let senderJid = msg.key.remoteJid; 
             if (senderJid.endsWith('@g.us')) senderJid = msg.key.participant || senderJid;
 
-            // Memaksa nomor user menjadi 628... agar cocok 100% dengan Sheet
+            // Memaksa nomor user menjadi 628... agar cocok 100% dengan format Google Sheets
             const userWaFormat = formatWaNumber(senderJid); 
 
-            console.log(`[COMMAND] ${command} dieksekusi oleh ID: ${senderJid} (Parsed: ${userWaFormat})`);
+            console.log(`[COMMAND] ${command} dieksekusi oleh ID: ${senderJid} (Parsed untuk Database: ${userWaFormat})`);
 
             switch (command) {
                 case 'token':
