@@ -8,8 +8,8 @@ import handleStickerCommand from './commands/sticker.js';
 // ====================================================================
 // 🚀 KONFIGURASI REST API GATEWAY WEB DEPT. RKG
 // ====================================================================
-// Ganti dengan URL API Web Absensi Next.js Anda (Rute route.ts)
-const RKG_API_URL = process.env.RKG_API_URL || "https://absensi.maksaarsyad.xyz/api/wa/pull";
+// Base URL REST API Next.js Anda (Rute route.ts yang baru digabungkan)
+const RKG_API_BASE_URL = process.env.RKG_API_URL || "https://absensi.maksaarsyad.xyz/api/wa";
 
 // ====================================================================
 // 📁 FORMATTER UTILITIES
@@ -45,8 +45,8 @@ export default async function setupMessageHandler(sock) {
     // Bot WA secara aktif "menarik" (pulling) antrian pesan dari Redis web
     setInterval(async () => {
         try {
-            // Melakukan request GET ke endpoint queue Next.js kita
-            const res = await fetch(RKG_API_URL, { method: "GET" });
+            // Melakukan request GET ke endpoint queue Next.js kita (?action=pull)
+            const res = await fetch(`${RKG_API_BASE_URL}?action=pull`, { method: "GET" });
             const json = await res.json();
             
             if (json.success && json.queue && json.queue.length > 0) {
@@ -73,13 +73,13 @@ export default async function setupMessageHandler(sock) {
                             console.log(`[Resolver] Gagal resolve untuk ${rawWa}, mencoba format standar.`);
                         }
 
-                        // 2. Eksekusi Pengiriman Pesan (Teks sudah dirakit oleh API Next.js)
+                        // 2. Eksekusi Pengiriman Pesan (Teks sudah dirakit otomatis oleh API Next.js)
                         await sock.sendMessage(finalLid, { text: msgData.formatted_message });
                         console.log(`[Auto-Send 🚀] Pesan terkirim sukses ke ${rawWa}.`);
 
                         // 3. HAPUS ANTRIAN DARI REDIS JIKA BERHASIL (Hit endpoint DELETE)
                         try {
-                            await fetch(RKG_API_URL, {
+                            await fetch(RKG_API_BASE_URL, {
                                 method: "DELETE",
                                 headers: { "Content-Type": "application/json" },
                                 body: JSON.stringify({ message_id: msgData.id })
@@ -92,12 +92,12 @@ export default async function setupMessageHandler(sock) {
                         console.log(`[Auto-Send ❌ GAGAL] Tidak dapat mengirim pesan ke WA: ${msgData.target_number}. Alasan: ${fatalErr.message}`);
                     }
                     
-                    // Jeda 2 detik antar pesan agar tidak terkena ban spam WhatsApp
+                    // Jeda 2 detik antar pesan agar aman dari deteksi SPAM WhatsApp Meta
                     await new Promise(resolve => setTimeout(resolve, 2000));
                 }
             }
         } catch (err) {
-            // Error request fetch API di-silence agar bot tetap berjalan mulus walau jaringan fluktuatif
+            // Error request fetch API di-silence agar bot tetap berjalan mulus walau jaringan web fluktuatif
         }
     }, 5000); 
 
