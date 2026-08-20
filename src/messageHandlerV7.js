@@ -8,7 +8,7 @@ import handleStickerCommand from './commands/sticker.js';
 // ====================================================================
 // 🚀 KONFIGURASI REST API GATEWAY & DATABASE CLOUD DEPT. RKG
 // ====================================================================
-// Base URL REST API Next.js Anda (Rute route.ts yang baru digabungkan)
+// Base URL REST API Next.js Anda (Rute route.ts)
 const RKG_API_BASE_URL = process.env.RKG_API_URL || "https://absensi.maksaarsyad.xyz/api/wa";
 
 // ====================================================================
@@ -78,7 +78,7 @@ function getRelativeTime(seconds) {
     return `${Math.floor(seconds)} detik yang lalu`;
 }
 
-// 🛡️ SUPER FIX TIMEZONE: Memastikan jam berjalan 100% pada Waktu Makassar, mengabaikan Zona Waktu Server/VPS!
+// 🛡️ SUPER FIX TIMEZONE: Memastikan jam berjalan 100% pada Waktu Makassar (WITA)
 function getWitaTime() {
     const witaString = new Date().toLocaleString("en-US", { timeZone: "Asia/Makassar" });
     return new Date(witaString);
@@ -103,7 +103,7 @@ const safeParse = (data) => {
     return Array.isArray(parsed) ? parsed : [];
 };
 
-// Fungsi helper penembak REST API dari dalam Cron Job
+// Fungsi helper penembak REST API (Push Notification ke API Next.js)
 const triggerWA_API = async (noHp, scenarioId, payloadData) => {
     if (!noHp) return;
     try {
@@ -114,7 +114,7 @@ const triggerWA_API = async (noHp, scenarioId, payloadData) => {
         });
         const result = await res.json();
         if(result.success) {
-            console.log(`[Cron Trigger ✅] Skenario ${scenarioId} terpicu ke WA: ${noHp}`);
+            console.log(`[Cron Trigger ✅] Antrian untuk Skenario ${scenarioId} berhasil dipush ke WA: ${noHp}`);
         } else {
             console.error(`[Cron Trigger API Failed] Skenario ${scenarioId} ke ${noHp}:`, result.error);
         }
@@ -124,20 +124,21 @@ const triggerWA_API = async (noHp, scenarioId, payloadData) => {
 };
 
 // ====================================================================
-// ⚙️ MESIN CRON JOB (JADWAL ABSENSI OTOMATIS 24/7)
+// ⚙️ MESIN CRON JOB (JADWAL ABSENSI OTOMATIS 24/7 NODE.JS)
 // ====================================================================
 function startCronJob(sock) {
-    console.log("[Cron Job] Mesin waktu otomatis berhasil dihidupkan, berjalan 24/7 (Zona Waktu: Asia/Makassar)!");
+    console.log("[Cron Job] Mesin waktu otomatis Server Node.js berjalan 24/7 (Zona Waktu: Asia/Makassar)!");
     
-    // Interval dipercepat menjadi 20 detik untuk menghindari "Miss-Minute" akibat event loop blocking
+    // Interval 20 detik agar lebih responsif menangkap pergantian menit
     setInterval(async () => {
-        if (!sock || !sock.user) return; // Safety Gate: Jangan eksekusi cron jika bot belum terhubung
+        if (!sock || !sock.user) return; // Safety Gate
 
         try {
             const redis = Redis.fromEnv();
             const now = getWitaTime();
             const dayOfWeek = now.getDay(); 
             const todayStr = getLocalYYYYMMDD(now);
+            const currentMins = now.getHours() * 60 + now.getMinutes();
 
             let holidays = safeParse(await redis.get('axaxyz_holidays'));
             
@@ -146,28 +147,57 @@ function startCronJob(sock) {
             const isCustomHoliday = holidays.some(h => h.date === todayStr);
 
             if (isWeekend || isCustomHoliday) {
-                return; // Berhenti eksekusi jika hari ini libur
+                return; // Berhenti eksekusi fitur harian jika hari ini libur
             }
-
-            // 🛡️ SUPER FIX FORMAT: Secara paksa format menjadi HH:mm untuk dicocokkan dengan Database "startTime" & "endTime"
-            const currentH = String(now.getHours()).padStart(2, '0');
-            const currentM = String(now.getMinutes()).padStart(2, '0');
-            const currentHHMM = `${currentH}:${currentM}`;
             
-            // Ambil semua data Master dari Redis dan jamin semuanya berbentuk Array (safeParse)
+            // Ambil semua data Master dari Redis 
             let sessions = safeParse(await redis.get('axaxyz_sessions'));
             let students = safeParse(await redis.get('axaxyz_students'));
             let logs = safeParse(await redis.get('axaxyz_logs'));
             let clusters = safeParse(await redis.get('axaxyz_clusters'));
             let admins = safeParse(await redis.get('axaxyz_admins'));
 
+            // [SKENARIO 6] WELCOME STASE H-1 (Dieksekusi Jam 15:00 WITA)
+            if (currentMins >= 15 * 60) {
+                const tomorrow = new Date(now);
+                tomorrow.setDate(tomorrow.getDate() + 1);
+                const tomorrowStr = getLocalYYYYMMDD(tomorrow);
+
+                for (const c of clusters) {
+                    if (c.startDate === tomorrowStr) {
+                        const flagKey = `wa_scen6_${todayStr}_${c.id}`;
+                        const isSent = await redis.get(flagKey);
+                        if (!isSent) {
+                            await redis.set(flagKey, true);
+                            const clusterStudents = students.filter(s => s.clusterId === c.id);
+                            for (const st of clusterStudents) {
+                                if (st.noHp) {
+                                    await triggerWA_API(st.noHp, 6, {
+                                        namaLengkap: st.name,
+                                        kelompok: c.name,
+                                        tanggalMulai: c.startDate,
+                                        tanggalAkhir: c.endDate || 'Belum Diatur'
+                                    });
+                                    await new Promise(resolve => setTimeout(resolve, 500)); // Anti-Spam API Delay
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             for (const sess of sessions) {
                 if (!sess.isActive) continue;
 
+                const [startH, startM] = sess.startTime.split(':').map(Number);
+                const [endH, endM] = sess.endTime.split(':').map(Number);
+                const startTotal = startH * 60 + startM;
+                const endTotal = endH * 60 + endM;
+                const closeTotal = endTotal + (sess.toleranceMinutes || 15);
+
                 // [SKENARIO 1] PEMBUKAAN SESI ABSENSI
-                // 💡 FIX: Menggunakan for...of dan setTimeout untuk menghindari Rate Limit/Spam Block
-                if (sess.startTime === currentHHMM) {
-                    const flagKey = `wa_scen1_${todayStr}_${sess.id}_${sess.startTime}`;
+                if (currentMins >= startTotal) {
+                    const flagKey = `wa_scen1_${todayStr}_${sess.id}`;
                     const isSent = await redis.get(flagKey);
                     if (!isSent) {
                         await redis.set(flagKey, true);
@@ -181,15 +211,14 @@ function startCronJob(sock) {
                                 jamSesi: sess.startTime, 
                                 jamTutup: sess.endTime 
                             });
-                            // Jeda 300ms agar Vercel/Redis tidak menolak lonjakan request
-                            await new Promise(resolve => setTimeout(resolve, 300));
+                            await new Promise(resolve => setTimeout(resolve, 500)); // Jeda 0.5 detik (Anti Spam)
                         }
                     }
                 }
 
                 // [SKENARIO 2] PENGINGAT SISA WAKTU (Bagi yang belum absen)
-                if (sess.endTime === currentHHMM) {
-                    const flagKey = `wa_scen2_${todayStr}_${sess.id}_${sess.endTime}`;
+                if (currentMins >= endTotal) {
+                    const flagKey = `wa_scen2_${todayStr}_${sess.id}`;
                     const isSent = await redis.get(flagKey);
                     if (!isSent) {
                         await redis.set(flagKey, true);
@@ -202,19 +231,15 @@ function startCronJob(sock) {
                                     shift: sess.name, 
                                     jamTutup: sess.endTime 
                                 });
-                                await new Promise(resolve => setTimeout(resolve, 300));
+                                await new Promise(resolve => setTimeout(resolve, 500));
                             }
                         }
                     }
                 }
 
-                // [SKENARIO 4 & 9] REKAP AKHIR SESI & SP OTOMATIS (Eksekusi 1 Menit setelah Toleransi Berakhir)
-                const [endH, endM] = sess.endTime.split(':').map(Number);
-                const endTotal = endH * 60 + endM + (sess.toleranceMinutes || 15);
-                const currentTotal = now.getHours() * 60 + now.getMinutes();
-
-                if (currentTotal === endTotal + 1) { 
-                    const flagKey = `wa_scen4_${todayStr}_${sess.id}_${sess.endTime}`;
+                // [SKENARIO 4 & 9] REKAP AKHIR SESI & SP OTOMATIS (Setelah batas toleransi)
+                if (currentMins >= closeTotal + 1) { 
+                    const flagKey = `wa_scen4_${todayStr}_${sess.id}`;
                     const isSent = await redis.get(flagKey);
                     if (!isSent) {
                         await redis.set(flagKey, true);
@@ -235,6 +260,7 @@ function startCronJob(sock) {
                                 jamAbsen: jAbsen, 
                                 kelompok: c?.name || 'Tanpa Kelompok'
                             });
+                            await new Promise(resolve => setTimeout(resolve, 500));
 
                             // Jika Alpha, Kalkulasi Riwayat SP (Surat Peringatan)
                             if (stAkhir === 'Alpha') {
@@ -275,7 +301,7 @@ function startCronJob(sock) {
                                     }
                                 }
                                 
-                                // Trigger SP Jika mencapai batas 3 Alpha
+                                // Jika mencapai batas 3 Alpha
                                 if (totalAlphaHist >= 3) { 
                                     const spFlagKey = `wa_scen9_${st.nim}_${totalAlphaHist}`;
                                     const isSpSent = await redis.get(spFlagKey);
@@ -287,17 +313,17 @@ function startCronJob(sock) {
                                             totalAlpha: totalAlphaHist, 
                                             totalTerlambat: totalTelatHist
                                         });
+                                        await new Promise(resolve => setTimeout(resolve, 500));
                                     }
                                 }
                             }
-                            await new Promise(resolve => setTimeout(resolve, 300));
                         }
                     }
                 }
             }
 
-            // [SKENARIO 17] PENGINGAT HARI TERAKHIR STASE (Pukul 10:00 Pagi WITA)
-            if (currentHHMM === '10:00') {
+            // [SKENARIO 17] HARI TERAKHIR STASE (Pukul 10:00 Pagi WITA)
+            if (currentMins >= 10 * 60) {
                 const flagKey = `wa_scen17_${todayStr}`;
                 const isSent = await redis.get(flagKey);
                 if (!isSent) {
@@ -306,18 +332,15 @@ function startCronJob(sock) {
                         if (!st.noHp) continue;
                         const c = clusters.find(cl=>cl.id === st.clusterId);
                         if (c && c.endDate === todayStr) {
-                            await triggerWA_API(st.noHp, 17, { 
-                                namaLengkap: st.name, 
-                                kelompok: c.name 
-                            });
-                            await new Promise(resolve => setTimeout(resolve, 300));
+                            await triggerWA_API(st.noHp, 17, { namaLengkap: st.name, kelompok: c.name });
+                            await new Promise(resolve => setTimeout(resolve, 500));
                         }
                     }
                 }
             }
 
             // [SKENARIO 20] REKAP HARIAN KE ADMIN (Pukul 23:50 Malam WITA)
-            if (currentHHMM === '23:50') {
+            if (currentMins >= 23 * 60 + 50) {
                 const flagKey = `wa_scen20_${todayStr}`;
                 const isSent = await redis.get(flagKey);
                 if (!isSent) {
@@ -337,7 +360,7 @@ function startCronJob(sock) {
                                 totalTerlambat: tTelat, 
                                 totalAlpha: tAlpha > 0 ? tAlpha : 0
                             });
-                            await new Promise(resolve => setTimeout(resolve, 300));
+                            await new Promise(resolve => setTimeout(resolve, 500));
                         }
                     }
                 }
@@ -346,7 +369,7 @@ function startCronJob(sock) {
         } catch (err) {
             // Silenced error mencegah bot crash ketika Redis sedang timeout sesaat
         }
-    }, 20000); // 💡 FIX: Cek setiap 20 detik untuk menghindari terlewatnya pengecekan jam
+    }, 20000); 
 }
 
 // ====================================================================
@@ -356,7 +379,7 @@ export default async function setupMessageHandler(sock) {
     console.log("[System] BOT ABSENSI DEPT. RKG Aktif!");
     console.log("[System] Fitur Auto-Pull Queue Message & Cron Job Berjalan di Background.");
 
-    // MENGAKTIFKAN MESIN CRON JOB (WITA)
+    // MENGAKTIFKAN MESIN CRON JOB INTERNAL (WITA) 24 JAM
     startCronJob(sock);
 
     // ====================================================================
@@ -411,7 +434,7 @@ export default async function setupMessageHandler(sock) {
                             console.log(`[Resolver] Gagal resolve untuk ${rawWa}, mencoba format standar.`);
                         }
 
-                        // Eksekusi Pengiriman Pesan
+                        // Eksekusi Pengiriman Pesan Ke WhatsApp
                         await sock.sendMessage(finalLid, { text: msgData.formatted_message });
                         console.log(`[Auto-Send 🚀] Pesan terkirim sukses ke ${rawWa}.`);
 
@@ -430,17 +453,17 @@ export default async function setupMessageHandler(sock) {
                         console.log(`[Auto-Send ❌ GAGAL] Tidak dapat mengirim pesan ke WA: ${msgData.target_number}. Alasan: ${fatalErr.message}`);
                     }
                     
-                    // Jeda 2 detik antar pesan agar aman dari deteksi SPAM Meta
+                    // Jeda 2 detik antar eksekusi untuk mengamankan limit API Meta
                     await new Promise(resolve => setTimeout(resolve, 2000));
                 }
             }
         } catch (err) {
-            // Error request fetch API di-silence agar bot tetap berjalan mulus
+            // Error request fetch API di-silence agar bot tidak crash
         }
     }, 5000); 
 
     // ====================================================================
-    // INCOMING CHAT HANDLER (COMMAND INTERAKTIF)
+    // INCOMING CHAT HANDLER (COMMAND INTERAKTIF BOT)
     // ====================================================================
     sock.ev.on('messages.upsert', async (m) => {
         try {
@@ -462,16 +485,13 @@ export default async function setupMessageHandler(sock) {
             let senderId = msg.key.remoteJid; 
             if (senderId.endsWith('@g.us')) senderId = msg.key.participant || senderId;
 
-            // 🔍 LID RESOLVER PADA LEVEL BOT: Mendapatkan nomor telepon asli/LID pengirim secara akurat
+            // 🔍 LID RESOLVER: Mendapatkan nomor telepon asli secara akurat
             let userWaFormat = formatWaNumber(senderId);
-            
-            // Jika Baileys mengirimkan LID mentah, kita coba resolve atau gunakan ID mentahnya langsung sebagai fallback pencarian
             if (!userWaFormat || userWaFormat.length < 10) {
                 userWaFormat = senderId.replace(/[^0-9]/g, '');
             }
 
             // 🌟 SMART FALLBACK: Izinkan mahasiswa mengetik manual "!reset 08123456789"
-            // Jika argumen pertama ada, gunakan itu sebagai nomor tujuan, jika tidak gunakan ID asli/LID mereka
             const targetWaToProcess = args[0] ? formatWaNumber(args[0]) : userWaFormat;
 
             console.log(`[COMMAND Publik] ${command} diakses oleh (Target/LID: ${targetWaToProcess})`);
@@ -500,7 +520,6 @@ export default async function setupMessageHandler(sock) {
                         });
                         const resJson = await resApi.json();
                         
-                        // Menangani Jika Terjadi Error / Nomor Tidak Terdaftar
                         if (!resJson.success) {
                             await sock.sendMessage(replyJid, { text: `❌ Gagal Logout: ${resJson.error || 'Terjadi kesalahan pada sistem database'}` }, { quoted: msg });
                         }
@@ -519,7 +538,6 @@ export default async function setupMessageHandler(sock) {
                         });
                         const resJson = await resApi.json();
                         
-                        // Menangani Jika Terjadi Error / Nomor Tidak Terdaftar
                         if (!resJson.success) {
                             await sock.sendMessage(replyJid, { text: `❌ Gagal Reset: ${resJson.error || 'Terjadi kesalahan pada sistem database'}` }, { quoted: msg });
                         }
