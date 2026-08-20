@@ -1,7 +1,7 @@
 import process from 'process';
 import os from 'os';
 
-// Jika Anda masih menyimpan command eksternal, biarkan import inI
+// Jika Anda masih menyimpan command eksternal, biarkan import ini
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
@@ -115,6 +115,8 @@ const triggerWA_API = async (noHp, scenarioId, payloadData) => {
         const result = await res.json();
         if(result.success) {
             console.log(`[Cron Trigger ✅] Skenario ${scenarioId} terpicu ke WA: ${noHp}`);
+        } else {
+            console.error(`[Cron Trigger API Failed] Skenario ${scenarioId} ke ${noHp}:`, result.error);
         }
     } catch(e) { 
         console.error(`[Cron Trigger Error] Gagal memanggil API untuk Skenario ${scenarioId}:`, e.message); 
@@ -127,7 +129,7 @@ const triggerWA_API = async (noHp, scenarioId, payloadData) => {
 function startCronJob(sock) {
     console.log("[Cron Job] Mesin waktu otomatis berhasil dihidupkan, berjalan 24/7 (Zona Waktu: Asia/Makassar)!");
     
-    // Interval akan mengecek jadwal setiap 60 detik (1 menit)
+    // Interval dipercepat menjadi 20 detik untuk menghindari "Miss-Minute" akibat event loop blocking
     setInterval(async () => {
         if (!sock || !sock.user) return; // Safety Gate: Jangan eksekusi cron jika bot belum terhubung
 
@@ -163,22 +165,25 @@ function startCronJob(sock) {
                 if (!sess.isActive) continue;
 
                 // [SKENARIO 1] PEMBUKAAN SESI ABSENSI
-                // 💡 FIX: Menambahkan startTime ke dalam key agar saat admin ganti jam di hari yang sama, bot tetap mengirim Notifikasi
+                // 💡 FIX: Menggunakan for...of dan setTimeout untuk menghindari Rate Limit/Spam Block
                 if (sess.startTime === currentHHMM) {
                     const flagKey = `wa_scen1_${todayStr}_${sess.id}_${sess.startTime}`;
                     const isSent = await redis.get(flagKey);
                     if (!isSent) {
                         await redis.set(flagKey, true);
-                        students.forEach(st => {
+                        for (const st of students) {
+                            if (!st.noHp) continue;
                             const c = clusters.find(cl => cl.id === st.clusterId);
-                            triggerWA_API(st.noHp, 1, { 
+                            await triggerWA_API(st.noHp, 1, { 
                                 namaLengkap: st.name, 
-                                kelompok: c?.name, 
+                                kelompok: c?.name || 'Tanpa Kelompok', 
                                 shift: sess.name, 
                                 jamSesi: sess.startTime, 
                                 jamTutup: sess.endTime 
                             });
-                        });
+                            // Jeda 300ms agar Vercel/Redis tidak menolak lonjakan request
+                            await new Promise(resolve => setTimeout(resolve, 300));
+                        }
                     }
                 }
 
@@ -188,16 +193,18 @@ function startCronJob(sock) {
                     const isSent = await redis.get(flagKey);
                     if (!isSent) {
                         await redis.set(flagKey, true);
-                        students.forEach(st => {
+                        for (const st of students) {
+                            if (!st.noHp) continue;
                             const hasLogged = logs.some(l => l.nim === st.nim && l.sessionName === sess.name && getLocalYYYYMMDD(l.timestamp) === todayStr);
-                            if (!hasLogged && st.noHp) {
-                                triggerWA_API(st.noHp, 2, { 
+                            if (!hasLogged) {
+                                await triggerWA_API(st.noHp, 2, { 
                                     namaLengkap: st.name, 
                                     shift: sess.name, 
                                     jamTutup: sess.endTime 
                                 });
+                                await new Promise(resolve => setTimeout(resolve, 300));
                             }
-                        });
+                        }
                     }
                 }
 
@@ -212,20 +219,21 @@ function startCronJob(sock) {
                     if (!isSent) {
                         await redis.set(flagKey, true);
                         
-                        students.forEach(async (st) => {
+                        for (const st of students) {
+                            if (!st.noHp) continue;
                             const c = clusters.find(cl => cl.id === st.clusterId);
                             const log = logs.find(l => l.nim === st.nim && l.sessionName === sess.name && getLocalYYYYMMDD(l.timestamp) === todayStr);
                             const stAkhir = log ? log.status : 'Alpha';
                             const jAbsen = log ? new Date(log.timestamp).toLocaleTimeString('id-ID', {hour:'2-digit', minute:'2-digit'}) : '-';
                             
                             // Kirim Hasil Rekap Sesi Ini
-                            triggerWA_API(st.noHp, 4, { 
+                            await triggerWA_API(st.noHp, 4, { 
                                 namaLengkap: st.name, 
                                 shift: sess.name, 
                                 jamTutup: sess.endTime, 
                                 statusAkhir: stAkhir, 
                                 jamAbsen: jAbsen, 
-                                kelompok: c?.name 
+                                kelompok: c?.name || 'Tanpa Kelompok'
                             });
 
                             // Jika Alpha, Kalkulasi Riwayat SP (Surat Peringatan)
@@ -273,16 +281,17 @@ function startCronJob(sock) {
                                     const isSpSent = await redis.get(spFlagKey);
                                     if (!isSpSent) {
                                         await redis.set(spFlagKey, true);
-                                        triggerWA_API(st.noHp, 9, {
+                                        await triggerWA_API(st.noHp, 9, {
                                             namaLengkap: st.name, 
-                                            kelompok: c?.name, 
+                                            kelompok: c?.name || 'Tanpa Kelompok', 
                                             totalAlpha: totalAlphaHist, 
                                             totalTerlambat: totalTelatHist
                                         });
                                     }
                                 }
                             }
-                        });
+                            await new Promise(resolve => setTimeout(resolve, 300));
+                        }
                     }
                 }
             }
@@ -293,12 +302,17 @@ function startCronJob(sock) {
                 const isSent = await redis.get(flagKey);
                 if (!isSent) {
                     await redis.set(flagKey, true);
-                    students.forEach(st => {
+                    for (const st of students) {
+                        if (!st.noHp) continue;
                         const c = clusters.find(cl=>cl.id === st.clusterId);
                         if (c && c.endDate === todayStr) {
-                            triggerWA_API(st.noHp, 17, { namaLengkap: st.name, kelompok: c.name });
+                            await triggerWA_API(st.noHp, 17, { 
+                                namaLengkap: st.name, 
+                                kelompok: c.name 
+                            });
+                            await new Promise(resolve => setTimeout(resolve, 300));
                         }
-                    });
+                    }
                 }
             }
 
@@ -314,24 +328,25 @@ function startCronJob(sock) {
                     const activeSessCount = sessions.filter(s => s.isActive).length;
                     const tAlpha = (students.length * activeSessCount) - (tHadir + tTelat);
                     
-                    admins.forEach(ad => { 
+                    for (const ad of admins) {
                         if (ad.noHp) {
-                            triggerWA_API(ad.noHp, 20, {
+                            await triggerWA_API(ad.noHp, 20, {
                                 tanggal: now.toLocaleDateString('id-ID', {weekday: 'long', day:'numeric', month:'long'}),
                                 totalMhs: students.length, 
                                 totalHadir: tHadir, 
                                 totalTerlambat: tTelat, 
                                 totalAlpha: tAlpha > 0 ? tAlpha : 0
                             });
+                            await new Promise(resolve => setTimeout(resolve, 300));
                         }
-                    });
+                    }
                 }
             }
             
         } catch (err) {
             // Silenced error mencegah bot crash ketika Redis sedang timeout sesaat
         }
-    }, 60000); // Cek secara looping setiap 60000ms (1 menit)
+    }, 20000); // 💡 FIX: Cek setiap 20 detik untuk menghindari terlewatnya pengecekan jam
 }
 
 // ====================================================================
