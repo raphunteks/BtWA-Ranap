@@ -6,23 +6,66 @@ import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
 // ====================================================================
-// 🚀 KONFIGURASI REST API GATEWAY WEB DEPT. RKG
+// 🚀 KONFIGURASI REST API GATEWAY & DATABASE CLOUD DEPT. RKG
 // ====================================================================
-// Base URL REST API Next.js Anda (Rute route.ts yang baru digabungkan)
 const RKG_API_BASE_URL = process.env.RKG_API_URL || "https://absensi.maksaarsyad.xyz/api/wa";
+
+// Redis Client untuk keperluan Cron Job Backend
+class Redis {
+    constructor(config) {
+        this.url = config.url || '';
+        this.token = config.token || '';
+        if (this.url.endsWith('/')) this.url = this.url.slice(0, -1);
+    }
+    
+    static fromEnv() {
+        let url = process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_URL || process.env.NEXT_PUBLIC_KV_REST_API_URL || '';
+        let token = process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_TOKEN || process.env.NEXT_PUBLIC_KV_REST_API_TOKEN || '';
+        return new Redis({ url, token });
+    }
+
+    async get(key) {
+        if (!this.url || !this.token) return null;
+        try {
+            const res = await fetch(this.url, { 
+                method: 'POST',
+                headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' }, 
+                body: JSON.stringify(["GET", key]), 
+                cache: 'no-store' 
+            });
+            if (!res.ok) throw new Error('Fetch failed');
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            if (data.result === null || data.result === undefined) return null;
+            try { return typeof data.result === 'string' ? JSON.parse(data.result) : data.result; } 
+            catch (e) { return data.result; }
+        } catch (e) { return null; }
+    }
+
+    async set(key, value) {
+        if (!this.url || !this.token) return;
+        try {
+            const strVal = typeof value === 'string' ? value : JSON.stringify(value);
+            const res = await fetch(this.url, { 
+                method: 'POST', 
+                headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' }, 
+                body: JSON.stringify(["SET", key, strVal]) 
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            return data;
+        } catch (e) { throw e; }
+    }
+}
 
 // ====================================================================
 // 📁 FORMATTER UTILITIES
 // ====================================================================
 function formatWaNumber(id) {
     if (!id) return "";
-    // Membuang @s.whatsapp.net, @lid, atau : dari string ID
     let p = String(id).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-    
-    // Konversi cerdas: Hanya konversi ke 62 jika itu terlihat seperti nomor HP lokal
     if (p.startsWith('0')) p = '62' + p.slice(1);
     else if (p.startsWith('8')) p = '62' + p;
-    
     return p;
 }
 
@@ -32,20 +75,31 @@ function getRelativeTime(seconds) {
     return `${Math.floor(seconds)} detik yang lalu`;
 }
 
+// Helper Tanggal Local (WITA)
+const getLocalYYYYMMDD = (dateInput) => {
+    const d = new Date(dateInput);
+    d.setHours(d.getHours() + 8); // Offset UTC to WITA (Asia/Makassar)
+    const year = d.getUTCFullYear();
+    const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+};
+
 // ====================================================================
-// 🚀 MAIN HANDLER BOT DEPT. RKG (PULL ARCHITECTURE)
+// 🚀 MAIN HANDLER BOT DEPT. RKG
 // ====================================================================
 export default async function setupMessageHandler(sock) {
     console.log("[System] BOT ABSENSI DEPT. RKG Aktif!");
-    console.log("[System] Fitur Auto-Pull Queue Message Berjalan di Background.");
+    console.log("[System] Fitur Auto-Pull Queue Message & Cron Job 24/7 Berjalan di Background.");
+
+    // MENGAKTIFKAN MESIN CRON JOB (BAGIAN 2)
+    startCronJob(sock);
 
     // ====================================================================
     // 🔄 AUTO-POLLING API (PULL METHOD SETIAP 5 DETIK)
     // ====================================================================
-    // Bot WA secara aktif "menarik" (pulling) antrian pesan dari Redis web
     setInterval(async () => {
         try {
-            // Melakukan request GET ke endpoint queue Next.js kita (?action=pull)
             const res = await fetch(`${RKG_API_BASE_URL}?action=pull`, { method: "GET" });
             const json = await res.json();
             
@@ -53,31 +107,27 @@ export default async function setupMessageHandler(sock) {
                 console.log(`[Auto-Pull 📥] Ditemukan ${json.queue.length} antrian pesan Notifikasi RKG!`);
                 
                 for (const msgData of json.queue) {
-                    // msgData berisi { id, target_number, formatted_message }
                     try {
-                        // 1. Standarisasi Format WA untuk Pengiriman (Memastikan 62...)
                         let rawWa = msgData.target_number;
                         if (rawWa.startsWith('0')) rawWa = '62' + rawWa.substring(1);
                         
                         let targetWaLid = rawWa + '@s.whatsapp.net';
                         let finalLid = targetWaLid;
 
-                        // Mencari ID Utama / Resolve ke server WA
                         try {
                             const [result] = await sock.onWhatsApp(targetWaLid);
                             if (result && result.exists) {
                                 finalLid = result.jid; 
-                                console.log(`[Resolver] Nomor ${rawWa} dipetakan ke JID Utama: ${finalLid}`);
                             }
                         } catch (e) {
                             console.log(`[Resolver] Gagal resolve untuk ${rawWa}, mencoba format standar.`);
                         }
 
-                        // 2. Eksekusi Pengiriman Pesan (Teks sudah dirakit otomatis oleh API Next.js)
+                        // Eksekusi Pengiriman Pesan
                         await sock.sendMessage(finalLid, { text: msgData.formatted_message });
                         console.log(`[Auto-Send 🚀] Pesan terkirim sukses ke ${rawWa}.`);
 
-                        // 3. HAPUS ANTRIAN DARI REDIS JIKA BERHASIL (Hit endpoint DELETE)
+                        // Hapus antrian jika berhasil
                         try {
                             await fetch(RKG_API_BASE_URL, {
                                 method: "DELETE",
@@ -85,19 +135,19 @@ export default async function setupMessageHandler(sock) {
                                 body: JSON.stringify({ message_id: msgData.id })
                             });
                         } catch (err) {
-                            console.log(`[Database Error] Gagal menghapus antrian dari CloudStore: ${err.message}`);
+                            console.log(`[Database Error] Gagal menghapus antrian: ${err.message}`);
                         }
 
                     } catch (fatalErr) {
                         console.log(`[Auto-Send ❌ GAGAL] Tidak dapat mengirim pesan ke WA: ${msgData.target_number}. Alasan: ${fatalErr.message}`);
                     }
                     
-                    // Jeda 2 detik antar pesan agar aman dari deteksi SPAM WhatsApp Meta
+                    // Jeda 2 detik antar pesan agar aman dari deteksi SPAM WhatsApp
                     await new Promise(resolve => setTimeout(resolve, 2000));
                 }
             }
         } catch (err) {
-            // Error request fetch API di-silence agar bot tetap berjalan mulus walau jaringan web fluktuatif
+            // Error request fetch API di-silence agar bot tetap berjalan
         }
     }, 5000); 
 
@@ -112,7 +162,7 @@ export default async function setupMessageHandler(sock) {
             let text = '';
             if (msg.message.conversation) text = msg.message.conversation;
             else if (msg.message.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
-                         
+                          
             const prefix = '!'; 
             if (!text || !text.startsWith(prefix)) return;
 
@@ -121,7 +171,6 @@ export default async function setupMessageHandler(sock) {
             
             const replyJid = msg.key.remoteJid; 
             
-            // Ekstraksi ID Pengirim
             let senderId = msg.key.remoteJid; 
             if (senderId.endsWith('@g.us')) senderId = msg.key.participant || senderId;
 
@@ -130,7 +179,6 @@ export default async function setupMessageHandler(sock) {
             console.log(`[COMMAND Publik] ${command} diakses oleh (Parsed WA: ${userWaFormat})`);
 
             switch (command) {
-                // Command Spesifik Web Absensi
                 case 'portal':
                 case 'absen':
                     await sock.sendMessage(replyJid, { text: `🏥 *PORTAL ABSENSI DEPT. RKG*\n\nSilakan klik tautan di bawah ini untuk mengakses dashboard absensi Anda:\n🔗 https://absensi.maksaarsyad.xyz/` }, { quoted: msg });
@@ -141,13 +189,44 @@ export default async function setupMessageHandler(sock) {
                     await sock.sendMessage(replyJid, { text: `⚠️ Jika Anda mengalami kendala saat absensi (seperti salah lokasi, akun terkunci di HP lain, atau lupa sandi), segera laporkan kepada Koordinator Admin Dept. RKG untuk ditindaklanjuti.` }, { quoted: msg });
                     break;
 
-                // Command Umum
+                // ============================================================
+                // FITUR COMMAND BARU: RESET PASS & LOGOUT PERANGKAT
+                // ============================================================
+                case 'logout':
+                    await sock.sendMessage(replyJid, { text: "⏳ Sistem sedang memproses permintaan pelepasan perangkat (Logout) Anda..." }, { quoted: msg });
+                    try {
+                        await fetch(RKG_API_BASE_URL, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ no_hp: userWaFormat, scenario: 16 })
+                        });
+                        // Pesan balasan akan dirakit oleh API dan dikirim via Auto-Pull Queue
+                    } catch (e) {
+                        await sock.sendMessage(replyJid, { text: "❌ Sistem Cloud sibuk. Coba beberapa saat lagi." }, { quoted: msg });
+                    }
+                    break;
+
+                case 'reset':
+                    await sock.sendMessage(replyJid, { text: "⏳ Sistem sedang mereset kata sandi Anda..." }, { quoted: msg });
+                    try {
+                        await fetch(RKG_API_BASE_URL, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ no_hp: userWaFormat, scenario: 19 })
+                        });
+                    } catch (e) {
+                        await sock.sendMessage(replyJid, { text: "❌ Sistem Cloud sibuk. Coba beberapa saat lagi." }, { quoted: msg });
+                    }
+                    break;
+
                 case 'menu':
                 case 'help':
                     let manualMenuText = `🏥 *LAYANAN BOT ABSENSI DEPT. RKG* 🏥\n\n`;
                     manualMenuText += `Halo! Saya adalah Bot Notifikasi Resmi. Silakan gunakan perintah publik berikut:\n\n`;
                     manualMenuText += `*👤 MAHASISWA STASE:*\n`;
                     manualMenuText += `> *!portal* (Dapatkan link web absensi)\n`;
+                    manualMenuText += `> *!logout* (Pelepasan perangkat / Unlink Device)\n`;
+                    manualMenuText += `> *!reset* (Generate Ulang Password Akun)\n`;
                     manualMenuText += `> *!bantuan* (Info kendala sistem)\n\n`;
                     manualMenuText += `*✨ LAINNYA:*\n> !ai <pertanyaan> (Tanya AI)\n> !s (Buat Stiker)\n> !runtime (Status Server)`;
                     await sock.sendMessage(replyJid, { text: manualMenuText }, { quoted: msg });
@@ -175,3 +254,4 @@ export default async function setupMessageHandler(sock) {
         } catch (error) { console.error('[Handler Error]', error); }
     });
 }
+// --- AKHIR BAGIAN 1 ---
