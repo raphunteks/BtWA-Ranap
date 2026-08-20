@@ -328,6 +328,9 @@ export default async function setupMessageHandler(sock) {
     // 🔄 AUTO-POLLING API (PULL METHOD SETIAP 5 DETIK)
     // ====================================================================
     setInterval(async () => {
+        // SAFETY GATE: Mencegah eksekusi pengiriman jika socket belum terkoneksi penuh
+        if (!sock || !sock.user) return;
+
         try {
             const res = await fetch(`${RKG_API_BASE_URL}?action=pull`, { method: "GET" });
             const json = await res.json();
