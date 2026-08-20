@@ -22,8 +22,8 @@ class Redis {
     }
     
     static fromEnv() {
-        let url = process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_URL || process.env.NEXT_PUBLIC_KV_REST_API_URL || '';
-        let token = process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_TOKEN || process.env.NEXT_PUBLIC_KV_REST_API_TOKEN || '';
+        let url = process.env.UPSTASH_REDIS_REST_URL || process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || process.env.NEXT_PUBLIC_KV_REST_API_URL || '';
+        let token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || process.env.NEXT_PUBLIC_KV_REST_API_TOKEN || '';
         return new Redis({ url, token });
     }
 
@@ -107,11 +107,15 @@ const safeParse = (data) => {
 const triggerWA_API = async (noHp, scenarioId, payloadData) => {
     if (!noHp) return;
     try {
-        await fetch(RKG_API_BASE_URL, {
+        const res = await fetch(RKG_API_BASE_URL, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ no_hp: noHp, scenario: scenarioId, data: payloadData })
         });
+        const result = await res.json();
+        if(result.success) {
+            console.log(`[Cron Trigger ✅] Skenario ${scenarioId} terpicu ke WA: ${noHp}`);
+        }
     } catch(e) { 
         console.error(`[Cron Trigger Error] Gagal memanggil API untuk Skenario ${scenarioId}:`, e.message); 
     }
@@ -159,8 +163,9 @@ function startCronJob(sock) {
                 if (!sess.isActive) continue;
 
                 // [SKENARIO 1] PEMBUKAAN SESI ABSENSI
+                // 💡 FIX: Menambahkan startTime ke dalam key agar saat admin ganti jam di hari yang sama, bot tetap mengirim Notifikasi
                 if (sess.startTime === currentHHMM) {
-                    const flagKey = `wa_scen1_${todayStr}_${sess.id}`;
+                    const flagKey = `wa_scen1_${todayStr}_${sess.id}_${sess.startTime}`;
                     const isSent = await redis.get(flagKey);
                     if (!isSent) {
                         await redis.set(flagKey, true);
@@ -179,7 +184,7 @@ function startCronJob(sock) {
 
                 // [SKENARIO 2] PENGINGAT SISA WAKTU (Bagi yang belum absen)
                 if (sess.endTime === currentHHMM) {
-                    const flagKey = `wa_scen2_${todayStr}_${sess.id}`;
+                    const flagKey = `wa_scen2_${todayStr}_${sess.id}_${sess.endTime}`;
                     const isSent = await redis.get(flagKey);
                     if (!isSent) {
                         await redis.set(flagKey, true);
@@ -202,7 +207,7 @@ function startCronJob(sock) {
                 const currentTotal = now.getHours() * 60 + now.getMinutes();
 
                 if (currentTotal === endTotal + 1) { 
-                    const flagKey = `wa_scen4_${todayStr}_${sess.id}`;
+                    const flagKey = `wa_scen4_${todayStr}_${sess.id}_${sess.endTime}`;
                     const isSent = await redis.get(flagKey);
                     if (!isSent) {
                         await redis.set(flagKey, true);
