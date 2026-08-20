@@ -115,17 +115,20 @@ function startCronJob(sock) {
     
     // Interval akan mengecek jadwal setiap 60 detik (1 menit)
     setInterval(async () => {
+        if (!sock || !sock.user) return; // Safety Gate: Jangan eksekusi cron jika bot belum terhubung
+
         try {
             const redis = Redis.fromEnv();
             const now = getWitaTime();
             const dayOfWeek = now.getDay(); 
             const todayStr = getLocalYYYYMMDD(now);
 
-            const holidays = await redis.get('axaxyz_holidays') || [];
+            let holidays = await redis.get('axaxyz_holidays') || [];
+            if (typeof holidays === 'string') { try { holidays = JSON.parse(holidays); } catch(e){} }
             
             // Logika Libur: Weekend (Sabtu/Minggu) atau Tanggal Merah
             const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6);
-            const isCustomHoliday = holidays.some(h => h.date === todayStr);
+            const isCustomHoliday = Array.isArray(holidays) ? holidays.some(h => h.date === todayStr) : false;
 
             if (isWeekend || isCustomHoliday) {
                 return; // Berhenti eksekusi jika hari ini libur
@@ -134,13 +137,25 @@ function startCronJob(sock) {
             const currentHHMM = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false });
             
             // Ambil semua data Master dari Redis secara Real-Time
-            const sessions = await redis.get('axaxyz_sessions') || [];
-            const students = await redis.get('axaxyz_students') || [];
-            const logs = await redis.get('axaxyz_logs') || [];
-            const clusters = await redis.get('axaxyz_clusters') || [];
-            const admins = await redis.get('axaxyz_admins') || [];
+            let sessions = await redis.get('axaxyz_sessions') || [];
+            let rawStudents = await redis.get('axaxyz_students') || [];
+            let logs = await redis.get('axaxyz_logs') || [];
+            let clusters = await redis.get('axaxyz_clusters') || [];
+            let admins = await redis.get('axaxyz_admins') || [];
 
-            for (const sess of sessions) {
+            // Parsers for Double Stringified Arrays (Anti-Crash)
+            if (typeof sessions === 'string') try { sessions = JSON.parse(sessions); } catch(e){}
+            if (typeof rawStudents === 'string') try { rawStudents = JSON.parse(rawStudents); } catch(e){}
+            if (typeof rawStudents === 'string') try { rawStudents = JSON.parse(rawStudents); } catch(e){} // 2nd layer
+            if (typeof logs === 'string') try { logs = JSON.parse(logs); } catch(e){}
+            if (typeof clusters === 'string') try { clusters = JSON.parse(clusters); } catch(e){}
+            if (typeof admins === 'string') try { admins = JSON.parse(admins); } catch(e){}
+
+            const students = Array.isArray(rawStudents) ? rawStudents : [];
+            const safeClusters = Array.isArray(clusters) ? clusters : [];
+            const safeLogs = Array.isArray(logs) ? logs : [];
+
+            for (const sess of (Array.isArray(sessions) ? sessions : [])) {
                 if (!sess.isActive) continue;
 
                 // [SKENARIO 1] PEMBUKAAN SESI ABSENSI
@@ -150,7 +165,7 @@ function startCronJob(sock) {
                     if (!isSent) {
                         await redis.set(flagKey, true);
                         students.forEach(st => {
-                            const c = clusters.find(cl => cl.id === st.clusterId);
+                            const c = safeClusters.find(cl => cl.id === st.clusterId);
                             triggerWA_API(st.noHp, 1, { 
                                 namaLengkap: st.name, 
                                 kelompok: c?.name, 
@@ -169,7 +184,7 @@ function startCronJob(sock) {
                     if (!isSent) {
                         await redis.set(flagKey, true);
                         students.forEach(st => {
-                            const hasLogged = logs.some(l => l.nim === st.nim && l.sessionName === sess.name && getLocalYYYYMMDD(l.timestamp) === todayStr);
+                            const hasLogged = safeLogs.some(l => l.nim === st.nim && l.sessionName === sess.name && getLocalYYYYMMDD(l.timestamp) === todayStr);
                             if (!hasLogged && st.noHp) {
                                 triggerWA_API(st.noHp, 2, { 
                                     namaLengkap: st.name, 
@@ -193,8 +208,8 @@ function startCronJob(sock) {
                         await redis.set(flagKey, true);
                         
                         students.forEach(async (st) => {
-                            const c = clusters.find(cl => cl.id === st.clusterId);
-                            const log = logs.find(l => l.nim === st.nim && l.sessionName === sess.name && getLocalYYYYMMDD(l.timestamp) === todayStr);
+                            const c = safeClusters.find(cl => cl.id === st.clusterId);
+                            const log = safeLogs.find(l => l.nim === st.nim && l.sessionName === sess.name && getLocalYYYYMMDD(l.timestamp) === todayStr);
                             const stAkhir = log ? log.status : 'Alpha';
                             const jAbsen = log ? new Date(log.timestamp).toLocaleTimeString('id-ID', {hour:'2-digit', minute:'2-digit'}) : '-';
                             
@@ -222,13 +237,13 @@ function startCronJob(sock) {
                                         const dateStrLocal = getLocalYYYYMMDD(d);
                                         const loopDayOfWeek = d.getDay();
                                         const loopIsWeekend = (loopDayOfWeek === 0 || loopDayOfWeek === 6);
-                                        const loopIsCustomHoliday = holidays.some(h => h.date === dateStrLocal);
+                                        const loopIsCustomHoliday = Array.isArray(holidays) ? holidays.some(h => h.date === dateStrLocal) : false;
                                         
                                         if (loopIsWeekend || loopIsCustomHoliday) continue;
 
-                                        sessions.forEach(s => {
+                                        (Array.isArray(sessions) ? sessions : []).forEach(s => {
                                             if (s.isActive) {
-                                                const pastLog = logs.find(l => l.nim === st.nim && getLocalYYYYMMDD(l.timestamp) === dateStrLocal && l.sessionName === s.name);
+                                                const pastLog = safeLogs.find(l => l.nim === st.nim && getLocalYYYYMMDD(l.timestamp) === dateStrLocal && l.sessionName === s.name);
                                                 if (pastLog) {
                                                     if (pastLog.status === 'Terlambat') totalTelatHist++;
                                                 } else {
@@ -274,7 +289,7 @@ function startCronJob(sock) {
                 if (!isSent) {
                     await redis.set(flagKey, true);
                     students.forEach(st => {
-                        const c = clusters.find(cl=>cl.id === st.clusterId);
+                        const c = safeClusters.find(cl=>cl.id === st.clusterId);
                         if (c && c.endDate === todayStr) {
                             triggerWA_API(st.noHp, 17, { namaLengkap: st.name, kelompok: c.name });
                         }
@@ -289,12 +304,12 @@ function startCronJob(sock) {
                 if (!isSent) {
                     await redis.set(flagKey, true);
                     
-                    const tHadir = logs.filter(l => getLocalYYYYMMDD(l.timestamp) === todayStr && l.status === 'Hadir').length;
-                    const tTelat = logs.filter(l => getLocalYYYYMMDD(l.timestamp) === todayStr && l.status === 'Terlambat').length;
-                    const activeSessCount = sessions.filter(s => s.isActive).length;
+                    const tHadir = safeLogs.filter(l => getLocalYYYYMMDD(l.timestamp) === todayStr && l.status === 'Hadir').length;
+                    const tTelat = safeLogs.filter(l => getLocalYYYYMMDD(l.timestamp) === todayStr && l.status === 'Terlambat').length;
+                    const activeSessCount = (Array.isArray(sessions) ? sessions : []).filter(s => s.isActive).length;
                     const tAlpha = (students.length * activeSessCount) - (tHadir + tTelat);
                     
-                    admins.forEach(ad => { 
+                    (Array.isArray(admins) ? admins : []).forEach(ad => { 
                         if (ad.noHp) {
                             triggerWA_API(ad.noHp, 20, {
                                 tanggal: now.toLocaleDateString('id-ID', {weekday: 'long', day:'numeric', month:'long'}),
@@ -315,20 +330,20 @@ function startCronJob(sock) {
 }
 
 // ====================================================================
-// 🚀 MAIN HANDLER BOT DEPT. RKG
+// 🚀 MAIN HANDLER BOT DEPT. RKG (PULL ARCHITECTURE)
 // ====================================================================
 export default async function setupMessageHandler(sock) {
     console.log("[System] BOT ABSENSI DEPT. RKG Aktif!");
-    console.log("[System] Fitur Auto-Pull Queue Message & Cron Job 24/7 Berjalan di Background.");
+    console.log("[System] Fitur Auto-Pull Queue Message & Cron Job Berjalan di Background.");
 
-    // MENGAKTIFKAN MESIN CRON JOB
+    // MENGAKTIFKAN MESIN CRON JOB (WITA)
     startCronJob(sock);
 
     // ====================================================================
     // 🔄 AUTO-POLLING API (PULL METHOD SETIAP 5 DETIK)
     // ====================================================================
     setInterval(async () => {
-        // SAFETY GATE: Mencegah eksekusi pengiriman jika socket belum terkoneksi penuh
+        // SAFETY GATE: Cegah loop tembakan API jika WhatsApp belum terkoneksi
         if (!sock || !sock.user) return;
 
         try {
@@ -359,7 +374,7 @@ export default async function setupMessageHandler(sock) {
                         await sock.sendMessage(finalLid, { text: msgData.formatted_message });
                         console.log(`[Auto-Send 🚀] Pesan terkirim sukses ke ${rawWa}.`);
 
-                        // Hapus antrian jika berhasil
+                        // Hapus antrian dari DB jika berhasil terkirim
                         try {
                             await fetch(RKG_API_BASE_URL, {
                                 method: "DELETE",
@@ -367,19 +382,19 @@ export default async function setupMessageHandler(sock) {
                                 body: JSON.stringify({ message_id: msgData.id })
                             });
                         } catch (err) {
-                            console.log(`[Database Error] Gagal menghapus antrian: ${err.message}`);
+                            console.log(`[Database Error] Gagal menghapus antrian dari CloudStore: ${err.message}`);
                         }
 
                     } catch (fatalErr) {
                         console.log(`[Auto-Send ❌ GAGAL] Tidak dapat mengirim pesan ke WA: ${msgData.target_number}. Alasan: ${fatalErr.message}`);
                     }
                     
-                    // Jeda 2 detik antar pesan agar aman dari deteksi SPAM WhatsApp
+                    // Jeda 2 detik antar pesan agar aman dari deteksi SPAM Meta
                     await new Promise(resolve => setTimeout(resolve, 2000));
                 }
             }
         } catch (err) {
-            // Error request fetch API di-silence agar bot tetap berjalan
+            // Error request fetch API di-silence agar bot tetap berjalan mulus
         }
     }, 5000); 
 
@@ -427,27 +442,38 @@ export default async function setupMessageHandler(sock) {
                 case 'logout':
                     await sock.sendMessage(replyJid, { text: "⏳ Sistem sedang memproses permintaan pelepasan perangkat (Logout) Anda..." }, { quoted: msg });
                     try {
-                        await fetch(RKG_API_BASE_URL, {
+                        const resApi = await fetch(RKG_API_BASE_URL, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({ no_hp: userWaFormat, scenario: 16 })
                         });
-                        // Pesan balasan akan dirakit oleh API dan dikirim via Auto-Pull Queue
+                        const resJson = await resApi.json();
+                        
+                        // Menangani Jika Terjadi Error / Nomor Tidak Terdaftar
+                        if (!resJson.success) {
+                            await sock.sendMessage(replyJid, { text: `❌ Gagal Logout: ${resJson.error || 'Terjadi kesalahan pada sistem database'}` }, { quoted: msg });
+                        }
                     } catch (e) {
-                        await sock.sendMessage(replyJid, { text: "❌ Sistem Cloud sibuk. Coba beberapa saat lagi." }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: "❌ Sistem Cloud tidak merespon. Coba beberapa saat lagi." }, { quoted: msg });
                     }
                     break;
 
                 case 'reset':
                     await sock.sendMessage(replyJid, { text: "⏳ Sistem sedang mereset kata sandi Anda..." }, { quoted: msg });
                     try {
-                        await fetch(RKG_API_BASE_URL, {
+                        const resApi = await fetch(RKG_API_BASE_URL, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({ no_hp: userWaFormat, scenario: 19 })
                         });
+                        const resJson = await resApi.json();
+                        
+                        // Menangani Jika Terjadi Error / Nomor Tidak Terdaftar
+                        if (!resJson.success) {
+                            await sock.sendMessage(replyJid, { text: `❌ Gagal Reset: ${resJson.error || 'Terjadi kesalahan pada sistem database'}` }, { quoted: msg });
+                        }
                     } catch (e) {
-                        await sock.sendMessage(replyJid, { text: "❌ Sistem Cloud sibuk. Coba beberapa saat lagi." }, { quoted: msg });
+                        await sock.sendMessage(replyJid, { text: "❌ Sistem Cloud tidak merespon. Coba beberapa saat lagi." }, { quoted: msg });
                     }
                     break;
 
