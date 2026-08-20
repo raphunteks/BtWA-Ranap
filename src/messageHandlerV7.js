@@ -1,7 +1,7 @@
 import process from 'process';
 import os from 'os';
 
-// Jika Anda masih menyimpan command eksternal, biarkan import ini
+// Jika Anda masih menyimpan command eksternal, biarkan import inI
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
