@@ -22,8 +22,8 @@ class Redis {
     }
     
     static fromEnv() {
-        let url = process.env.UPSTASH_REDIS_REST_URL || process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || process.env.NEXT_PUBLIC_KV_REST_API_URL || '';
-        let token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || process.env.NEXT_PUBLIC_KV_REST_API_TOKEN || '';
+        let url = process.env.NEXT_PUBLIC_KV_REST_API_URL || process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_URL || '';
+        let token = process.env.NEXT_PUBLIC_KV_REST_API_TOKEN || process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_TOKEN || '';
         return new Redis({ url, token });
     }
 
