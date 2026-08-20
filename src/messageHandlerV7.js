@@ -134,7 +134,10 @@ function startCronJob(sock) {
                 return; // Berhenti eksekusi jika hari ini libur
             }
 
-            const currentHHMM = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false });
+            // 🛡️ SUPER FIX: Formatting jam secara manual HH:mm agar sinkron mutlak dengan Database (sess.startTime)
+            const currentH = String(now.getHours()).padStart(2, '0');
+            const currentM = String(now.getMinutes()).padStart(2, '0');
+            const currentHHMM = `${currentH}:${currentM}`;
             
             // Ambil semua data Master dari Redis secara Real-Time
             let sessions = await redis.get('axaxyz_sessions') || [];
@@ -525,7 +528,7 @@ export default async function setupMessageHandler(sock) {
                     break;
 
                 case 'myid': case 'cekid':
-                    await sock.sendMessage(replyJid, { text: `*ℹ️ INFORMASI ID ANDA*\n\n*WA/LID Terdeteksi:* ${userWaFormat}` }, { quoted: msg });
+                    await sock.sendMessage(replyJid, { text: `*ℹ️ INFORMASI ID ANDA*\n\n*WA Asli Terdeteksi:* ${userWaFormat}` }, { quoted: msg });
                     break;
 
                 case 'ping':
