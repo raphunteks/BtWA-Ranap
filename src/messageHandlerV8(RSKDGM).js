@@ -14,7 +14,7 @@ const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 // URL REST API Google Apps Script (GAS) SIMGOS RSKDGM
 const GAS_URL_SIMGOS = process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbzCOj9YFKEqXRfMEKBugnEhqzuC7MoJfIyc5PihST3bxmJaseaKKX9YifotK2qpT38/exec";
 
-// Kunci API Google AI Studio Terbaru & Model Gemini
+// Kunci API Google AI Studio & Model Gemini Terpercaya
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AQ.Ab8RN6KfVb-fIIdi_BsauXX69CEOoE037lYnsPJYvCy4Vhr6cw";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
@@ -116,6 +116,85 @@ function formatForWhatsApp(text) {
   return formatted.trim();
 }
 
+/**
+ * Ekstraktor tanggal fleksibel dari pesan pasien (Bahasa Indonesia & format angka)
+ */
+function extractDateFromText(text) {
+  if (!text) return null;
+  const t = text.trim();
+
+  // 1. Format ISO YYYY-MM-DD
+  const isoMatch = t.match(/\b(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})\b/);
+  if (isoMatch) {
+    const y = isoMatch[1];
+    const m = String(isoMatch[2]).padStart(2, '0');
+    const d = String(isoMatch[3]).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  // 2. Format lokal DD-MM-YYYY atau DD/MM/YYYY
+  const dmyMatch = t.match(/\b(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})\b/);
+  if (dmyMatch) {
+    const d = String(dmyMatch[1]).padStart(2, '0');
+    const m = String(dmyMatch[2]).padStart(2, '0');
+    const y = dmyMatch[3];
+    return `${y}-${m}-${d}`;
+  }
+
+  // 3. Format Nama Bulan Bahasa Indonesia: contoh "28 September 2026" atau "28 September"
+  const monthMap = {
+    'januari': '01', 'jan': '01',
+    'februari': '02', 'feb': '02',
+    'maret': '03', 'mar': '03',
+    'april': '04', 'apr': '04',
+    'mei': '05',
+    'juni': '06', 'jun': '06',
+    'juli': '07', 'jul': '07',
+    'agustus': '08', 'ags': '08', 'agt': '08',
+    'september': '09', 'sep': '09',
+    'oktober': '10', 'okt': '10',
+    'november': '11', 'nov': '11',
+    'desember': '12', 'des': '12'
+  };
+
+  const idMatch = t.match(/\b(\d{1,2})\s+([a-zA-Z]+)(?:\s+(\d{4}))?\b/);
+  if (idMatch) {
+    const d = String(idMatch[1]).padStart(2, '0');
+    const mName = idMatch[2].toLowerCase();
+    const y = idMatch[3] || '2026';
+    if (monthMap[mName]) {
+      return `${y}-${monthMap[mName]}-${d}`;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Deteksi Intent Pasien (HADIR vs RESCHEDULE vs GENERAL)
+ */
+function detectPatientIntent(rawText) {
+  const text = rawText.trim().toLowerCase();
+
+  // Pola Konfirmasi Hadir
+  const hadirPattern = /\b(hadir|hadirr|hadirrr|bisa hadir|siap hadir|pasti hadir|datang|bisa datang|siap datang|konfirmasi hadir|insya allah hadir|hadir dok|hadir kak)\b/i;
+  if (hadirPattern.test(text) && !text.includes('tidak') && !text.includes('batal') && !text.includes('reschedule') && !text.includes('ganti')) {
+    return { type: 'HADIR' };
+  }
+
+  // Pola Reschedule (mendukung typo: reschedole, rescedule, riscedul, jadwal ulang, undur, ganti jadwal)
+  const reschedPattern = /\b(reschedule|reschedole|rescedule|riscedul|rescedul|jadwal ulang|ganti jadwal|ubah jadwal|undur|mundur|tunda)\b/i;
+  if (reschedPattern.test(text)) {
+    const extractedDate = extractDateFromText(text);
+    return {
+      type: 'RESCHEDULE',
+      date: extractedDate
+    };
+  }
+
+  return { type: 'GENERAL' };
+}
+
 // =========================================================================
 // CLIENT REST API SIMGOS RSKDGM (GOOGLE APPS SCRIPT)
 // =========================================================================
@@ -131,7 +210,6 @@ async function callSimgosApi(action, params = {}) {
   }
 }
 
-// Mengambil Custom System Prompt Aktif dari Sheet CUSTOM_PROMPT
 async function fetchActiveCustomPrompt() {
   const now = Date.now();
   if (cachedCustomPrompt.prompt && (now - cachedCustomPrompt.timestamp < PROMPT_CACHE_TTL_MS)) {
@@ -155,31 +233,50 @@ PENTING: Jika pasien meminta reschedule tanggal kontrol dan menentukan tanggalny
 }
 
 // =========================================================================
-// REST API GOOGLE AI STUDIO ENGINE
+// REST API GOOGLE AI STUDIO ENGINE (SUPER UPGRADE: FIXED AUTH & FAILOVER)
 // =========================================================================
 async function askGeminiClinic(conversationHistory, patientContext = null) {
   const apiKey = GEMINI_API_KEY.trim();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  // 1. Sanitasi History: Pastikan giliran berselang-seling dan diawali 'user'
+  const sanitizedHistory = [];
+  for (const turn of conversationHistory) {
+    if (!turn.parts || !turn.parts[0] || !turn.parts[0].text) continue;
+    const role = turn.role === 'model' ? 'model' : 'user';
+    const text = String(turn.parts[0].text).trim();
+    if (!text) continue;
+
+    if (sanitizedHistory.length > 0 && sanitizedHistory[sanitizedHistory.length - 1].role === role) {
+      // Gabungkan turn berturut-turut yang memiliki role sama
+      sanitizedHistory[sanitizedHistory.length - 1].parts[0].text += `\n${text}`;
+    } else {
+      sanitizedHistory.push({ role, parts: [{ text }] });
+    }
+  }
+
+  // Wajib diawali oleh user
+  while (sanitizedHistory.length > 0 && sanitizedHistory[0].role !== 'user') {
+    sanitizedHistory.shift();
+  }
+
+  if (sanitizedHistory.length === 0) {
+    throw new Error('History pesan tidak valid.');
+  }
 
   let systemPromptText = await fetchActiveCustomPrompt();
 
   if (patientContext) {
     systemPromptText += `\n\nKONTEKS PASIEN YANG SEDANG CHAT SAAT INI:
-- Nama Pasien: ${patientContext.namaPasien}
-- No. Rekam Medis: ${patientContext.noRm}
-- Jadwal Kontrol Terdaftar: ${patientContext.tglKontrol}
+- Nama Pasien: ${patientContext.namaPasien || "-"}
+- No. Rekam Medis: ${patientContext.noRm || "-"}
+- Jadwal Kontrol Terdaftar: ${patientContext.tglKontrol || "-"}
 - Dokter DPJP: drg. Hj. Kurniawaty, Sp.KG & drg. M. Aksa Arsyad
 - Poli: Poli Konservasi dan Endodonsi
 Gunakan informasi di atas jika relevan untuk menyapa atau mengonfirmasi jadwal mereka secara akrab.`;
   }
 
-  const headers = { 'Content-Type': 'application/json' };
-  if (apiKey.startsWith('AQ')) {
-    headers['Authorization'] = `Bearer ${apiKey}`;
-  }
-
   const requestBody = {
-    contents: conversationHistory,
+    contents: sanitizedHistory,
     systemInstruction: {
       parts: [{ text: systemPromptText }]
     },
@@ -190,22 +287,51 @@ Gunakan informasi di atas jika relevan untuk menyapa atau mengonfirmasi jadwal m
     }
   };
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: headers,
-    body: JSON.stringify(requestBody)
-  });
+  // Daftar model failover bertingkat
+  const modelList = [
+    GEMINI_MODEL,
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash"
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Google AI Studio Error ${res.status}: ${errText}`);
+  let lastError = null;
+
+  for (const model of modelList) {
+    try {
+      // PERBAIKAN FATAL: Gunakan x-goog-api-key dan URL ?key, HAPUS Authorization: Bearer
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const headers = { 
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey
+      };
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.warn(`[Gemini Try ${model} ${res.status}]`, errText);
+        lastError = new Error(`Google AI Studio (${model}) ${res.status}: ${errText}`);
+        if (res.status === 404 || res.status === 400) continue;
+        break;
+      }
+
+      const data = await res.json();
+      const rawReply = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (rawReply && rawReply.trim()) {
+        return rawReply.trim();
+      }
+    } catch (modelErr) {
+      console.warn(`[Gemini Error on ${model}]`, modelErr.message);
+      lastError = modelErr;
+    }
   }
 
-  const data = await res.json();
-  const rawReply = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!rawReply) throw new Error('Respon teks Google AI Studio kosong');
-
-  return rawReply;
+  throw lastError || new Error('Gagal memproses respon dari seluruh model Gemini.');
 }
 
 // =========================================================================
@@ -226,7 +352,6 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
   const senderPure = replyTargetJid ? extractPureNumberE164(replyTargetJid) : "";
   const apiParams = { tgl: tglParam };
 
-  // Jika opsi konversi nomor sender aktif, teruskan parameter ke Google Apps Script
   if (overrideToSender && senderPure) {
     apiParams.override_wa = senderPure;
     resultLog.isSenderConverted = true;
@@ -244,9 +369,8 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
 
   if (listPasien.length === 0) return resultLog;
 
-  // 1. Kirim pesan WA ke masing-masing pasien (atau ke nomor sender jika dikonversi)
+  // 1. Kirim pesan pengingat ke pasien
   for (const px of listPasien) {
-    // Logika Konversi Otomatis: jika overrideToSender aktif, target kirim langsung ke nomor WhatsApp sender
     const targetJid = (overrideToSender && replyTargetJid) ? sanitizeNumber(replyTargetJid) : sanitizeNumber(px.noHp);
 
     try {
@@ -291,7 +415,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
       });
 
       if (overrideToSender) {
-        rekapDokter += `\n_Mode Simulasi Aktif: Seluruh pesan pasien dialihkan ke pengirim (${senderPure})._ 🙏`;
+        rekapDokter += `\n_Mode Simulasi: Seluruh pesan pasien dialihkan ke pengirim (${senderPure})._ 🙏`;
       } else {
         rekapDokter += `\n_Pesan otomatis telah terkirim ke kontak WhatsApp pasien di atas._ 🙏`;
       }
@@ -328,7 +452,6 @@ export default function setupMessageHandler(sock) {
   currentSock = sock; 
 
   if (!isIntervalStarted) {
-    // Blast Otomatis Berdasarkan Jam & Menit yang Dikonfigurasikan (Default: 08:30 WITA)
     setInterval(async () => {
       if (!currentSock) return;
 
@@ -347,7 +470,7 @@ export default function setupMessageHandler(sock) {
         botSettings.lastAutoFollowupDate !== tanggalHariIniWita
       ) {
         try {
-          console.log(`[Auto SIMGOS] Menjalankan follow-up kontrol terjadwal jam ${targetJam}:${targetMenit} WITA (${tanggalHariIniWita})...`);
+          console.log(`[Auto SIMGOS] Follow-up kontrol terjadwal jam ${targetJam}:${targetMenit} WITA (${tanggalHariIniWita})...`);
           const blastRes = await executeFollowupBlast(currentSock, ownerNumber, "auto", false);
           botSettings.lastAutoFollowupDate = tanggalHariIniWita;
           saveSettings();
@@ -378,7 +501,7 @@ export default function setupMessageHandler(sock) {
       const remoteJid = msg.key.remoteJid;
       if (!remoteJid) return;
 
-      // 1. FILTER MUTLAK: TOLAK PESAN GRUP (@g.us) DAN BROADCAST
+      // 1. FILTER MUTLAK: TOLAK PESAN GRUP & BROADCAST
       if (remoteJid.includes('@g.us') || remoteJid.includes('@broadcast') || remoteJid === 'status@broadcast') {
         return;
       }
@@ -396,7 +519,7 @@ export default function setupMessageHandler(sock) {
       console.log(`[Chat 1-on-1] Dari: ${senderPhonePure} (${pushName}) | Pesan: "${text.trim()}"`);
 
       // =====================================================================
-      // 2. JIKA DIAWALI PREFIX (!): JALANKAN COMMAND KHUSUS ADMIN
+      // 2. COMMAND ADMIN (PREFIX '!')
       // =====================================================================
       if (text.startsWith('!')) {
         const args = text.slice(1).trim().split(/ +/);
@@ -416,9 +539,9 @@ export default function setupMessageHandler(sock) {
                              `* !settingssimgos* - Cek konfigurasi H- & nomor dokter\n` +
                              `* !templatesimgos* - Cek template format pesan WhatsApp\n` +
                              `* !autofollowup on/off* - Pengaturan status blast otomatis harian\n` +
-                             `* !setjamfollowup* <HH:mm> - Ubah jam blast otomatis (contoh: !setjamfollowup 08:30)\n\n` +
+                             `* !setjamfollowup* <HH:mm> - Ubah jam blast otomatis\n\n` +
 
-                             `*🧠 GOOGLE AI STUDIO (CUSTOM PROMPT):*\n` +
+                             `*🧠 GOOGLE AI STUDIO:*\n` +
                              `* !getprompt* - Cek System Instruction AI aktif dari Sheet\n` +
                              `* !clearpromptcache* - Refresh cache prompt terbaru dari Sheet\n\n` +
 
@@ -426,17 +549,15 @@ export default function setupMessageHandler(sock) {
                              `* !ping* - Cek kecepatan respon bot\n` +
                              `* !runtime* - Cek status server & waktu aktif bot\n` +
                              `* !sticker* / *!s* - Konversi gambar ke stiker\n\n` +
-                             `_💬 Chat biasa tanpa tanda (!) akan otomatis dijawab ramah & cerdas oleh AI Gemini._`;
+                             `_💬 Chat biasa tanpa tanda (!) akan otomatis ditangani secara cerdas & ramah._`;
             await sock.sendMessage(remoteJid, { text: menuText }, { quoted: msg });
             return;
 
-          // COMMAND: FOLLOWUPNOW (MENDUKUNG AUTO-CONVERT NOMOR SENDER)
           case 'followupnow':
           case 'follownow':
             let tglTarget = "auto";
             let toSender = false;
 
-            // Parsing parameter fleksibel: !followupnow me, !followupnow 2026-09-14 me, dll.
             for (const arg of args) {
               const lowerArg = arg.toLowerCase();
               if (lowerArg === 'me' || lowerArg === 'test' || lowerArg === 'myself') {
@@ -447,7 +568,7 @@ export default function setupMessageHandler(sock) {
             }
 
             const infoNotice = toSender 
-              ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data kontrol... ⚠️ *Fitur Aktif:* Seluruh No WA pasien otomatis dikonversikan ke nomor Anda (*${senderPhonePure}*).`
+              ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data... ⚠️ *Fitur Aktif:* Nomor penerima otomatis dialihkan ke nomor WhatsApp Anda (*${senderPhonePure}*).`
               : `⚡ *[FOLLOWUP NOW]* Memulai penarikan data dan pengiriman instan ke nomor WhatsApp pasien terdaftar...`;
 
             await sock.sendMessage(remoteJid, { text: infoNotice }, { quoted: msg });
@@ -529,7 +650,7 @@ export default function setupMessageHandler(sock) {
                              `   🏥 Status WA: ${px.statusWa} | Dokter: ${px.statusDokter}\n\n`;
               });
 
-              textHasil += `👉 _Ketik *!followupnow me* untuk mencoba kirim ke WA Anda sendiri, atau *!followupnow* untuk kirim ke pasien._`;
+              textHasil += `👉 _Ketik *!followupnow me* untuk kirim ke nomor Anda, atau *!followupnow* untuk kirim ke pasien._`;
               await sock.sendMessage(remoteJid, { text: textHasil }, { quoted: msg });
             } catch (e) {
               await sock.sendMessage(remoteJid, { text: `❌ *Gagal mengambil data:* ${e.message}` }, { quoted: msg });
@@ -563,7 +684,7 @@ export default function setupMessageHandler(sock) {
                                `👨‍⚕️ *Laporan DPJP Terkirim:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
 
               if (blastResult.isSenderConverted) {
-                rekapAkhir += `🎯 *Catatan:* Seluruh pesan pasien dialihkan ke nomor WhatsApp pengirim (${blastResult.convertedToPhone}).\n`;
+                rekapAkhir += `🎯 *Catatan:* Pesan pasien dialihkan ke nomor WhatsApp pengirim (${blastResult.convertedToPhone}).\n`;
               }
 
               rekapAkhir += `\n_Seluruh status di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
@@ -645,7 +766,7 @@ export default function setupMessageHandler(sock) {
                                  `📥 Di-scrape Hari Ini: *${s.scraped_hari_ini} Pasien*\n\n` +
                                  `*Status WA Pasien:*\n` +
                                  `⏳ Pending: ${s.wa_pasien_pending}\n` +
-                                 `✅ Terkirim: ${s.wa_pasien_terkirim}\n\n` +
+                                 `✅ Terkirim/Hadir: ${s.wa_pasien_terkirim}\n\n` +
                                  `*Status Konfirmasi Dokter:*\n` +
                                  `⏳ Pending: ${s.notif_dokter_pending}\n` +
                                  `✅ Terkirim: ${s.notif_dokter_terkirim}\n\n` +
@@ -728,22 +849,122 @@ export default function setupMessageHandler(sock) {
       }
 
       // =====================================================================
-      // 3. CHAT NATURAL HUMANOID (GEMINI + RESCHEDULE DETECTOR)
+      // 3. HYBRID INTELLIGENT CHAT ENGINE (FAST-PATH INTENT + GEMINI AI)
       // =====================================================================
       await sock.sendPresenceUpdate('composing', remoteJid);
 
-      // Cek apakah nomor pengirim terdaftar sebagai pasien di spreadsheet
+      // A. Identifikasi Pasien dari Spreadsheet Berdasarkan Nomor WA Pengirim
       let patientData = null;
       try {
         const searchPx = await callSimgosApi("search_patient", { query: senderPhonePure });
-        if (searchPx.status === "success" && searchPx.data && searchPx.data.length > 0) {
+        if (searchPx.status === "success" && Array.isArray(searchPx.data) && searchPx.data.length > 0) {
           patientData = searchPx.data[0];
         }
       } catch (errSearch) {
         console.warn("[Search Patient Warning]", errSearch.message);
       }
 
-      // Manajemen Sesi Percakapan Multi-Turn
+      // B. Klasifikasi Niat Pasien (Intent Detection)
+      const intent = detectPatientIntent(text);
+
+      // --- JALUR CEPAT 1: PASIEN KONFIRMASI "HADIR" ---
+      if (intent.type === 'HADIR') {
+        const namaPx = patientData ? patientData.namaPasien : pushName;
+        const noRmPx = patientData ? patientData.noRm : "-";
+        const tglKontrolPx = patientData ? patientData.tglKontrol : "jadwal Anda";
+
+        if (patientData) {
+          // Update status di database spreadsheet menjadi Hadir
+          await callSimgosApi("update_status", { 
+            noRm: patientData.noRm, 
+            type: "pasien", 
+            status: "Hadir (Terkonfirmasi)" 
+          }).catch(() => {});
+
+          // Notifikasi langsung ke kedua Dokter DPJP
+          const notifDokterHadir = `✅ *KONFIRMASI KEHADIRAN PASIEN (HADIR)*\n\n` +
+                                   `Pasien berikut telah mengonfirmasi *HADIR* untuk kontrol gigi:\n` +
+                                   `👤 *Nama Pasien:* ${patientData.namaPasien}\n` +
+                                   `🔖 *No. RM:* ${patientData.noRm}\n` +
+                                   `📅 *Tgl Kontrol:* ${patientData.tglKontrol}\n` +
+                                   `📱 *WhatsApp:* ${patientData.noHp}\n` +
+                                   `🏥 *Unit:* Poli Konservasi dan Endodonsi\n\n` +
+                                   `_Status database SIMGOS telah diperbarui ke Terkonfirmasi Hadir._ 📊`;
+
+          for (const docJid of DOKTER_JID_LIST) {
+            await sock.sendMessage(docJid, { text: notifDokterHadir }).catch(() => {});
+          }
+        }
+
+        const replyHadir = `Halo, terima kasih banyak atas konfirmasinya Bapak/Ibu *${namaPx}* (No. RM: ${noRmPx}). 🙏\n\n` +
+                           `Kehadiran Anda untuk jadwal kontrol perawatan gigi pada tanggal *${tglKontrolPx}* bersama tim dokter penanggung jawab kami (*drg. Hj. Kurniawaty, Sp.KG* & *drg. M. Aksa Arsyad*) telah berhasil kami catat di sistem.\n\n` +
+                           `📌 *Pengingat Kontrol:*\n` +
+                           `• Harap hadir 15 menit sebelum poli dibuka.\n` +
+                           `• Mohon membawa Kartu BPJS / KTP serta kartu kontrol sebelumnya.\n` +
+                           `• Lakukan konfirmasi di loket pendaftaran Poli Konservasi.\n\n` +
+                           `Sampai jumpa di poli ya. Semoga proses perawatan giginya berjalan lancar dan lekas sehat selalu! 🦷✨`;
+
+        await sock.sendMessage(remoteJid, { text: replyHadir });
+        await sock.sendPresenceUpdate('paused', remoteJid);
+        return;
+      }
+
+      // --- JALUR CEPAT 2: PASIEN INGIN "RESCHEDULE" ---
+      if (intent.type === 'RESCHEDULE') {
+        const namaPx = patientData ? patientData.namaPasien : pushName;
+        const noRmPx = patientData ? patientData.noRm : "-";
+
+        // Kasus 2A: Pasien langsung menyertakan tanggal baru
+        if (intent.date && patientData) {
+          const newDate = intent.date;
+          await callSimgosApi("reschedule_patient", {
+            noRm: patientData.noRm,
+            newDate: newDate
+          }).catch(() => {});
+
+          const notifResched = `🔄 *NOTIFIKASI RESCHEDULE PASIEN (MANDIRI WA)*\n\n` +
+                               `Pasien telah mengajukan jadwal kontrol ulang:\n` +
+                               `👤 *Nama:* ${patientData.namaPasien}\n` +
+                               `🔖 *No. RM:* ${patientData.noRm}\n` +
+                               `📅 *Jadwal Lama:* ${patientData.tglKontrol}\n` +
+                               `✨ *Jadwal Baru:* ${newDate}\n` +
+                               `📱 *WhatsApp:* ${patientData.noHp}\n` +
+                               `💬 *Pesan Pasien:* "${text.trim()}"\n\n` +
+                               `_Status database telah direset ke Pending untuk tanggal baru._ 📊`;
+
+          for (const docJid of DOKTER_JID_LIST) {
+            await sock.sendMessage(docJid, { text: notifResched }).catch(() => {});
+          }
+
+          const replyResched = `Baik Bapak/Ibu *${namaPx}* (No. RM: ${noRmPx}), terima kasih atas konfirmasinya.\n\n` +
+                               `Jadwal kontrol perawatan gigi Anda telah berhasil kami perbarui ke tanggal: *${newDate}*.\n\n` +
+                               `Informasi perubahan ini sudah diteruskan ke dokter penanggung jawab (*drg. Hj. Kurniawaty, Sp.KG* & *drg. M. Aksa Arsyad*). Sistem kami akan mengingatkan Anda kembali saat mendekati jadwal tersebut.\n\n` +
+                               `Salam sehat selalu dari Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. 🙏`;
+
+          await sock.sendMessage(remoteJid, { text: replyResched });
+          await sock.sendPresenceUpdate('paused', remoteJid);
+          return;
+        }
+
+        // Kasus 2B: Pasien mengetik kata "RESCHEDULE" / "RESCHEDOLE" tanpa tanggal
+        if (patientData) {
+          await callSimgosApi("update_status", { 
+            noRm: patientData.noRm, 
+            type: "pasien", 
+            status: "Reschedule Diajukan" 
+          }).catch(() => {});
+        }
+
+        const replyAskDate = `Baik Bapak/Ibu *${namaPx}*, kami siap membantu proses penjadwalan ulang (*reschedule*) kontrol perawatan gigi Anda.\n\n` +
+                             `Kira-kira Anda ingin mengajukan kontrol di hari apa atau tanggal berapa? (Contoh format: *2026-09-28* atau *25 September*).\n\n` +
+                             `Silakan balas pesan ini dengan tanggal yang Anda inginkan agar langsung kami sesuaikan di sistem SIMGOS ya. 🙏`;
+
+        await sock.sendMessage(remoteJid, { text: replyAskDate });
+        await sock.sendPresenceUpdate('paused', remoteJid);
+        return;
+      }
+
+      // --- JALUR 3: PERCAKAPAN NATURAL & KONSULTASI GIGI DENGAN GEMINI AI ---
       let userSession = conversationSessions.get(senderPhonePure);
       if (!userSession) {
         userSession = { history: [], lastSeen: Date.now() };
@@ -768,20 +989,18 @@ export default function setupMessageHandler(sock) {
       try {
         rawAiResponse = await askGeminiClinic(userSession.history, patientData);
       } catch (aiErr) {
-        console.error("[Gemini AI Error]", aiErr);
-        rawAiResponse = "Halo Bapak/Ibu, terima kasih telah menghubungi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, tim staf poli gigi kami akan segera merespons pesan ini ya. 🙏";
+        console.error("[Gemini AI Error]", aiErr.message);
+        rawAiResponse = `Halo Bapak/Ibu ${patientData ? patientData.namaPasien : ""}, terima kasih telah menghubungi Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, staf poli kami siap membantu informasi jadwal dan perawatan gigi Anda. Ada hal yang bisa kami bantu? 🙏`;
       } finally {
         clearInterval(typingTimer);
       }
 
-      // Deteksi Otomatis Tag Reschedule dari AI
+      // Deteksi Tag Reschedule dari AI
       const rescheduleMatch = rawAiResponse.match(/\[ACTION:RESCHEDULE:(\d{4}-\d{2}-\d{2})\]/i);
       let finalClientReply = rawAiResponse.replace(/\[ACTION:RESCHEDULE:\d{4}-\d{2}-\d{2}\]/gi, '').trim();
 
       if (rescheduleMatch && patientData) {
         const newRescheduleDate = rescheduleMatch[1];
-        console.log(`[Auto-Reschedule Detected] Pasien ${patientData.namaPasien} (RM: ${patientData.noRm}) -> Tanggal Baru: ${newRescheduleDate}`);
-
         try {
           await callSimgosApi("reschedule_patient", {
             noRm: patientData.noRm,
