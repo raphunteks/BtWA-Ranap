@@ -31,7 +31,7 @@ const GROQ_ALLOWED_MODELS = [
 ];
 
 // =========================================================================
-// PARSER KHUSUS: MEMBEDAKAN ANTARA NOMOR LID DAN JID TELEPON
+// PARSER KHUSUS: MEMBEDAKAN ANTARA NOMOR LID DAN JID TELEPON SECARA PRESISI
 // =========================================================================
 function parseSenderInfo(rawJid) {
   if (!rawJid) return { rawJid: '', id: '', isLid: false, targetJid: '' };
@@ -45,7 +45,6 @@ function parseSenderInfo(rawJid) {
 
   let targetJid = jidStr;
   if (isLid) {
-    // Alamat pengiriman balik resmi untuk pengguna WhatsApp LID
     targetJid = `${cleanId}@lid`;
   } else if (!isGroup && !isBroadcast) {
     let phone = cleanId;
@@ -57,9 +56,9 @@ function parseSenderInfo(rawJid) {
 
   return {
     rawJid: jidStr,
-    id: cleanId,         // Nomor LID murni (e.g. 62247922893566044) atau No Telepon
+    id: cleanId,         // Nomor LID murni (misal: 62247922893566044) atau nomor telepon
     isLid: isLid,        // True jika pengirim berstatus LID
-    targetJid: targetJid // JID valid untuk dikirimi pesan kembali via Baileys
+    targetJid: targetJid // JID pengiriman balik yang valid
   };
 }
 
@@ -468,7 +467,7 @@ Gunakan informasi di atas jika relevan untuk menyapa atau mengonfirmasi jadwal m
 }
 
 // =========================================================================
-// LOGIKA FOLLOW-UP DENGAN PENYIMPANAN NOMOR LID KE KOLOM 13 NO SENDER
+// LOGIKA FOLLOW-UP DENGAN DETEKSI OTOMATIS NOMOR LID KE KOLOM 13 NO SENDER
 // =========================================================================
 async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "auto", overrideToSender = false) {
   const resultLog = {
@@ -504,9 +503,30 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
   if (listPasien.length === 0) return resultLog;
 
   for (const px of listPasien) {
-    // Tentukan target JID pengiriman yang benar: jika LID, kirim ke @lid
+    const cleanPhone = String(px.noHp || '').replace(/\D/g, '');
+    let resolvedLid = "";
+
+    // 1. Jika mode override aktif, gunakan nomor LID pemanggil perintah
+    if (overrideToSender && senderInfo.id) {
+      resolvedLid = senderInfo.id;
+    } else {
+      // 2. Jika pengiriman normal, minta nomor LID WhatsApp pasien via onWhatsApp
+      try {
+        const waCheck = await sock.onWhatsApp(cleanPhone);
+        if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
+          resolvedLid = String(waCheck[0].lid).replace(/\D/g, '');
+        }
+      } catch (errCheck) {
+        console.warn(`[Gagal Cek LID WhatsApp ${cleanPhone}]:`, errCheck.message);
+      }
+
+      // 3. Jika WhatsApp tidak memberikan LID, gunakan nomor HP murninya
+      if (!resolvedLid) {
+        resolvedLid = cleanPhone;
+      }
+    }
+
     const targetJid = (overrideToSender && replyTargetJid) ? senderInfo.targetJid : sanitizeNumber(px.noHp);
-    const activeLidNumber = (overrideToSender && senderInfo.id) ? senderInfo.id : String(px.noSender || px.noHp || "").replace(/\D/g, "");
 
     try {
       let pesanKirim = px.pesan_wa_pasien;
@@ -524,11 +544,18 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
         row: px.rowNumber, 
         type: "pasien", 
         status: "Terkirim",
-        no_lid: activeLidNumber
+        no_lid: resolvedLid
       });
 
-      // Simpan asosiasi sesi lokal berdasarkan ID LID
-      conversationSessions.set(activeLidNumber, {
+      console.log(`[Blast Terkirim] ${px.namaPasien} -> JID: ${targetJid} | Terdaftar di Kolom 13 LID: ${resolvedLid}`);
+
+      // Simpan asosiasi sesi lokal berdasarkan ID LID & nomor HP pasien
+      conversationSessions.set(resolvedLid, {
+        history: [],
+        lastSeen: Date.now(),
+        patientData: px
+      });
+      conversationSessions.set(cleanPhone, {
         history: [],
         lastSeen: Date.now(),
         patientData: px
@@ -697,7 +724,6 @@ export default function setupMessageHandler(sock) {
             await sock.sendMessage(senderInfo.targetJid, { text: menuText }, { quoted: msg });
             return;
 
-          // FITUR BARU: BINDING LID LANGSUNG KE REKAM MEDIS TANPA PERLU BLAST
           case 'bindpasien':
           case 'linkpasien':
             if (args.length === 0) {
@@ -709,7 +735,7 @@ export default function setupMessageHandler(sock) {
             const targetRmBind = args[0].trim();
             await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Menautkan identitas ${senderInfo.isLid ? 'LID' : 'WA'} (${senderInfo.id}) ke No. RM ${targetRmBind}..._` }, { quoted: msg });
             try {
-              const bindRes = await callSimgosApi("update_status", {
+              await callSimgosApi("update_status", {
                 noRm: targetRmBind,
                 type: "pasien",
                 status: "Pending",
@@ -1153,7 +1179,6 @@ export default function setupMessageHandler(sock) {
       // JALUR 2: PASIEN INGIN "RESCHEDULE" / MENGIRIM TANGGAL BARU
       // =====================================================================
       if (intent.type === 'RESCHEDULE') {
-        // Kasus 2A: Pasien langsung menyertakan tanggal baru
         if (intent.date) {
           const newDate = intent.date;
           if (patientData && patientData.noRm) {
@@ -1197,7 +1222,7 @@ export default function setupMessageHandler(sock) {
           return;
         }
 
-        // Kasus 2B: Pasien meminta reschedule tanpa menyebutkan tanggal
+        // Jika minta reschedule tanpa menyebut tanggal
         if (patientData && patientData.noRm) {
           try {
             await callSimgosApi("update_status", { 
