@@ -7,20 +7,20 @@ import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import handleStickerCommand from './commands/sticker.js';
 
 // =========================================================================
-// KONFIGURASI SISTEM, GOOGLE AI STUDIO (GEMINI 3.5), GROQ AI & SIMGOS RSKDGM
+// KONFIGURASI SISTEM & REST API GOOGLE APPS SCRIPT (SIMGOS RSKDGM)
 // =========================================================================
 const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 
 // URL REST API Google Apps Script (GAS) SIMGOS RSKDGM
 const GAS_URL_SIMGOS = process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbzCOj9YFKEqXRfMEKBugnEhqzuC7MoJfIyc5PihST3bxmJaseaKKX9YifotK2qpT38/exec";
 
-// 1. GOOGLE AI STUDIO (GEMINI 3.5 FLASH DENGAN API KEY BARU)
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AQ.Ab8RN6Lt896DZLI5xK3NKEpM10FmoJt5ihJf2w4gYR845CTp_A";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+// Kontak WhatsApp Dokter DPJP RSKDGM
+const DOKTER_JID_LIST = [
+  "6282291675363@s.whatsapp.net", // drg. Hj. Kurniawaty, Sp.KG
+  "6285256739684@s.whatsapp.net"  // drg. M. Aksa Arsyad
+];
 
-// 2. GROQ AI FALLBACK ENGINE (PERSIS DENGAN MODEL DIIZINKAN ORGANISASI ANDA)
-const GROQ_API_KEY = process.env.GROQ_API_KEY || "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";
-const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+// Model fallback Groq AI yang diizinkan (Allowed Models Organisasi)
 const GROQ_ALLOWED_MODELS = [
   "openai/gpt-oss-120b",
   "qwen/qwen3.8-27b",
@@ -30,17 +30,22 @@ const GROQ_ALLOWED_MODELS = [
   "groq/compound-mini"
 ];
 
-// Kontak WhatsApp Dokter DPJP RSKDGM
-const DOKTER_JID_LIST = [
-  "6282291675363@s.whatsapp.net", // drg. Hj. Kurniawaty, Sp.KG
-  "6285256739684@s.whatsapp.net"  // drg. M. Aksa Arsyad
-];
+// =========================================================================
+// CACHE CERDAS: PROMPT & KREDENSIAL AI LANGSUNG DARI SHEET "SETTING"
+// =========================================================================
+let cachedSystemConfig = {
+  prompt: '',
+  geminiApiKey: '',
+  geminiModel: 'gemini-3.5-flash',
+  groqApiKey: '',
+  groqModel: 'openai/gpt-oss-120b',
+  timestamp: 0
+};
+const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000; // Cache lokal 5 menit
 
-// Manajemen Sesi Percakapan & Cache System Prompt
+// Manajemen Sesi Percakapan Multi-Turn
 const conversationSessions = new Map();
-const SESSION_TTL_MS = 30 * 60 * 1000; // Kadaluarsa sesi percakapan 30 menit
-let cachedCustomPrompt = { prompt: '', timestamp: 0 };
-const PROMPT_CACHE_TTL_MS = 5 * 60 * 1000; // Cache prompt lokal 5 menit
+const SESSION_TTL_MS = 30 * 60 * 1000; // Sesi percakapan 30 menit
 
 const sessionPath = './session';
 const settingsFile = `${sessionPath}/settings.json`; 
@@ -194,7 +199,7 @@ function detectPatientIntent(rawText) {
     return { type: 'HADIR' };
   }
 
-  // Pola Reschedule (mendukung kata kunci reschedule atau typo: reschedole, rescedule)
+  // Pola Reschedule
   const reschedPattern = /\b(reschedule|reschedole|rescedule|riscedul|rescedul|jadwal ulang|ganti jadwal|ubah jadwal|undur|mundur|tunda)\b/i;
   const extractedDate = extractDateFromText(text);
 
@@ -205,7 +210,7 @@ function detectPatientIntent(rawText) {
     };
   }
 
-  // DETEKSI CERDAS: Jika pasien HANYA mengirimkan tanggal (seperti pada log: "2026-09-15"), anggap sebagai tanggal Reschedule!
+  // DETEKSI CERDAS: Jika pasien HANYA mengirimkan teks tanggal (seperti "2026-09-15"), anggap sebagai Reschedule
   if (extractedDate && text.length <= 25) {
     return {
       type: 'RESCHEDULE',
@@ -231,35 +236,47 @@ async function callSimgosApi(action, params = {}) {
   }
 }
 
-async function fetchActiveCustomPrompt() {
+/**
+ * Ambil Konfigurasi AI & Kredensial Langsung dari Sheet SETTING & CUSTOM_PROMPT
+ */
+async function fetchSystemAIConfig() {
   const now = Date.now();
-  if (cachedCustomPrompt.prompt && (now - cachedCustomPrompt.timestamp < PROMPT_CACHE_TTL_MS)) {
-    return cachedCustomPrompt.prompt;
+  if (cachedSystemConfig.prompt && cachedSystemConfig.geminiApiKey && (now - cachedSystemConfig.timestamp < CONFIG_CACHE_TTL_MS)) {
+    return cachedSystemConfig;
   }
 
   try {
     const res = await callSimgosApi("get_active_prompt");
-    if (res && res.status === "success" && res.activePrompt) {
-      cachedCustomPrompt = { prompt: res.activePrompt, timestamp: now };
-      return res.activePrompt;
+    if (res && res.status === "success") {
+      cachedSystemConfig = {
+        prompt: res.activePrompt || cachedSystemConfig.prompt,
+        geminiApiKey: res.aiConfig?.geminiApiKey || cachedSystemConfig.geminiApiKey,
+        geminiModel: res.aiConfig?.geminiModel || "gemini-3.5-flash",
+        groqApiKey: res.aiConfig?.groqApiKey || cachedSystemConfig.groqApiKey,
+        groqModel: res.aiConfig?.groqModel || "openai/gpt-oss-120b",
+        timestamp: now
+      };
+      return cachedSystemConfig;
     }
   } catch (e) {
-    console.warn("[Custom Prompt Warning] Menggunakan prompt default cadangan.");
+    console.warn("[Config AI Warning] Menggunakan cache konfigurasi lokal:", e.message);
   }
 
-  return `Kamu adalah Asisten Resepsionis Medis Resmi RSKD Gigi dan Mulut Provinsi Sulawesi Selatan (Poli Konservasi dan Endodonsi).
-Dokter DPJP: drg. Hj. Kurniawaty, Sp.KG & drg. M. Aksa Arsyad.
-Karakter: Sangat ramah, bersahabat, sopan, profesional layaknya manusia sungguhan.
-PENTING: Jika pasien meminta reschedule tanggal kontrol dan menentukan tanggalnya, sisipkan tag [ACTION:RESCHEDULE:YYYY-MM-DD] di akhir pesanmu.`;
+  return cachedSystemConfig;
 }
 
 // =========================================================================
-// ENGINE 1: GOOGLE AI STUDIO (GEMINI 3.5 FLASH - TANPA BEARER HEADER)
+// ENGINE 1: GOOGLE AI STUDIO (GEMINI 3.5 FLASH - API KEY DARI SPREADSHEET)
 // =========================================================================
-async function askGeminiClinic(conversationHistory, systemPromptText) {
-  const apiKey = GEMINI_API_KEY.trim();
+async function askGeminiClinic(conversationHistory, systemPromptText, aiConfig) {
+  const apiKey = aiConfig.geminiApiKey ? aiConfig.geminiApiKey.trim() : "";
+  const model = aiConfig.geminiModel || "gemini-3.5-flash";
 
-  // Sanitasi riwayat percakapan untuk memenuhi syarat Gemini
+  if (!apiKey) {
+    throw new Error("Gemini API Key belum terpasang di Sheet 'SETTING'.");
+  }
+
+  // Sanitasi riwayat pesan
   const sanitizedHistory = [];
   for (const turn of conversationHistory) {
     if (!turn.parts || !turn.parts[0] || !turn.parts[0].text) continue;
@@ -294,10 +311,9 @@ async function askGeminiClinic(conversationHistory, systemPromptText) {
     }
   };
 
-  // Model Gemini 3.5 Flash langsung
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
   
-  // PERBAIKAN FATAL: Dilarang keras mengirimkan Authorization: Bearer pada API Key AQ.
+  // Dilarang keras mengirimkan Authorization Bearer pada API Key
   const headers = {
     'Content-Type': 'application/json'
   };
@@ -310,24 +326,24 @@ async function askGeminiClinic(conversationHistory, systemPromptText) {
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Google AI Studio (${GEMINI_MODEL}) ${res.status}: ${errText}`);
+    throw new Error(`Google AI Studio (${model}) ${res.status}: ${errText}`);
   }
 
   const data = await res.json();
   const rawReply = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!rawReply || !rawReply.trim()) throw new Error('Respon Gemini kosong');
 
-  console.log(`[AI Response] Berhasil menggunakan Google AI Studio (${GEMINI_MODEL})`);
+  console.log(`[AI Response] Berhasil dijawab oleh Google AI Studio (${model}) 🚀`);
   return rawReply.trim();
 }
 
 // =========================================================================
-// ENGINE 2: GROQ AI FALLBACK ENGINE (PERSIS ALLOWED MODELS ORGANISASI)
+// ENGINE 2: GROQ AI FALLBACK ENGINE (API KEY DARI SPREADSHEET)
 // =========================================================================
-async function askGroqClinic(conversationHistory, systemPromptText) {
-  if (!GROQ_API_KEY) throw new Error("Groq API Key tidak terkonfigurasi.");
+async function askGroqClinic(conversationHistory, systemPromptText, aiConfig) {
+  const groqKey = aiConfig.groqApiKey ? aiConfig.groqApiKey.trim() : "";
+  if (!groqKey) throw new Error("Groq API Key belum terpasang di Sheet 'SETTING'.");
 
-  // Format pesan ke struktur OpenAI / Groq
   const groqMessages = [
     { role: "system", content: systemPromptText }
   ];
@@ -340,15 +356,20 @@ async function askGroqClinic(conversationHistory, systemPromptText) {
     }
   }
 
+  // Coba model prioritas dari setting sheet, diikuti allowed models lainnya
+  const modelsToTry = [
+    aiConfig.groqModel || "openai/gpt-oss-120b",
+    ...GROQ_ALLOWED_MODELS
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
+
   let lastGroqError = null;
 
-  // Coba model yang diizinkan organisasi (Gambar 2), mulai dari openai/gpt-oss-120b
-  for (const model of GROQ_ALLOWED_MODELS) {
+  for (const model of modelsToTry) {
     try {
       const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${GROQ_API_KEY.trim()}`,
+          "Authorization": `Bearer ${groqKey}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
@@ -382,10 +403,11 @@ async function askGroqClinic(conversationHistory, systemPromptText) {
 }
 
 // =========================================================================
-// HYBRID UNIFIED AI ROUTER: GEMINI 3.5 FLASH -> GROQ AI FALLBACK
+// HYBRID UNIFIED AI ROUTER: GEMINI 3.5 -> GROQ FALLBACK
 // =========================================================================
 async function askAIClinicUnified(conversationHistory, patientContext = null) {
-  let systemPromptText = await fetchActiveCustomPrompt();
+  const aiConfig = await fetchSystemAIConfig();
+  let systemPromptText = aiConfig.prompt;
 
   if (patientContext) {
     systemPromptText += `\n\nKONTEKS PASIEN YANG SEDANG CHAT SAAT INI:
@@ -397,19 +419,19 @@ async function askAIClinicUnified(conversationHistory, patientContext = null) {
 Gunakan informasi di atas jika relevan untuk menyapa atau mengonfirmasi jadwal mereka secara akrab.`;
   }
 
-  // Langkah 1: Panggil Utama Gemini 3.5 Flash
+  // 1. Panggil Utama: Gemini 3.5 Flash
   try {
-    return await askGeminiClinic(conversationHistory, systemPromptText);
+    return await askGeminiClinic(conversationHistory, systemPromptText, aiConfig);
   } catch (geminiErr) {
-    console.warn(`[Gemini Error -> Beralih ke Groq AI]`, geminiErr.message);
+    console.warn(`[Gemini Error -> Beralih ke Groq AI Fallback]`, geminiErr.message);
   }
 
-  // Langkah 2: Jika Gemini gagal, otomatis Fallback ke Groq AI
+  // 2. Fallback Otomatis: Groq AI
   try {
-    return await askGroqClinic(conversationHistory, systemPromptText);
+    return await askGroqClinic(conversationHistory, systemPromptText, aiConfig);
   } catch (groqErr) {
     console.error(`[Groq Fallback Error]`, groqErr.message);
-    throw new Error(`Kedua Engine AI (Gemini 3.5 & Groq) gagal merespons.`);
+    throw new Error(`Kedua Engine AI (Gemini & Groq) gagal merespons.`);
   }
 }
 
@@ -607,7 +629,7 @@ export default function setupMessageHandler(sock) {
         switch (command) {
           case 'menu':
           case 'help':
-            const menuText = `*🤖 BOT KONTROL RSKDGM (GEMINI 3.5 + GROQ AI) 🤖*\n\n` +
+            const menuText = `*🤖 BOT KONTROL RSKDGM (AI DIRECT SPREADSHEET) 🤖*\n\n` +
                              `*🦷 SIMGOS FOLLOW-UP KONTROL:*\n` +
                              `* !followupnow* [tgl/auto] [me] - 🚀 Kirim sekarang instan ('me' = konversi ke WA Anda)\n` +
                              `* !followup* [tgl/auto] - Cek daftar antrean kontrol H-\n` +
@@ -620,15 +642,15 @@ export default function setupMessageHandler(sock) {
                              `* !autofollowup on/off* - Pengaturan status blast harian otomatis\n` +
                              `* !setjamfollowup* <HH:mm> - Ubah jam blast harian\n\n` +
 
-                             `*🧠 AI STUDIO & GROQ DUAL-ENGINE:*\n` +
-                             `* !getprompt* - Cek System Prompt AI aktif & model\n` +
-                             `* !clearpromptcache* - Refresh cache prompt dari Spreadsheet\n\n` +
+                             `*🧠 STATUS KREDENSIAL AI (DARI SHEET 'SETTING'):*\n` +
+                             `* !getprompt* - Cek System Prompt AI aktif & status API Key\n` +
+                             `* !clearpromptcache* - Refresh cache prompt & API Key terbaru dari Sheet\n\n` +
 
                              `*⚙️ UTILITAS:* \n` +
                              `* !ping* - Cek kecepatan respon bot\n` +
                              `* !runtime* - Cek waktu aktif bot & server\n` +
                              `* !sticker* / *!s* - Konversi gambar ke stiker\n\n` +
-                             `_💬 Chat biasa tanpa tanda (!) dijawab natural & cerdas oleh Gemini 3.5 Flash / Groq AI._`;
+                             `_💬 Chat biasa tanpa tanda (!) dijawab otomatis oleh Gemini 3.5 Flash / Groq AI._`;
             await sock.sendMessage(remoteJid, { text: menuText }, { quoted: msg });
             return;
 
@@ -895,15 +917,29 @@ export default function setupMessageHandler(sock) {
             return;
 
           case 'getprompt':
-            const activeP = await fetchActiveCustomPrompt();
+            const activeCfg = await fetchSystemAIConfig();
+            const geminiMasked = activeCfg.geminiApiKey ? `${activeCfg.geminiApiKey.substring(0, 8)}...${activeCfg.geminiApiKey.slice(-4)}` : "TIDAK TERPASANG";
+            const groqMasked = activeCfg.groqApiKey ? `${activeCfg.groqApiKey.substring(0, 8)}...${activeCfg.groqApiKey.slice(-4)}` : "TIDAK TERPASANG";
+
             await sock.sendMessage(remoteJid, { 
-              text: `📋 *SYSTEM PROMPT AKTIF DARI SHEET 'CUSTOM_PROMPT':*\n\n"${activeP}"\n\n⚡ Model AI Utama: *${GEMINI_MODEL}*\n🛡️ Fallback Engine: *Groq AI (${GROQ_MODEL})*` 
+              text: `📋 *SYSTEM PROMPT AKTIF DARI SHEET 'CUSTOM_PROMPT':*\n\n"${activeCfg.prompt}"\n\n` +
+                    `🤖 *KREDENSIAL AI AKTIF (DARI SHEET 'SETTING'):*\n` +
+                    `• Model Gemini Utama: *${activeCfg.geminiModel}* (${geminiMasked})\n` +
+                    `• Model Fallback Groq: *${activeCfg.groqModel}* (${groqMasked})\n\n` +
+                    `_Ketik *!clearpromptcache* jika Anda baru saja mengubah setting di Spreadsheet._`
             }, { quoted: msg });
             return;
 
           case 'clearpromptcache':
-            cachedCustomPrompt = { prompt: '', timestamp: 0 };
-            await sock.sendMessage(remoteJid, { text: "🔄 Cache Custom Prompt dibersihkan. Prompt baru langsung diambil dari Spreadsheet saat chat berikutnya." }, { quoted: msg });
+            cachedSystemConfig = {
+              prompt: '',
+              geminiApiKey: '',
+              geminiModel: 'gemini-3.5-flash',
+              groqApiKey: '',
+              groqModel: 'openai/gpt-oss-120b',
+              timestamp: 0
+            };
+            await sock.sendMessage(remoteJid, { text: "🔄 Cache Custom Prompt & Kredensial AI berhasil dibersihkan. Konfigurasi baru langsung ditarik dari Sheet 'SETTING' saat chat berikutnya." }, { quoted: msg });
             return;
 
           case 'ping':
