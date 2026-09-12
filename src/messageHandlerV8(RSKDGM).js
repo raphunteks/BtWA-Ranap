@@ -14,9 +14,9 @@ const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 // URL REST API Google Apps Script (GAS) SIMGOS RSKDGM
 const GAS_URL_SIMGOS = process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbzCOj9YFKEqXRfMEKBugnEhqzuC7MoJfIyc5PihST3bxmJaseaKKX9YifotK2qpT38/exec";
 
-// Kontak WhatsApp Dokter DPJP RSKDGM
+// Kontak WhatsApp Dokter Cadangan jika Setting Belum Terisi
 const DOKTER_JID_LIST = [
-  "6282291675363@s.whatsapp.net", // drg. Hj. Kurniawaty, Sp.KG
+  "6282291675363@s.whatsapp.net", // drg. Hj. Kurniawaty, Sp.KG (DPJP Utama)
   "6285256739684@s.whatsapp.net"  // drg. M. Aksa Arsyad
 ];
 
@@ -31,7 +31,7 @@ const GROQ_ALLOWED_MODELS = [
 ];
 
 // =========================================================================
-// CACHE CERDAS: PROMPT, TEMPLATES & KREDENSIAL AI LANGSUNG DARI GOOGLE SHEET
+// CACHE CERDAS: PROMPT, TEMPLATES & KREDENSIAL AI DARI GOOGLE SHEET
 // =========================================================================
 let cachedSystemConfig = {
   prompt: '',
@@ -39,11 +39,13 @@ let cachedSystemConfig = {
   instansi: 'RSKD Gigi dan Mulut Prov. Sulawesi Selatan',
   poli: 'Poli Konservasi dan Endodonsi',
   dpjpUtama: 'drg. Hj. Kurniawaty, Sp.KG',
+  dpjpUtamaWa: '6282291675363',
   dpjpPendamping: 'drg. M. Aksa Arsyad',
   geminiApiKey: '',
   geminiModel: 'gemini-3.5-flash',
   groqApiKey: '',
   groqModel: 'openai/gpt-oss-120b',
+  doctors: [],
   timestamp: 0
 };
 const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000; // Cache lokal 5 menit
@@ -139,7 +141,7 @@ function formatForWhatsApp(text) {
 }
 
 /**
- * Kompilasi Variabel Template dari Sheet CUSTOM_FORMAT
+ * Kompilasi Variabel Template dari Sheet CUSTOM_FORMAT (Murni Tanpa String Hardcoded di Kodingan)
  */
 function compileTemplateText(templateStr, patient, sysCfg) {
   if (!templateStr) return "";
@@ -159,7 +161,7 @@ function compileTemplateText(templateStr, patient, sysCfg) {
 }
 
 /**
- * Ekstraktor tanggal fleksibel dari pesan pasien (Format ISO, DD-MM-YYYY, & Nama Bulan Indonesia)
+ * Ekstraktor tanggal fleksibel dari pesan pasien
  */
 function extractDateFromText(text) {
   if (!text) return null;
@@ -183,7 +185,7 @@ function extractDateFromText(text) {
     return `${y}-${m}-${d}`;
   }
 
-  // 3. Format Nama Bulan Bahasa Indonesia: contoh "28 September 2026", "15 September", "5 Okt"
+  // 3. Format Nama Bulan Bahasa Indonesia
   const monthMap = {
     'januari': '01', 'jan': '01',
     'februari': '02', 'feb': '02',
@@ -214,22 +216,19 @@ function extractDateFromText(text) {
 
 /**
  * Super Smart NLP: Deteksi Intent Pasien (HADIR vs RESCHEDULE vs GENERAL)
- * Mendukung variasi: "bisa dok", "bisa kak", "bisa min", "boleh min", "siap kak", dll.
+ * Mendukung variasi percakapan santun: "bisa dok", "bisa kak", "bisa min", "boleh min", dll.
  */
 function detectPatientIntent(rawText) {
   const text = rawText.trim().toLowerCase();
 
-  // 1. Cek sanggahan negatif terlebih dahulu (contoh: "nggak bisa dok", "tidak bisa min", "belum bisa hadir")
   const isNegative = /\b(tidak|nggak|engga|gak|gk|belum|batal)\s*(bisa|hadir|datang|ikut|boleh)?\b/i.test(text);
 
-  // 2. Pola Afirmasi HADIR (Sangat Fleksibel)
-  const hadirPattern = /\b(hadir|bisa\s*(dok|kak|min|datang|hadir|ikut|kok)?|boleh\s*(dok|kak|min)?|siap\s*(dok|kak|min|hadir|datang)?|oke\s*(dok|kak|min)?|ok\s*(dok|kak|min)?|insya\s*allah\s*(bisa|hadir|datang)?|datang|dateng|ikut)\b/i;
+  const hadirPattern = /\b(hadir|bisa\s*(dok|kak|min|hadir|datang|ikut|ia|ya)?|boleh\s*(dok|kak|min)?|siap\s*(dok|kak|min|hadir|datang)?|oke\s*(dok|kak|min)?|ok\s*(dok|kak|min)?|baik\s*(dok|kak|min)?|insya\s*allah\s*(bisa|hadir|datang)?|datang|dateng|ikut)\b/i;
 
   if (!isNegative && hadirPattern.test(text) && !text.includes('reschedule') && !text.includes('ganti') && !text.includes('undur')) {
     return { type: 'HADIR' };
   }
 
-  // 3. Pola RESCHEDULE (Termasuk typo reschedole, rescedule, ganti hari, undur, atau sanggahan negatif)
   const reschedPattern = /\b(reschedule|reschedole|rescedule|riscedul|rescedul|jadwal ulang|ganti jadwal|ubah jadwal|undur|mundur|tunda|ganti hari|pindah hari|ganti tanggal|pindah tanggal)\b/i;
   const extractedDate = extractDateFromText(text);
 
@@ -240,7 +239,6 @@ function detectPatientIntent(rawText) {
     };
   }
 
-  // 4. Deteksi cerdas: jika pasien HANYA mengirim tanggal (contoh: "2026-09-15" atau "15 September")
   if (extractedDate && text.length <= 30) {
     return {
       type: 'RESCHEDULE',
@@ -267,7 +265,7 @@ async function callSimgosApi(action, params = {}) {
 }
 
 /**
- * Ambil Prompt, Konfigurasi AI, & Templates Dinamis Langsung dari Spreadsheet
+ * Mengambil Seluruh Kredensial AI & Template dari Database Google Spreadsheet
  */
 async function fetchSystemAIConfig() {
   const now = Date.now();
@@ -284,11 +282,13 @@ async function fetchSystemAIConfig() {
         instansi: res.config?.instansi || cachedSystemConfig.instansi,
         poli: res.config?.poli || cachedSystemConfig.poli,
         dpjpUtama: res.config?.doctors?.[0]?.name || "drg. Hj. Kurniawaty, Sp.KG",
+        dpjpUtamaWa: res.config?.doctors?.[0]?.wa || "6282291675363",
         dpjpPendamping: res.config?.doctors?.[1]?.name || "drg. M. Aksa Arsyad",
         geminiApiKey: res.aiConfig?.geminiApiKey || cachedSystemConfig.geminiApiKey,
         geminiModel: res.aiConfig?.geminiModel || "gemini-3.5-flash",
         groqApiKey: res.aiConfig?.groqApiKey || cachedSystemConfig.groqApiKey,
         groqModel: res.aiConfig?.groqModel || "openai/gpt-oss-120b",
+        doctors: res.config?.doctors || [],
         timestamp: now
       };
       return cachedSystemConfig;
@@ -520,6 +520,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
     }
   }
 
+  // Notifikasi laporan blast ke kedua dokter
   const targetDoctors = followupData.doctors && followupData.doctors.length > 0
     ? followupData.doctors.map(d => sanitizeNumber(d.wa)).filter(Boolean)
     : DOKTER_JID_LIST;
@@ -971,11 +972,13 @@ export default function setupMessageHandler(sock) {
               instansi: 'RSKD Gigi dan Mulut Prov. Sulawesi Selatan',
               poli: 'Poli Konservasi dan Endodonsi',
               dpjpUtama: 'drg. Hj. Kurniawaty, Sp.KG',
+              dpjpUtamaWa: '6282291675363',
               dpjpPendamping: 'drg. M. Aksa Arsyad',
               geminiApiKey: '',
               geminiModel: 'gemini-3.5-flash',
               groqApiKey: '',
               groqModel: 'openai/gpt-oss-120b',
+              doctors: [],
               timestamp: 0
             };
             await sock.sendMessage(remoteJid, { text: "🔄 Cache Custom Prompt, Template & Kredensial AI berhasil dibersihkan. Konfigurasi baru langsung ditarik dari Spreadsheet saat chat berikutnya." }, { quoted: msg });
@@ -1003,12 +1006,16 @@ export default function setupMessageHandler(sock) {
       }
 
       // =====================================================================
-      // 2. HYBRID INTELLIGENT CHAT ENGINE (NLP + TEMPLATE CUSTOM_FORMAT)
+      // 2. HYBRID INTELLIGENT CHAT ENGINE (NLP + TEMPLATE CUSTOM_FORMAT MURNI)
       // =====================================================================
       await sock.sendPresenceUpdate('composing', remoteJid);
 
-      // A. Ambil Konfigurasi AI & Template Dinamis
+      // A. Ambil Konfigurasi AI & Template Dinamis Langsung dari Sheet
       const sysConfig = await fetchSystemAIConfig();
+
+      // Tentukan nomor WhatsApp DPJP Utama (Dokter 1)
+      const targetDpjpUtamaWa = sysConfig.doctors?.[0]?.wa || sysConfig.dpjpUtamaWa || "6282291675363";
+      const targetDpjpUtamaJid = sanitizeNumber(targetDpjpUtamaWa);
 
       // B. Identifikasi Data Pasien dari Spreadsheet
       let patientData = null;
@@ -1021,108 +1028,129 @@ export default function setupMessageHandler(sock) {
         console.warn("[Search Patient Warning]", errSearch.message);
       }
 
-      // C. Klasifikasi Niat Pasien (Super Smart Intent)
+      // Pastikan objek data pasien selalu terisi utuh
+      const pObj = patientData || {
+        namaPasien: pushName,
+        noRm: "-",
+        tglKontrol: "Terjadwal",
+        tglMasuk: "-",
+        umur: "-",
+        agama: "-",
+        jenisKelamin: "-",
+        noHp: senderPhonePure
+      };
+
+      // C. Klasifikasi Niat Pasien (Super Smart NLP)
       const intent = detectPatientIntent(text);
 
       // =====================================================================
-      // JALUR CEPAT 1: PASIEN KONFIRMASI "HADIR" (BISA DOK / SIAP KAK / DLL.)
+      // JALUR 1: PASIEN KONFIRMASI "HADIR" (BISA DOK / SIAP KAK / BOLEH MIN DLL)
       // =====================================================================
       if (intent.type === 'HADIR') {
-        const pObj = patientData || {
-          namaPasien: pushName,
-          noRm: "-",
-          tglKontrol: "jadwal Anda",
-          noHp: senderPhonePure
-        };
-
-        if (patientData) {
-          await callSimgosApi("update_status", { 
-            noRm: patientData.noRm, 
-            type: "pasien", 
-            status: "Hadir (Terkonfirmasi)" 
-          }).catch(() => {});
-
-          // Kirim konfirmasi ke Dokter DPJP menggunakan template WA_LAPORAN_HADIR_DOKTER (Tanpa DPJP Pendamping)
-          const rawDocTpl = sysConfig.templates["WA_LAPORAN_HADIR_DOKTER"] || 
-            `✅ *KONFIRMASI KEHADIRAN PASIEN (HADIR)*\n\nYth. Dokter,\nPasien kontrol berikut telah mengonfirmasi *HADIR* untuk kontrol gigi:\n\n👤 *Nama Pasien:* {NAMA_PASIEN}\n🔖 *No. RM:* {NO_RM}\n📅 *Tgl. Kontrol Terjadwal:* {TGL_KONTROL}\n📱 *WhatsApp Pasien:* {NO_WA}\n👨‍⚕️ *DPJP Utama:* {DPJP_UTAMA}\n🏥 *Unit:* {POLI_KLINIK} - {NAMA_INSTANSI}\n\nStatus database SIMGOS telah diperbarui ke *Hadir (Terkonfirmasi)*. Terima kasih, Dok. 🙏`;
-
-          const notifDokterHadir = compileTemplateText(rawDocTpl, pObj, sysConfig);
-
-          for (const docJid of DOKTER_JID_LIST) {
-            await sock.sendMessage(docJid, { text: notifDokterHadir }).catch(() => {});
+        // 1. Update status di database jika data pasien terdaftar
+        if (patientData && patientData.noRm) {
+          try {
+            await callSimgosApi("update_status", { 
+              noRm: patientData.noRm, 
+              type: "pasien", 
+              status: "Hadir (Terkonfirmasi)" 
+            });
+          } catch (e) {
+            console.error("[Update Status Hadir Error]", e.message);
           }
         }
 
-        // Balasan ke Pasien menggunakan template WA_PX_HADIR_CONFIRM
-        const rawPxHadirTpl = sysConfig.templates["WA_PX_HADIR_CONFIRM"] || 
-          `Halo, terima kasih banyak atas konfirmasinya Bapak/Ibu *{NAMA_PASIEN}* (No. RM: {NO_RM}). 🙏\n\nKehadiran Anda untuk jadwal kontrol perawatan gigi pada tanggal *{TGL_KONTROL}* bersama dokter penanggung jawab kami (*{DPJP_UTAMA}*) telah berhasil kami catat di sistem.\n\n📌 *Pengingat Kontrol:*\n• Harap hadir 15 menit sebelum poli dibuka.\n• Mohon membawa Kartu BPJS / KTP serta kartu kontrol sebelumnya.\n• Lakukan konfirmasi di loket pendaftaran {POLI_KLINIK}.\n\nSampai jumpa di poli ya. Semoga perawatannya berjalan lancar dan lekas sehat selalu! 🦷✨`;
+        // 2. KIRIM NOTIFIKASI KE DOKTER DPJP UTAMA (Template: WA_LAPORAN_HADIR_DOKTER)
+        const templateLaporanHadir = sysConfig.templates["WA_LAPORAN_HADIR_DOKTER"];
+        if (templateLaporanHadir) {
+          const notifDokterHadir = compileTemplateText(templateLaporanHadir, pObj, sysConfig);
+          try {
+            await sock.sendMessage(targetDpjpUtamaJid, { text: notifDokterHadir });
+            console.log(`[Notif Hadir Terkirim ke DPJP Utama] ${sysConfig.dpjpUtama} (${targetDpjpUtamaJid})`);
+          } catch (docErr) {
+            console.error(`[Gagal Kirim ke DPJP Utama: ${targetDpjpUtamaJid}]`, docErr.message);
+          }
+        } else {
+          console.warn("[Peringatan] Template 'WA_LAPORAN_HADIR_DOKTER' belum terbaca dari CUSTOM_FORMAT.");
+        }
 
-        const replyHadir = compileTemplateText(rawPxHadirTpl, pObj, sysConfig);
-
-        await sock.sendMessage(remoteJid, { text: replyHadir });
+        // 3. KIRIM BALASAN KE PASIEN (Template: WA_PX_HADIR_CONFIRM)
+        const templateBalasHadir = sysConfig.templates["WA_PX_HADIR_CONFIRM"];
+        if (templateBalasHadir) {
+          const replyHadir = compileTemplateText(templateBalasHadir, pObj, sysConfig);
+          await sock.sendMessage(remoteJid, { text: replyHadir });
+        }
+        
         await sock.sendPresenceUpdate('paused', remoteJid);
         return;
       }
 
       // =====================================================================
-      // JALUR CEPAT 2: PASIEN INGIN "RESCHEDULE" / MENGIRIM TANGGAL BARU
+      // JALUR 2: PASIEN INGIN "RESCHEDULE" / MENGIRIM TANGGAL BARU
       // =====================================================================
       if (intent.type === 'RESCHEDULE') {
-        const pObj = patientData || {
-          namaPasien: pushName,
-          noRm: "-",
-          noHp: senderPhonePure
-        };
-
-        // Kasus 2A: Pasien langsung menyertakan tanggal baru
-        if (intent.date && patientData) {
+        // Kasus 2A: Pasien langsung menyertakan tanggal baru (misal: "2026-09-28" atau "undur ke 25 september")
+        if (intent.date) {
           const newDate = intent.date;
-          await callSimgosApi("reschedule_patient", {
-            noRm: patientData.noRm,
-            newDate: newDate
-          }).catch(() => {});
+          if (patientData && patientData.noRm) {
+            try {
+              await callSimgosApi("reschedule_patient", {
+                noRm: patientData.noRm,
+                newDate: newDate
+              });
+            } catch (e) {
+              console.error("[Reschedule API Error]", e.message);
+            }
+          }
 
           const updatedPatientObj = {
-            ...patientData,
+            ...pObj,
             tglKontrol: newDate
           };
 
-          // Notifikasi ke dokter DPJP menggunakan template WA_LAPORAN_RESCHEDULE_DOKTER (Tanpa Pendamping)
-          const rawDocReschedTpl = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"] || 
-            `🔄 *NOTIFIKASI RESCHEDULE PASIEN*\n\nYth. Dokter,\nPasien kontrol berikut telah mengajukan *JADWAL ULANG (RESCHEDULE)*:\n\n👤 *Nama Pasien:* {NAMA_PASIEN}\n🔖 *No. RM:* {NO_RM}\n📅 *Jadwal Kontrol Baru:* {TGL_KONTROL}\n📱 *WhatsApp Pasien:* {NO_WA}\n👨‍⚕️ *DPJP Utama:* {DPJP_UTAMA}\n🏥 *Unit:* {POLI_KLINIK} - {NAMA_INSTANSI}\n\nStatus di database telah direset ke *Pending* untuk jadwal baru. Terima kasih, Dok. 🙏`;
-
-          const notifResched = compileTemplateText(rawDocReschedTpl, updatedPatientObj, sysConfig);
-
-          for (const docJid of DOKTER_JID_LIST) {
-            await sock.sendMessage(docJid, { text: notifResched }).catch(() => {});
+          // 1. KIRIM NOTIFIKASI KE DOKTER DPJP UTAMA (Template: WA_LAPORAN_RESCHEDULE_DOKTER)
+          const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
+          if (templateLaporanResched) {
+            const notifResched = compileTemplateText(templateLaporanResched, updatedPatientObj, sysConfig);
+            try {
+              await sock.sendMessage(targetDpjpUtamaJid, { text: notifResched });
+              console.log(`[Notif Reschedule Terkirim ke DPJP Utama] ${sysConfig.dpjpUtama} (${targetDpjpUtamaJid})`);
+            } catch (docErr) {
+              console.error(`[Gagal Kirim ke DPJP Utama: ${targetDpjpUtamaJid}]`, docErr.message);
+            }
+          } else {
+            console.warn("[Peringatan] Template 'WA_LAPORAN_RESCHEDULE_DOKTER' belum terbaca dari CUSTOM_FORMAT.");
           }
 
-          // Balasan konfirmasi ke pasien menggunakan template WA_PX_RESCHEDULE
-          const rawPxReschedTpl = sysConfig.templates["WA_PX_RESCHEDULE"] || 
-            `Baik Bapak/Ibu *{NAMA_PASIEN}* (No. RM: {NO_RM}), terima kasih atas konfirmasinya.\n\nJadwal kontrol perawatan gigi Anda telah berhasil kami perbarui ke tanggal: *{TGL_KONTROL}* bersama dokter penanggung jawab kami (*{DPJP_UTAMA}*).\n\nInformasi perubahan ini sudah diteruskan ke tim poli kami. Sistem akan mengingatkan Anda kembali saat mendekati jadwal tersebut.\n\nSalam sehat selalu dari {POLI_KLINIK} - {NAMA_INSTANSI}. 🙏`;
+          // 2. KIRIM BALASAN KONFIRMASI KE PASIEN (Template: WA_PX_RESCHEDULE)
+          const templateBalasResched = sysConfig.templates["WA_PX_RESCHEDULE"];
+          if (templateBalasResched) {
+            const replyResched = compileTemplateText(templateBalasResched, updatedPatientObj, sysConfig);
+            await sock.sendMessage(remoteJid, { text: replyResched });
+          }
 
-          const replyResched = compileTemplateText(rawPxReschedTpl, updatedPatientObj, sysConfig);
-
-          await sock.sendMessage(remoteJid, { text: replyResched });
           await sock.sendPresenceUpdate('paused', remoteJid);
           return;
         }
 
-        // Kasus 2B: Pasien mengetik kata reschedule tanpa tanggal
-        if (patientData) {
-          await callSimgosApi("update_status", { 
-            noRm: patientData.noRm, 
-            type: "pasien", 
-            status: "Reschedule Diajukan" 
-          }).catch(() => {});
+        // Kasus 2B: Pasien meminta reschedule tanpa menyebutkan tanggal
+        if (patientData && patientData.noRm) {
+          try {
+            await callSimgosApi("update_status", { 
+              noRm: patientData.noRm, 
+              type: "pasien", 
+              status: "Reschedule Diajukan" 
+            });
+          } catch (e) {}
         }
 
-        const rawAskTpl = sysConfig.templates["WA_PX_RESCHEDULE_ASK"] || 
-          `Baik Bapak/Ibu *{NAMA_PASIEN}*, kami siap membantu proses penjadwalan ulang (*reschedule*) kontrol perawatan gigi Anda di {POLI_KLINIK}.\n\nKira-kira Anda ingin mengajukan kontrol di hari apa atau tanggal berapa? (Contoh format: *YYYY-MM-DD* atau *25 September*).\n\nSilakan balas pesan ini dengan tanggal yang Anda inginkan agar langsung kami sesuaikan di sistem ya. 🙏`;
+        // Tanyakan tanggal dengan template WA_PX_RESCHEDULE_ASK
+        const templateTanyaTanggal = sysConfig.templates["WA_PX_RESCHEDULE_ASK"];
+        if (templateTanyaTanggal) {
+          const replyAskDate = compileTemplateText(templateTanyaTanggal, pObj, sysConfig);
+          await sock.sendMessage(remoteJid, { text: replyAskDate });
+        }
 
-        const replyAskDate = compileTemplateText(rawAskTpl, pObj, sysConfig);
-
-        await sock.sendMessage(remoteJid, { text: replyAskDate });
         await sock.sendPresenceUpdate('paused', remoteJid);
         return;
       }
@@ -1155,56 +1183,62 @@ export default function setupMessageHandler(sock) {
         rawAiResponse = await askAIClinicUnified(userSession.history, patientData);
       } catch (aiErr) {
         console.error("[Dual AI Fatal Error]", aiErr.message);
-        rawAiResponse = `Halo Bapak/Ibu ${patientData ? patientData.namaPasien : ""}, terima kasih telah menghubungi Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, staf poli kami siap membantu jadwal kontrol dan perawatan gigi Anda. Ada yang bisa kami bantu? 🙏`;
+        rawAiResponse = `Halo Bapak/Ibu ${pObj.namaPasien}, terima kasih telah menghubungi Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, staf poli kami siap membantu jadwal kontrol dan perawatan gigi Anda. Ada yang bisa kami bantu? 🙏`;
       } finally {
         clearInterval(typingTimer);
       }
 
-      // 1. Deteksi Aksi Otomatis Tag [ACTION:HADIR] dari AI
+      // Deteksi Tag Aksi [ACTION:HADIR] dari Percakapan AI
       if (rawAiResponse.includes('[ACTION:HADIR]')) {
         rawAiResponse = rawAiResponse.replace(/\[ACTION:HADIR\]/gi, '').trim();
 
-        if (patientData) {
+        if (patientData && patientData.noRm) {
           await callSimgosApi("update_status", { 
             noRm: patientData.noRm, 
             type: "pasien", 
             status: "Hadir (Terkonfirmasi)" 
           }).catch(() => {});
+        }
 
-          const rawDocTpl = sysConfig.templates["WA_LAPORAN_HADIR_DOKTER"] || 
-            `✅ *KONFIRMASI KEHADIRAN PASIEN (HADIR)*\n\nYth. Dokter,\nPasien kontrol berikut telah mengonfirmasi *HADIR* via WhatsApp:\n\n👤 *Nama Pasien:* ${patientData.namaPasien}\n🔖 *No. RM:* ${patientData.noRm}\n📅 *Tgl. Kontrol Terjadwal:* ${patientData.tglKontrol}\n📱 *WhatsApp Pasien:* ${patientData.noHp}\n👨‍⚕️ *DPJP Utama:* ${sysConfig.dpjpUtama}\n🏥 *Unit:* ${sysConfig.poli} - ${sysConfig.instansi}\n\nStatus database SIMGOS telah diperbarui ke *Hadir (Terkonfirmasi)*. Terima kasih, Dok. 🙏`;
-
-          const notifDokter = compileTemplateText(rawDocTpl, patientData, sysConfig);
-
-          for (const docJid of DOKTER_JID_LIST) {
-            await sock.sendMessage(docJid, { text: notifDokter }).catch(() => {});
+        const templateLaporanHadir = sysConfig.templates["WA_LAPORAN_HADIR_DOKTER"];
+        if (templateLaporanHadir) {
+          const notifDokter = compileTemplateText(templateLaporanHadir, pObj, sysConfig);
+          try {
+            await sock.sendMessage(targetDpjpUtamaJid, { text: notifDokter });
+            console.log(`[AI Auto-Action Hadir Terkirim ke DPJP Utama] ${targetDpjpUtamaJid}`);
+          } catch (e) {
+            console.error("[Gagal Kirim ke DPJP Utama]", e.message);
           }
         }
       }
 
-      // 2. Deteksi Aksi Otomatis Tag [ACTION:RESCHEDULE:YYYY-MM-DD] dari AI
+      // Deteksi Tag Aksi [ACTION:RESCHEDULE:YYYY-MM-DD] dari Percakapan AI
       const rescheduleMatch = rawAiResponse.match(/\[ACTION:RESCHEDULE:(\d{4}-\d{2}-\d{2})\]/i);
       let finalClientReply = rawAiResponse.replace(/\[ACTION:RESCHEDULE:\d{4}-\d{2}-\d{2}\]/gi, '').trim();
 
-      if (rescheduleMatch && patientData) {
+      if (rescheduleMatch) {
         const newRescheduleDate = rescheduleMatch[1];
-        try {
-          await callSimgosApi("reschedule_patient", {
-            noRm: patientData.noRm,
-            newDate: newRescheduleDate
-          });
-
-          const updatedPx = { ...patientData, tglKontrol: newRescheduleDate };
-          const rawDocReschedTpl = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"] || 
-            `🔄 *NOTIFIKASI RESCHEDULE PASIEN*\n\nYth. Dokter,\nPasien kontrol berikut telah mengajukan *JADWAL ULANG (RESCHEDULE)*:\n\n👤 *Nama Pasien:* ${patientData.namaPasien}\n🔖 *No. RM:* ${patientData.noRm}\n📅 *Jadwal Kontrol Baru:* ${newRescheduleDate}\n📱 *WhatsApp Pasien:* ${patientData.noHp}\n👨‍⚕️ *DPJP Utama:* ${sysConfig.dpjpUtama}\n🏥 *Unit:* ${sysConfig.poli} - ${sysConfig.instansi}\n\nStatus di database telah direset ke *Pending* untuk jadwal baru. Terima kasih, Dok. 🙏`;
-
-          const notifResched = compileTemplateText(rawDocReschedTpl, updatedPx, sysConfig);
-
-          for (const docJid of DOKTER_JID_LIST) {
-            await sock.sendMessage(docJid, { text: notifResched }).catch(() => {});
+        if (patientData && patientData.noRm) {
+          try {
+            await callSimgosApi("reschedule_patient", {
+              noRm: patientData.noRm,
+              newDate: newRescheduleDate
+            });
+          } catch (reschedErr) {
+            console.error("[Auto-Reschedule Error]", reschedErr.message);
           }
-        } catch (reschedErr) {
-          console.error("[Auto-Reschedule Error]", reschedErr);
+        }
+
+        const updatedPx = { ...pObj, tglKontrol: newRescheduleDate };
+        const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
+        if (templateLaporanResched) {
+          const notifResched = compileTemplateText(templateLaporanResched, updatedPx, sysConfig);
+          try {
+            await sock.sendMessage(targetDpjpUtamaJid, { text: notifResched });
+            console.log(`[AI Auto-Action Reschedule Terkirim ke DPJP Utama] ${targetDpjpUtamaJid}`);
+          } catch (e) {
+            console.error("[Gagal Kirim ke DPJP Utama]", e.message);
+          }
         }
       }
 
