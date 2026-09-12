@@ -467,10 +467,11 @@ Gunakan informasi di atas jika relevan untuk menyapa atau mengonfirmasi jadwal m
 }
 
 // =========================================================================
-// LOGIKA FOLLOW-UP DENGAN DETEKSI OTOMATIS NOMOR LID KE KOLOM 13 NO SENDER
+// LOGIKA FOLLOW-UP DENGAN DUKUNGAN H-2 DAN H-1 SERTA NOMOR LID (KOLOM 15)
 // =========================================================================
-async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "auto", overrideToSender = false) {
+async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "auto", overrideToSender = false, modeH = "h2") {
   const resultLog = {
+    mode: modeH,
     totalTarget: 0,
     pasienTerkirim: 0,
     pasienGagal: 0,
@@ -482,11 +483,11 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
   };
 
   const senderInfo = parseSenderInfo(replyTargetJid);
-  const apiParams = { tgl: tglParam };
+  const apiParams = { tgl: tglParam, mode: modeH };
 
   if (overrideToSender && senderInfo.id) {
     apiParams.override_wa = senderInfo.id;
-    apiParams.no_lid = senderInfo.id; // Kirim nomor LID murni ke Kolom 13
+    apiParams.no_lid = senderInfo.id;
     resultLog.isSenderConverted = true;
     resultLog.convertedToPhone = `${senderInfo.id} (${senderInfo.isLid ? 'LID' : 'Phone'})`;
   }
@@ -502,28 +503,23 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
 
   if (listPasien.length === 0) return resultLog;
 
+  const sysConfig = await fetchSystemAIConfig();
+
   for (const px of listPasien) {
     const cleanPhone = String(px.noHp || '').replace(/\D/g, '');
     let resolvedLid = "";
 
-    // 1. Jika mode override aktif, gunakan nomor LID pemanggil perintah
     if (overrideToSender && senderInfo.id) {
       resolvedLid = senderInfo.id;
     } else {
-      // 2. Jika pengiriman normal, minta nomor LID WhatsApp pasien via onWhatsApp
       try {
         const waCheck = await sock.onWhatsApp(cleanPhone);
         if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
           resolvedLid = String(waCheck[0].lid).replace(/\D/g, '');
         }
-      } catch (errCheck) {
-        console.warn(`[Gagal Cek LID WhatsApp ${cleanPhone}]:`, errCheck.message);
-      }
+      } catch (errCheck) {}
 
-      // 3. Jika WhatsApp tidak memberikan LID, gunakan nomor HP murninya
-      if (!resolvedLid) {
-        resolvedLid = cleanPhone;
-      }
+      if (!resolvedLid) resolvedLid = cleanPhone;
     }
 
     const targetJid = (overrideToSender && replyTargetJid) ? senderInfo.targetJid : sanitizeNumber(px.noHp);
@@ -531,7 +527,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
     try {
       let pesanKirim = px.pesan_wa_pasien;
       if (overrideToSender) {
-        pesanKirim = `🧪 *[TESTING BLAST: NOMOR DIKONVERSI KE SENDER]*\n` +
+        pesanKirim = `🧪 *[TESTING BLAST ${modeH.toUpperCase()}: NOMOR DIKONVERSI KE SENDER]*\n` +
                      `_(Pasien: ${px.namaPasien} | RM: ${px.noRm} | No. Asli: ${px.originalNoHp || px.noHp})_\n\n` + 
                      pesanKirim;
       }
@@ -539,17 +535,17 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
       await sock.sendMessage(targetJid, { text: pesanKirim });
       resultLog.pasienTerkirim++;
       
-      // Update status DAN simpan nomor LID pengirim aktif ke Kolom 13 Spreadsheet
+      // Update status WA dan simpan nomor LID ke Kolom 15 Spreadsheet
       await callSimgosApi("update_status", { 
         row: px.rowNumber, 
         type: "pasien", 
         status: "Terkirim",
+        mode: modeH,
         no_lid: resolvedLid
       });
 
-      console.log(`[Blast Terkirim] ${px.namaPasien} -> JID: ${targetJid} | Terdaftar di Kolom 13 LID: ${resolvedLid}`);
+      console.log(`[Blast ${modeH.toUpperCase()} Terkirim] ${px.namaPasien} -> JID: ${targetJid} | LID Kolom 15: ${resolvedLid}`);
 
-      // Simpan asosiasi sesi lokal berdasarkan ID LID & nomor HP pasien
       conversationSessions.set(resolvedLid, {
         history: [],
         lastSeen: Date.now(),
@@ -563,20 +559,22 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
 
       await new Promise(r => setTimeout(r, 2000));
     } catch (e) {
-      console.error(`[Gagal Kirim Pasien] ${px.namaPasien}:`, e);
+      console.error(`[Gagal Kirim Pasien ${modeH.toUpperCase()}] ${px.namaPasien}:`, e);
       resultLog.pasienGagal++;
     }
   }
 
+  // Notifikasi laporan blast ke Dokter DPJP Utama
   const targetDoctors = followupData.doctors && followupData.doctors.length > 0
     ? followupData.doctors.map(d => sanitizeNumber(d.wa)).filter(Boolean)
     : DOKTER_JID_LIST;
 
   for (const docJid of targetDoctors) {
     try {
-      let rekapDokter = `📋 *LAPORAN FOLLOW-UP KONTROL PASIEN*\n` +
-                        `🏥 *RSKD Gigi dan Mulut Prov. Sulsel*\n` +
+      let rekapDokter = `📋 *LAPORAN FOLLOW-UP KONTROL PASIEN (${modeH.toUpperCase()})*\n` +
+                        `🏥 *${sysConfig.instansi}*\n` +
                         `📅 *Tgl Kontrol:* ${resultLog.targetDate}\n` +
+                        `👨‍⚕️ *DPJP Utama:* ${sysConfig.dpjpUtama}\n` +
                         `👥 *Total Pasien Dihubungi:* ${resultLog.pasienTerkirim} dari ${resultLog.totalTarget}\n\n` +
                         `*Rincian Pasien:*\n`;
 
@@ -587,14 +585,14 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
       if (overrideToSender) {
         rekapDokter += `\n_Mode Simulasi: Seluruh pesan dialihkan ke WhatsApp Anda (${senderInfo.id} - ${senderInfo.isLid ? 'LID' : 'Phone'})._ 🙏`;
       } else {
-        rekapDokter += `\n_Pesan otomatis telah terkirim ke kontak WhatsApp pasien di atas._ 🙏`;
+        rekapDokter += `\n_Pesan otomatis ${modeH.toUpperCase()} telah terkirim ke kontak WhatsApp pasien di atas._ 🙏`;
       }
 
       await sock.sendMessage(docJid, { text: rekapDokter });
       resultLog.laporanDokterTerkirim++;
       await new Promise(r => setTimeout(r, 1000));
     } catch (docErr) {
-      console.error(`[Gagal Kirim Dokter] ${docJid}:`, docErr);
+      console.error(`[Gagal Kirim Dokter ${modeH.toUpperCase()}] ${docJid}:`, docErr);
       resultLog.laporanDokterGagal++;
     }
   }
@@ -604,7 +602,8 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
       await callSimgosApi("update_status", { 
         row: px.rowNumber, 
         type: "dokter", 
-        status: "Terkirim" 
+        status: "Terkirim",
+        mode: modeH
       });
     } catch (err) {}
   }
@@ -633,6 +632,7 @@ export default function setupMessageHandler(sock) {
       const targetJam = String(botSettings.autoFollowupHour || "08").padStart(2, "0");
       const targetMenit = String(botSettings.autoFollowupMinute || "30").padStart(2, "0");
 
+      // Auto-blast jam 08:30 WITA: Menjalankan Blast H-2 dan Blast H-1 secara sekuensial
       if (
         botSettings.autoFollowupSimgos &&
         jam === targetJam &&
@@ -640,17 +640,23 @@ export default function setupMessageHandler(sock) {
         botSettings.lastAutoFollowupDate !== tanggalHariIniWita
       ) {
         try {
-          console.log(`[Auto SIMGOS] Follow-up kontrol terjadwal jam ${targetJam}:${targetMenit} WITA (${tanggalHariIniWita})...`);
-          const blastRes = await executeFollowupBlast(currentSock, ownerNumber, "auto", false);
+          console.log(`[Auto SIMGOS] Menjalankan follow-up otomatis H-2 & H-1 jam ${targetJam}:${targetMenit} WITA (${tanggalHariIniWita})...`);
+          
+          // 1. Eksekusi Blast H-2
+          const blastH2 = await executeFollowupBlast(currentSock, ownerNumber, "auto", false, "h2");
+          
+          // 2. Eksekusi Blast H-1 (Pengingat Pasien Besok)
+          const blastH1 = await executeFollowupBlast(currentSock, ownerNumber, "auto", false, "h1");
+
           botSettings.lastAutoFollowupDate = tanggalHariIniWita;
           saveSettings();
 
-          if (blastRes.totalTarget > 0) {
+          if (blastH2.totalTarget > 0 || blastH1.totalTarget > 0) {
             await currentSock.sendMessage(ownerNumber, {
-              text: `🤖 *AUTO FOLLOW-UP SIMGOS SELESAI (H- KONTROL)*\n\n` +
-                    `📅 Tgl Kontrol: *${blastRes.targetDate}*\n` +
-                    `✅ Pasien Terkirim: ${blastRes.pasienTerkirim} / ${blastRes.totalTarget}\n` +
-                    `👨‍⚕️ Laporan Dokter: ${blastRes.laporanDokterTerkirim} DPJP\n` +
+              text: `🤖 *AUTO FOLLOW-UP SIMGOS SELESAI (H-2 & H-1)*\n\n` +
+                    `📅 *Follow-up H-2 (${blastH2.targetDate}):* ${blastH2.pasienTerkirim}/${blastH2.totalTarget} Pasien\n` +
+                    `📅 *Follow-up H-1 (${blastH1.targetDate}):* ${blastH1.pasienTerkirim}/${blastH1.totalTarget} Pasien\n` +
+                    `👨‍⚕️ Laporan Dokter DPJP Utama Terkirim\n` +
                     `⏱️ Waktu: ${formatWITA(new Date())}`
             });
           }
@@ -682,7 +688,6 @@ export default function setupMessageHandler(sock) {
       
       if (!text.trim()) return;
 
-      // PARSER CERDAS: Dapatkan info nomor LID / JID yang presisi
       const senderInfo = parseSenderInfo(remoteJid);
       const pushName = msg.pushName || "Pasien";
 
@@ -698,16 +703,16 @@ export default function setupMessageHandler(sock) {
         switch (command) {
           case 'menu':
           case 'help':
-            const menuText = `*🤖 BOT KONTROL RSKDGM (LID & SIMGOS DATABASE) 🤖*\n\n` +
+            const menuText = `*🤖 BOT KONTROL RSKDGM (H-2 & H-1 SIMGOS) 🤖*\n\n` +
                              `*🦷 SIMGOS FOLLOW-UP KONTROL:*\n` +
-                             `* !followupnow* [tgl/auto] [me] - 🚀 Kirim sekarang instan ('me' = konversi ke LID Anda)\n` +
-                             `* !followup* [tgl/auto] - Cek daftar antrean kontrol H-\n` +
-                             `* !gassfollowup* [tgl/auto] [me] - Kirim WA massal Pasien & Dokter\n` +
-                             `* !bindpasien* <No.RM> - 🔗 Tautkan nomor LID WhatsApp Anda langsung ke No RM Pasien\n` +
+                             `* !followupnow* [h1/h2] [tgl/auto] [me] - 🚀 Kirim instan H-2 atau H-1 ('me' = kirim ke Anda)\n` +
+                             `* !followup* [h1/h2] [tgl/auto] - Cek daftar antrean kontrol H-2 atau H-1\n` +
+                             `* !gassfollowup* [h1/h2] [me] - Kirim WA massal H-2 atau H-1 ke Pasien & DPJP Utama\n` +
+                             `* !bindpasien* <No.RM> - 🔗 Tautkan identitas WhatsApp Anda langsung ke No RM Pasien\n` +
                              `* !caripasien* <No.RM/Nama/WA/LID> - Cari data pasien di Spreadsheet\n` +
                              `* !reschedule* <No.RM> <YYYY-MM-DD> - Ubah tanggal kontrol manual\n` +
-                             `* !statskontrol* - Cek ringkasan statistik kontrol\n` +
-                             `* !settingssimgos* - Cek konfigurasi H- & nomor dokter\n` +
+                             `* !statskontrol* - Cek ringkasan statistik kontrol H-2 & H-1\n` +
+                             `* !settingssimgos* - Cek konfigurasi sistem & dokter\n` +
                              `* !templatesimgos* - Cek template format pesan WhatsApp\n` +
                              `* !autofollowup on/off* - Pengaturan status blast harian otomatis\n` +
                              `* !setjamfollowup* <HH:mm> - Ubah jam blast harian\n\n` +
@@ -728,7 +733,7 @@ export default function setupMessageHandler(sock) {
           case 'linkpasien':
             if (args.length === 0) {
               await sock.sendMessage(senderInfo.targetJid, { 
-                text: `⚠️ Format salah!\nGunakan: *!bindpasien <No.RM>*\nContoh: *!bindpasien 00.06.32.89*\n_(Perintah ini akan menautkan nomor ${senderInfo.isLid ? 'LID' : 'WA'} Anda [${senderInfo.id}] ke Kolom 13 No Sender pasien)_` 
+                text: `⚠️ Format salah!\nGunakan: *!bindpasien <No.RM>*\nContoh: *!bindpasien 00.06.32.89*\n_(Perintah ini akan menautkan nomor ${senderInfo.isLid ? 'LID' : 'WA'} Anda [${senderInfo.id}] ke Kolom 15 No Sender pasien)_` 
               }, { quoted: msg });
               break;
             }
@@ -746,7 +751,7 @@ export default function setupMessageHandler(sock) {
               const pxName = (searchCheck.status === "success" && searchCheck.data?.[0]?.namaPasien) ? searchCheck.data[0].namaPasien : targetRmBind;
 
               await sock.sendMessage(senderInfo.targetJid, { 
-                text: `✅ *Tautan Berhasil!*\n\nNomor ${senderInfo.isLid ? 'LID' : 'WA'} Anda (*${senderInfo.id}*) kini resmi terdaftar pada pasien:\n👤 *Nama:* ${pxName}\n🔖 *No. RM:* ${targetRmBind}\n\nSekarang Anda dapat langsung mengetik *"HADIR"* atau *"RESCHEDULE"* dan nama lengkap akan muncul secara otomatis!` 
+                text: `✅ *Tautan Berhasil!*\n\nIdentitas ${senderInfo.isLid ? 'LID' : 'WA'} Anda (*${senderInfo.id}*) kini resmi terdaftar pada pasien:\n👤 *Nama:* ${pxName}\n🔖 *No. RM:* ${targetRmBind}\n\nSekarang Anda dapat langsung mengetik *"HADIR"* atau *"RESCHEDULE"* dan nama lengkap pasien akan otomatis tercantum!` 
               }, { quoted: msg });
             } catch (errBind) {
               await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal menautkan pasien:* ${errBind.message}` }, { quoted: msg });
@@ -757,41 +762,46 @@ export default function setupMessageHandler(sock) {
           case 'follownow':
             let tglTarget = "auto";
             let toSender = false;
+            let modeHNow = "h2";
 
             for (const arg of args) {
               const lowerArg = arg.toLowerCase();
               if (lowerArg === 'me' || lowerArg === 'test' || lowerArg === 'myself') {
                 toSender = true;
+              } else if (lowerArg === 'h1') {
+                modeHNow = "h1";
+              } else if (lowerArg === 'h2') {
+                modeHNow = "h2";
               } else if (lowerArg !== 'auto') {
                 tglTarget = arg;
               }
             }
 
             const infoNotice = toSender 
-              ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data... ⚠️ *Fitur Aktif:* Nomor penerima dialihkan ke WhatsApp Anda (*${senderInfo.id}* - ${senderInfo.isLid ? 'LID' : 'Phone'}) dan disimpan ke Kolom 13 No Sender.`
-              : `⚡ *[FOLLOWUP NOW]* Memulai penarikan data dan pengiriman instan ke nomor WhatsApp pasien...`;
+              ? `⚡ *[FOLLOWUP NOW ${modeHNow.toUpperCase()}]* Memulai penarikan data... ⚠️ *Fitur Aktif:* Nomor penerima dialihkan ke WhatsApp Anda (*${senderInfo.id}* - ${senderInfo.isLid ? 'LID' : 'Phone'}) dan disimpan ke Kolom 15 No Sender.`
+              : `⚡ *[FOLLOWUP NOW ${modeHNow.toUpperCase()}]* Memulai penarikan data dan pengiriman instan ke nomor WhatsApp pasien...`;
 
             await sock.sendMessage(senderInfo.targetJid, { text: infoNotice }, { quoted: msg });
             
             try {
-              const blastResult = await executeFollowupBlast(sock, remoteJid, tglTarget, toSender);
+              const blastResult = await executeFollowupBlast(sock, remoteJid, tglTarget, toSender, modeHNow);
 
               if (blastResult.totalTarget === 0) {
                 await sock.sendMessage(senderInfo.targetJid, { 
-                  text: `ℹ️ Tidak ada antrean pasien kontrol berstatus *Pending* untuk tanggal ${blastResult.targetDate}.` 
+                  text: `ℹ️ Tidak ada antrean pasien kontrol berstatus *Pending* untuk target ${modeHNow.toUpperCase()} tanggal ${blastResult.targetDate}.` 
                 }, { quoted: msg });
                 break;
               }
 
-              let rekapSekarang = `🚀 *[FOLLOWUP NOW SELESAI]*\n\n` +
+              let rekapSekarang = `🚀 *[FOLLOWUP NOW ${modeHNow.toUpperCase()} SELESAI]*\n\n` +
                                   `📅 *Target Kontrol:* ${blastResult.targetDate}\n` +
                                   `👥 *Total Pasien Disasar:* ${blastResult.totalTarget}\n` +
                                   `📲 *Pesan Terkirim:* ${blastResult.pasienTerkirim}\n` +
                                   `⚠️ *Pesan Gagal:* ${blastResult.pasienGagal}\n` +
-                                  `👨‍⚕️ *Laporan Terkirim ke DPJP:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
+                                  `👨‍⚕️ *Laporan Terkirim ke DPJP Utama:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
 
               if (blastResult.isSenderConverted) {
-                rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Tersimpan di Kolom 13 No Sender)\n`;
+                rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Tersimpan di Kolom 15 No Sender)\n`;
               }
 
               rekapSekarang += `\n_Seluruh status di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
@@ -828,19 +838,28 @@ export default function setupMessageHandler(sock) {
 
           case 'followup':
           case 'cekfollowup':
-            await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Mengambil data pasien kontrol siap follow-up dari Google Spreadsheet..._" }, { quoted: msg });
+            let modeHFU = "h2";
+            let tglArg = "auto";
+
+            for (const a of args) {
+              const lowerA = a.toLowerCase();
+              if (lowerA === 'h1') modeHFU = "h1";
+              else if (lowerA === 'h2') modeHFU = "h2";
+              else if (lowerA !== 'auto') tglArg = a;
+            }
+
+            await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Mengambil data pasien kontrol siap follow-up (${modeHFU.toUpperCase()}) dari Google Spreadsheet..._` }, { quoted: msg });
             try {
-              const tglArg = args[0] || "auto";
-              const resFollowup = await callSimgosApi("get_followup", { tgl: tglArg });
+              const resFollowup = await callSimgosApi("get_followup", { tgl: tglArg, mode: modeHFU });
 
               if (resFollowup.status !== "success" || !resFollowup.data || resFollowup.data.length === 0) {
                 await sock.sendMessage(senderInfo.targetJid, { 
-                  text: `ℹ️ *Tidak ada antrean pasien kontrol berstatus Pending untuk tanggal:* ${resFollowup.target_control_date || tglArg}.` 
+                  text: `ℹ️ *Tidak ada antrean pasien kontrol berstatus Pending untuk target ${modeHFU.toUpperCase()} tanggal:* ${resFollowup.target_control_date || tglArg}.` 
                 }, { quoted: msg });
                 break;
               }
 
-              let textHasil = `📋 *DAFTAR PASIEN SIAP FOLLOW-UP (H-${resFollowup.h_days})*\n` +
+              let textHasil = `📋 *DAFTAR PASIEN SIAP FOLLOW-UP (${modeHFU.toUpperCase()})*\n` +
                               `📅 *Target Kontrol:* ${resFollowup.target_control_date}\n` +
                               `👥 *Total Pasien:* ${resFollowup.total} orang\n\n`;
 
@@ -851,7 +870,7 @@ export default function setupMessageHandler(sock) {
                              `   🏥 Status WA: ${px.statusWa} | Dokter: ${px.statusDokter}\n\n`;
               });
 
-              textHasil += `👉 _Ketik *!followupnow me* untuk kirim ke nomor Anda, atau *!followupnow* untuk blast ke pasien._`;
+              textHasil += `👉 _Ketik *!followupnow ${modeHFU} me* untuk kirim ke Anda, atau *!followupnow ${modeHFU}* untuk blast ke pasien._`;
               await sock.sendMessage(senderInfo.targetJid, { text: textHasil }, { quoted: msg });
             } catch (e) {
               await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal mengambil data:* ${e.message}` }, { quoted: msg });
@@ -860,24 +879,28 @@ export default function setupMessageHandler(sock) {
 
           case 'gassfollowup':
           case 'kirimfollowup':
-            await sock.sendMessage(senderInfo.targetJid, { text: "🚀 _Memulai pengiriman pesan WhatsApp massal... Mohon tunggu._" }, { quoted: msg });
+            let modeHGass = "h2";
+            let tglKirim = "auto";
+            let toSenderGass = false;
+
+            for (const a of args) {
+              const lowerG = a.toLowerCase();
+              if (lowerG === 'me' || lowerG === 'test') toSenderGass = true;
+              else if (lowerG === 'h1') modeHGass = "h1";
+              else if (lowerG === 'h2') modeHGass = "h2";
+              else if (lowerG !== 'auto') tglKirim = a;
+            }
+
+            await sock.sendMessage(senderInfo.targetJid, { text: `🚀 _Memulai pengiriman pesan WhatsApp massal (${modeHGass.toUpperCase()})... Mohon tunggu._` }, { quoted: msg });
             try {
-              let tglKirim = "auto";
-              let toSenderGass = false;
-
-              for (const a of args) {
-                if (a.toLowerCase() === 'me' || a.toLowerCase() === 'test') toSenderGass = true;
-                else if (a.toLowerCase() !== 'auto') tglKirim = a;
-              }
-
-              const blastResult = await executeFollowupBlast(sock, remoteJid, tglKirim, toSenderGass);
+              const blastResult = await executeFollowupBlast(sock, remoteJid, tglKirim, toSenderGass, modeHGass);
 
               if (blastResult.totalTarget === 0) {
-                await sock.sendMessage(senderInfo.targetJid, { text: `ℹ️ Tidak ada antrean pasien Pending untuk tanggal ${blastResult.targetDate}.` }, { quoted: msg });
+                await sock.sendMessage(senderInfo.targetJid, { text: `ℹ️ Tidak ada antrean pasien Pending untuk target ${modeHGass.toUpperCase()} tanggal ${blastResult.targetDate}.` }, { quoted: msg });
                 break;
               }
 
-              let rekapAkhir = `✅ *EKSEKUSI FOLLOW-UP SELESAI!*\n\n` +
+              let rekapAkhir = `✅ *EKSEKUSI FOLLOW-UP (${modeHGass.toUpperCase()}) SELESAI!*\n\n` +
                                `📅 *Tgl Kontrol:* ${blastResult.targetDate}\n` +
                                `👥 *Total Target Pasien:* ${blastResult.totalTarget}\n` +
                                `📲 *Pasien Berhasil Dikirimi:* ${blastResult.pasienTerkirim}\n` +
@@ -885,7 +908,7 @@ export default function setupMessageHandler(sock) {
                                `👨‍⚕️ *Laporan DPJP Terkirim:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
 
               if (blastResult.isSenderConverted) {
-                rekapAkhir += `🎯 *Catatan:* Pesan dialihkan ke WhatsApp pengirim (${blastResult.convertedToPhone}) & Kolom 13 No Sender terupdate.\n`;
+                rekapAkhir += `🎯 *Catatan:* Pesan dialihkan ke WhatsApp pengirim (${blastResult.convertedToPhone}) & Kolom 15 No Sender terupdate.\n`;
               }
 
               rekapAkhir += `\n_Seluruh status di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
@@ -918,7 +941,7 @@ export default function setupMessageHandler(sock) {
                             `   📱 No. WA: ${p.noHp}\n` +
                             `   📲 No. Sender: ${p.noSender || '-'}\n` +
                             `   🎂 Umur / JK: ${p.umur} / ${p.jenisKelamin}\n` +
-                            `   Status: Pasien [${p.statusWa}] | Dokter [${p.statusDokter}]\n\n`;
+                            `   Status H-2: [${p.statusWaH2}] | Status H-1: [${p.statusWaH1}]\n\n`;
               });
 
               await sock.sendMessage(senderInfo.targetJid, { text: txtMatch }, { quoted: msg });
@@ -945,7 +968,7 @@ export default function setupMessageHandler(sock) {
                   text: `✅ *Reschedule Berhasil!*\n\n` +
                         `🔖 No. RM: *${rmResched}*\n` +
                         `📅 Jadwal Kontrol Baru: *${dateResched}*\n` +
-                        `Status pasien otomatis direset ke *Pending* agar siap difollow-up kembali.` 
+                        `Status pasien otomatis direset ke *Pending* untuk jadwal kontrol baru.` 
                 }, { quoted: msg });
               } else {
                 throw new Error(reschedApi.message);
@@ -966,12 +989,10 @@ export default function setupMessageHandler(sock) {
                                  `📅 Tanggal Server: ${statsRes.date}\n\n` +
                                  `📁 Total Pasien Terdata: *${s.total_pasien_terdata} Pasien*\n` +
                                  `📥 Di-scrape Hari Ini: *${s.scraped_hari_ini} Pasien*\n\n` +
-                                 `*Status WA Pasien:*\n` +
-                                 `⏳ Pending: ${s.wa_pasien_pending}\n` +
-                                 `✅ Terkirim/Hadir: ${s.wa_pasien_terkirim}\n\n` +
-                                 `*Status Konfirmasi Dokter:*\n` +
-                                 `⏳ Pending: ${s.notif_dokter_pending}\n` +
-                                 `✅ Terkirim: ${s.notif_dokter_terkirim}\n\n` +
+                                 `*Status Follow-up H-2:*\n` +
+                                 `⏳ Pending: ${s.h2_wa_pending} | ✅ Terkirim/Hadir: ${s.h2_wa_terkirim}\n\n` +
+                                 `*Status Follow-up H-1 (Pengingat Besok):*\n` +
+                                 `⏳ Pending: ${s.h1_wa_pending} | ✅ Terkirim/Hadir: ${s.h1_wa_terkirim}\n\n` +
                                  `🏥 *Faskes:* ${statsRes.config.instansi}\n` +
                                  `🦷 *Klinik:* ${statsRes.config.poli}\n` +
                                  `⏰ *Jadwal Auto Blast:* Jam ${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA`;
@@ -1090,14 +1111,10 @@ export default function setupMessageHandler(sock) {
       // =====================================================================
       await sock.sendPresenceUpdate('composing', senderInfo.targetJid);
 
-      // A. Ambil Konfigurasi AI & Template Dinamis Langsung dari Sheet
       const sysConfig = await fetchSystemAIConfig();
-
-      // Tentukan nomor WhatsApp DPJP Utama (Dokter 1)
       const targetDpjpUtamaWa = sysConfig.doctors?.[0]?.wa || sysConfig.dpjpUtamaWa || "6282291675363";
       const targetDpjpUtamaJid = sanitizeNumber(targetDpjpUtamaWa);
 
-      // B. Identifikasi Data Pasien dari Spreadsheet Berdasarkan Nomor LID / No WA
       let patientData = null;
       try {
         const searchPx = await callSimgosApi("search_patient", { query: senderInfo.id });
@@ -1105,7 +1122,6 @@ export default function setupMessageHandler(sock) {
           patientData = searchPx.data[0];
           console.log(`[Pasien Ditemukan dari Database] Nama: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl: ${patientData.tglKontrol}`);
         } else {
-          // Cek fallback sesi lokal jika baru saja di-blast
           const sessionSaved = conversationSessions.get(senderInfo.id);
           if (sessionSaved && sessionSaved.patientData) {
             patientData = sessionSaved.patientData;
@@ -1118,7 +1134,6 @@ export default function setupMessageHandler(sock) {
         console.warn("[Search Patient Warning]", errSearch.message);
       }
 
-      // Objek Pasien Definitif (Prioritas Database Pasien Asli)
       const pObj = patientData || {
         namaPasien: pushName,
         noRm: "-",
@@ -1131,20 +1146,26 @@ export default function setupMessageHandler(sock) {
         noSender: senderInfo.id
       };
 
-      // C. Klasifikasi Niat Pasien (Super Smart NLP)
       const intent = detectPatientIntent(text);
 
       // =====================================================================
       // JALUR 1: PASIEN KONFIRMASI "HADIR" (BISA DOK / SIAP KAK / BOLEH MIN DLL)
       // =====================================================================
       if (intent.type === 'HADIR') {
-        // 1. Update status dan tautkan Nomor LID pengirim aktif ke Kolom 13 di Spreadsheet
         if (patientData && patientData.noRm) {
           try {
             await callSimgosApi("update_status", { 
               noRm: patientData.noRm, 
               type: "pasien", 
               status: "Hadir (Terkonfirmasi)",
+              mode: "h2",
+              no_lid: senderInfo.id
+            });
+            await callSimgosApi("update_status", { 
+              noRm: patientData.noRm, 
+              type: "pasien", 
+              status: "Hadir (Terkonfirmasi)",
+              mode: "h1",
               no_lid: senderInfo.id
             });
           } catch (e) {
@@ -1152,7 +1173,7 @@ export default function setupMessageHandler(sock) {
           }
         }
 
-        // 2. KIRIM NOTIFIKASI KE DOKTER DPJP UTAMA (100% Template Database WA_LAPORAN_HADIR_DOKTER)
+        // Kirim notifikasi ke Dokter DPJP Utama (Template: WA_LAPORAN_HADIR_DOKTER)
         const templateLaporanHadir = sysConfig.templates["WA_LAPORAN_HADIR_DOKTER"];
         if (templateLaporanHadir) {
           const notifDokterHadir = compileTemplateText(templateLaporanHadir, pObj, sysConfig);
@@ -1164,7 +1185,7 @@ export default function setupMessageHandler(sock) {
           }
         }
 
-        // 3. KIRIM BALASAN KE PASIEN (100% Template Database WA_PX_HADIR_CONFIRM)
+        // Kirim balasan ke pasien (Template: WA_PX_HADIR_CONFIRM)
         const templateBalasHadir = sysConfig.templates["WA_PX_HADIR_CONFIRM"];
         if (templateBalasHadir) {
           const replyHadir = compileTemplateText(templateBalasHadir, pObj, sysConfig);
@@ -1199,7 +1220,7 @@ export default function setupMessageHandler(sock) {
             noSender: senderInfo.id
           };
 
-          // 1. KIRIM NOTIFIKASI KE DOKTER DPJP UTAMA (100% Template Database WA_LAPORAN_RESCHEDULE_DOKTER)
+          // Kirim notifikasi ke Dokter DPJP Utama (Template: WA_LAPORAN_RESCHEDULE_DOKTER)
           const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
           if (templateLaporanResched) {
             const notifResched = compileTemplateText(templateLaporanResched, updatedPatientObj, sysConfig);
@@ -1211,7 +1232,7 @@ export default function setupMessageHandler(sock) {
             }
           }
 
-          // 2. KIRIM BALASAN KE PASIEN (100% Template Database WA_PX_RESCHEDULE)
+          // Kirim balasan ke pasien (Template: WA_PX_RESCHEDULE)
           const templateBalasResched = sysConfig.templates["WA_PX_RESCHEDULE"];
           if (templateBalasResched) {
             const replyResched = compileTemplateText(templateBalasResched, updatedPatientObj, sysConfig);
@@ -1222,13 +1243,14 @@ export default function setupMessageHandler(sock) {
           return;
         }
 
-        // Jika minta reschedule tanpa menyebut tanggal
+        // Kasus minta reschedule tanpa menyebutkan tanggal
         if (patientData && patientData.noRm) {
           try {
             await callSimgosApi("update_status", { 
               noRm: patientData.noRm, 
               type: "pasien", 
               status: "Reschedule Diajukan",
+              mode: "h2",
               no_lid: senderInfo.id
             });
           } catch (e) {}
@@ -1278,7 +1300,7 @@ export default function setupMessageHandler(sock) {
         clearInterval(typingTimer);
       }
 
-      // Deteksi Tag Aksi [ACTION:HADIR] dari Percakapan AI
+      // Deteksi Tag Aksi [ACTION:HADIR] dari AI
       if (rawAiResponse.includes('[ACTION:HADIR]')) {
         rawAiResponse = rawAiResponse.replace(/\[ACTION:HADIR\]/gi, '').trim();
 
@@ -1303,7 +1325,7 @@ export default function setupMessageHandler(sock) {
         }
       }
 
-      // Deteksi Tag Aksi [ACTION:RESCHEDULE:YYYY-MM-DD] dari Percakapan AI
+      // Deteksi Tag Aksi [ACTION:RESCHEDULE:YYYY-MM-DD] dari AI
       const rescheduleMatch = rawAiResponse.match(/\[ACTION:RESCHEDULE:(\d{4}-\d{2}-\d{2})\]/i);
       let finalClientReply = rawAiResponse.replace(/\[ACTION:RESCHEDULE:\d{4}-\d{2}-\d{2}\]/gi, '').trim();
 
