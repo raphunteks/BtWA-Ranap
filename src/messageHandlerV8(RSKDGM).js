@@ -7,16 +7,28 @@ import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import handleStickerCommand from './commands/sticker.js';
 
 // =========================================================================
-// KONFIGURASI SISTEM, GOOGLE AI STUDIO & DATABASE RSKDGM
+// KONFIGURASI SISTEM, GOOGLE AI STUDIO (GEMINI 3.5), GROQ AI & SIMGOS RSKDGM
 // =========================================================================
 const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 
 // URL REST API Google Apps Script (GAS) SIMGOS RSKDGM
 const GAS_URL_SIMGOS = process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbzCOj9YFKEqXRfMEKBugnEhqzuC7MoJfIyc5PihST3bxmJaseaKKX9YifotK2qpT38/exec";
 
-// Kunci API Google AI Studio & Model Gemini Terpercaya
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AQ.Ab8RN6KfVb-fIIdi_BsauXX69CEOoE037lYnsPJYvCy4Vhr6cw";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+// 1. GOOGLE AI STUDIO (GEMINI 3.5 FLASH DENGAN API KEY BARU)
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AQ.Ab8RN6Lt896DZLI5xK3NKEpM10FmoJt5ihJf2w4gYR845CTp_A";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+
+// 2. GROQ AI FALLBACK ENGINE (PERSIS DENGAN MODEL DIIZINKAN ORGANISASI ANDA)
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "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";
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+const GROQ_ALLOWED_MODELS = [
+  "openai/gpt-oss-120b",
+  "qwen/qwen3.8-27b",
+  "openai/gpt-oss-20b",
+  "qwen/qwen3.6-27b",
+  "groq/compound",
+  "groq/compound-mini"
+];
 
 // Kontak WhatsApp Dokter DPJP RSKDGM
 const DOKTER_JID_LIST = [
@@ -141,7 +153,7 @@ function extractDateFromText(text) {
     return `${y}-${m}-${d}`;
   }
 
-  // 3. Format Nama Bulan Bahasa Indonesia: contoh "28 September 2026" atau "28 September"
+  // 3. Format Nama Bulan Bahasa Indonesia: contoh "28 September 2026" atau "15 September"
   const monthMap = {
     'januari': '01', 'jan': '01',
     'februari': '02', 'feb': '02',
@@ -182,10 +194,19 @@ function detectPatientIntent(rawText) {
     return { type: 'HADIR' };
   }
 
-  // Pola Reschedule (mendukung typo: reschedole, rescedule, riscedul, jadwal ulang, undur, ganti jadwal)
+  // Pola Reschedule (mendukung kata kunci reschedule atau typo: reschedole, rescedule)
   const reschedPattern = /\b(reschedule|reschedole|rescedule|riscedul|rescedul|jadwal ulang|ganti jadwal|ubah jadwal|undur|mundur|tunda)\b/i;
+  const extractedDate = extractDateFromText(text);
+
   if (reschedPattern.test(text)) {
-    const extractedDate = extractDateFromText(text);
+    return {
+      type: 'RESCHEDULE',
+      date: extractedDate
+    };
+  }
+
+  // DETEKSI CERDAS: Jika pasien HANYA mengirimkan tanggal (seperti pada log: "2026-09-15"), anggap sebagai tanggal Reschedule!
+  if (extractedDate && text.length <= 25) {
     return {
       type: 'RESCHEDULE',
       date: extractedDate
@@ -233,12 +254,12 @@ PENTING: Jika pasien meminta reschedule tanggal kontrol dan menentukan tanggalny
 }
 
 // =========================================================================
-// REST API GOOGLE AI STUDIO ENGINE (SUPER UPGRADE: FIXED AUTH & FAILOVER)
+// ENGINE 1: GOOGLE AI STUDIO (GEMINI 3.5 FLASH - TANPA BEARER HEADER)
 // =========================================================================
-async function askGeminiClinic(conversationHistory, patientContext = null) {
+async function askGeminiClinic(conversationHistory, systemPromptText) {
   const apiKey = GEMINI_API_KEY.trim();
 
-  // 1. Sanitasi History: Pastikan giliran berselang-seling dan diawali 'user'
+  // Sanitasi riwayat percakapan untuk memenuhi syarat Gemini
   const sanitizedHistory = [];
   for (const turn of conversationHistory) {
     if (!turn.parts || !turn.parts[0] || !turn.parts[0].text) continue;
@@ -247,32 +268,18 @@ async function askGeminiClinic(conversationHistory, patientContext = null) {
     if (!text) continue;
 
     if (sanitizedHistory.length > 0 && sanitizedHistory[sanitizedHistory.length - 1].role === role) {
-      // Gabungkan turn berturut-turut yang memiliki role sama
       sanitizedHistory[sanitizedHistory.length - 1].parts[0].text += `\n${text}`;
     } else {
       sanitizedHistory.push({ role, parts: [{ text }] });
     }
   }
 
-  // Wajib diawali oleh user
   while (sanitizedHistory.length > 0 && sanitizedHistory[0].role !== 'user') {
     sanitizedHistory.shift();
   }
 
   if (sanitizedHistory.length === 0) {
-    throw new Error('History pesan tidak valid.');
-  }
-
-  let systemPromptText = await fetchActiveCustomPrompt();
-
-  if (patientContext) {
-    systemPromptText += `\n\nKONTEKS PASIEN YANG SEDANG CHAT SAAT INI:
-- Nama Pasien: ${patientContext.namaPasien || "-"}
-- No. Rekam Medis: ${patientContext.noRm || "-"}
-- Jadwal Kontrol Terdaftar: ${patientContext.tglKontrol || "-"}
-- Dokter DPJP: drg. Hj. Kurniawaty, Sp.KG & drg. M. Aksa Arsyad
-- Poli: Poli Konservasi dan Endodonsi
-Gunakan informasi di atas jika relevan untuk menyapa atau mengonfirmasi jadwal mereka secara akrab.`;
+    throw new Error('History pesan Gemini kosong.');
   }
 
   const requestBody = {
@@ -287,51 +294,123 @@ Gunakan informasi di atas jika relevan untuk menyapa atau mengonfirmasi jadwal m
     }
   };
 
-  // Daftar model failover bertingkat
-  const modelList = [
-    GEMINI_MODEL,
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash"
-  ].filter((v, i, a) => v && a.indexOf(v) === i);
+  // Model Gemini 3.5 Flash langsung
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  
+  // PERBAIKAN FATAL: Dilarang keras mengirimkan Authorization: Bearer pada API Key AQ.
+  const headers = {
+    'Content-Type': 'application/json'
+  };
 
-  let lastError = null;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify(requestBody)
+  });
 
-  for (const model of modelList) {
-    try {
-      // PERBAIKAN FATAL: Gunakan x-goog-api-key dan URL ?key, HAPUS Authorization: Bearer
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      const headers = { 
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey
-      };
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Google AI Studio (${GEMINI_MODEL}) ${res.status}: ${errText}`);
+  }
 
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify(requestBody)
-      });
+  const data = await res.json();
+  const rawReply = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawReply || !rawReply.trim()) throw new Error('Respon Gemini kosong');
 
-      if (!res.ok) {
-        const errText = await res.text();
-        console.warn(`[Gemini Try ${model} ${res.status}]`, errText);
-        lastError = new Error(`Google AI Studio (${model}) ${res.status}: ${errText}`);
-        if (res.status === 404 || res.status === 400) continue;
-        break;
-      }
+  console.log(`[AI Response] Berhasil menggunakan Google AI Studio (${GEMINI_MODEL})`);
+  return rawReply.trim();
+}
 
-      const data = await res.json();
-      const rawReply = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (rawReply && rawReply.trim()) {
-        return rawReply.trim();
-      }
-    } catch (modelErr) {
-      console.warn(`[Gemini Error on ${model}]`, modelErr.message);
-      lastError = modelErr;
+// =========================================================================
+// ENGINE 2: GROQ AI FALLBACK ENGINE (PERSIS ALLOWED MODELS ORGANISASI)
+// =========================================================================
+async function askGroqClinic(conversationHistory, systemPromptText) {
+  if (!GROQ_API_KEY) throw new Error("Groq API Key tidak terkonfigurasi.");
+
+  // Format pesan ke struktur OpenAI / Groq
+  const groqMessages = [
+    { role: "system", content: systemPromptText }
+  ];
+
+  for (const turn of conversationHistory) {
+    const role = turn.role === 'model' ? 'assistant' : 'user';
+    const text = turn.parts?.[0]?.text || '';
+    if (text.trim()) {
+      groqMessages.push({ role, content: text.trim() });
     }
   }
 
-  throw lastError || new Error('Gagal memproses respon dari seluruh model Gemini.');
+  let lastGroqError = null;
+
+  // Coba model yang diizinkan organisasi (Gambar 2), mulai dari openai/gpt-oss-120b
+  for (const model of GROQ_ALLOWED_MODELS) {
+    try {
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${GROQ_API_KEY.trim()}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: groqMessages,
+          temperature: 0.4,
+          max_tokens: 2048
+        })
+      });
+
+      if (!res.ok) {
+        const errBody = await res.text();
+        console.warn(`[Groq Failover: ${model} ${res.status}]`, errBody);
+        lastGroqError = new Error(`Groq (${model}) ${res.status}: ${errBody}`);
+        continue;
+      }
+
+      const data = await res.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (reply && reply.trim()) {
+        console.log(`[AI Fallback Active] Berhasil dijawab oleh Groq AI (${model}) ⚡`);
+        return reply.trim();
+      }
+    } catch (err) {
+      console.warn(`[Groq Error ${model}]`, err.message);
+      lastGroqError = err;
+    }
+  }
+
+  throw lastGroqError || new Error("Seluruh model Groq AI gagal.");
+}
+
+// =========================================================================
+// HYBRID UNIFIED AI ROUTER: GEMINI 3.5 FLASH -> GROQ AI FALLBACK
+// =========================================================================
+async function askAIClinicUnified(conversationHistory, patientContext = null) {
+  let systemPromptText = await fetchActiveCustomPrompt();
+
+  if (patientContext) {
+    systemPromptText += `\n\nKONTEKS PASIEN YANG SEDANG CHAT SAAT INI:
+- Nama Pasien: ${patientContext.namaPasien || "-"}
+- No. Rekam Medis: ${patientContext.noRm || "-"}
+- Jadwal Kontrol Terdaftar: ${patientContext.tglKontrol || "-"}
+- Dokter DPJP: drg. Hj. Kurniawaty, Sp.KG & drg. M. Aksa Arsyad
+- Poli: Poli Konservasi dan Endodonsi
+Gunakan informasi di atas jika relevan untuk menyapa atau mengonfirmasi jadwal mereka secara akrab.`;
+  }
+
+  // Langkah 1: Panggil Utama Gemini 3.5 Flash
+  try {
+    return await askGeminiClinic(conversationHistory, systemPromptText);
+  } catch (geminiErr) {
+    console.warn(`[Gemini Error -> Beralih ke Groq AI]`, geminiErr.message);
+  }
+
+  // Langkah 2: Jika Gemini gagal, otomatis Fallback ke Groq AI
+  try {
+    return await askGroqClinic(conversationHistory, systemPromptText);
+  } catch (groqErr) {
+    console.error(`[Groq Fallback Error]`, groqErr.message);
+    throw new Error(`Kedua Engine AI (Gemini 3.5 & Groq) gagal merespons.`);
+  }
 }
 
 // =========================================================================
@@ -528,28 +607,28 @@ export default function setupMessageHandler(sock) {
         switch (command) {
           case 'menu':
           case 'help':
-            const menuText = `*🤖 BOT KONTROL RSKDGM & ASISTEN AI (GEMINI) 🤖*\n\n` +
+            const menuText = `*🤖 BOT KONTROL RSKDGM (GEMINI 3.5 + GROQ AI) 🤖*\n\n` +
                              `*🦷 SIMGOS FOLLOW-UP KONTROL:*\n` +
-                             `* !followupnow* [tgl/auto] [me] - 🚀 *Kirim sekarang* (Ketik 'me' untuk otomatis konversi nomor pasien ke nomor WhatsApp Anda)\n` +
-                             `* !followup* [tgl/auto] - Cek daftar antrean pasien kontrol\n` +
-                             `* !gassfollowup* [tgl/auto] [me] - Kirim WA massal ke Pasien & 2 Dokter\n` +
+                             `* !followupnow* [tgl/auto] [me] - 🚀 Kirim sekarang instan ('me' = konversi ke WA Anda)\n` +
+                             `* !followup* [tgl/auto] - Cek daftar antrean kontrol H-\n` +
+                             `* !gassfollowup* [tgl/auto] [me] - Kirim WA massal Pasien & Dokter\n` +
                              `* !caripasien* <No.RM/Nama/WA> - Cari data pasien di Spreadsheet\n` +
                              `* !reschedule* <No.RM> <YYYY-MM-DD> - Ubah tanggal kontrol manual\n` +
                              `* !statskontrol* - Cek ringkasan statistik kontrol\n` +
                              `* !settingssimgos* - Cek konfigurasi H- & nomor dokter\n` +
                              `* !templatesimgos* - Cek template format pesan WhatsApp\n` +
-                             `* !autofollowup on/off* - Pengaturan status blast otomatis harian\n` +
-                             `* !setjamfollowup* <HH:mm> - Ubah jam blast otomatis\n\n` +
+                             `* !autofollowup on/off* - Pengaturan status blast harian otomatis\n` +
+                             `* !setjamfollowup* <HH:mm> - Ubah jam blast harian\n\n` +
 
-                             `*🧠 GOOGLE AI STUDIO:*\n` +
-                             `* !getprompt* - Cek System Instruction AI aktif dari Sheet\n` +
-                             `* !clearpromptcache* - Refresh cache prompt terbaru dari Sheet\n\n` +
+                             `*🧠 AI STUDIO & GROQ DUAL-ENGINE:*\n` +
+                             `* !getprompt* - Cek System Prompt AI aktif & model\n` +
+                             `* !clearpromptcache* - Refresh cache prompt dari Spreadsheet\n\n` +
 
                              `*⚙️ UTILITAS:* \n` +
                              `* !ping* - Cek kecepatan respon bot\n` +
-                             `* !runtime* - Cek status server & waktu aktif bot\n` +
+                             `* !runtime* - Cek waktu aktif bot & server\n` +
                              `* !sticker* / *!s* - Konversi gambar ke stiker\n\n` +
-                             `_💬 Chat biasa tanpa tanda (!) akan otomatis ditangani secara cerdas & ramah._`;
+                             `_💬 Chat biasa tanpa tanda (!) dijawab natural & cerdas oleh Gemini 3.5 Flash / Groq AI._`;
             await sock.sendMessage(remoteJid, { text: menuText }, { quoted: msg });
             return;
 
@@ -568,8 +647,8 @@ export default function setupMessageHandler(sock) {
             }
 
             const infoNotice = toSender 
-              ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data... ⚠️ *Fitur Aktif:* Nomor penerima otomatis dialihkan ke nomor WhatsApp Anda (*${senderPhonePure}*).`
-              : `⚡ *[FOLLOWUP NOW]* Memulai penarikan data dan pengiriman instan ke nomor WhatsApp pasien terdaftar...`;
+              ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data... ⚠️ *Fitur Aktif:* Nomor penerima dialihkan ke WhatsApp Anda (*${senderPhonePure}*).`
+              : `⚡ *[FOLLOWUP NOW]* Memulai penarikan data dan pengiriman instan ke nomor WhatsApp pasien...`;
 
             await sock.sendMessage(remoteJid, { text: infoNotice }, { quoted: msg });
             
@@ -578,12 +657,12 @@ export default function setupMessageHandler(sock) {
 
               if (blastResult.totalTarget === 0) {
                 await sock.sendMessage(remoteJid, { 
-                  text: `ℹ️ Tidak ada antrean pasien kontrol berstatus *Pending* untuk target tanggal ${blastResult.targetDate}. Semua sudah terkirim atau belum ada jadwal.` 
+                  text: `ℹ️ Tidak ada antrean pasien kontrol berstatus *Pending* untuk tanggal ${blastResult.targetDate}.` 
                 }, { quoted: msg });
                 break;
               }
 
-              let rekapSekarang = `🚀 *[FOLLOWUP NOW SELESAI DILAKUKAN]*\n\n` +
+              let rekapSekarang = `🚀 *[FOLLOWUP NOW SELESAI]*\n\n` +
                                   `📅 *Target Kontrol:* ${blastResult.targetDate}\n` +
                                   `👥 *Total Pasien Disasar:* ${blastResult.totalTarget}\n` +
                                   `📲 *Pesan Terkirim:* ${blastResult.pasienTerkirim}\n` +
@@ -591,7 +670,7 @@ export default function setupMessageHandler(sock) {
                                   `👨‍⚕️ *Laporan Terkirim ke DPJP:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
 
               if (blastResult.isSenderConverted) {
-                rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Nomor Sender Anda)\n`;
+                rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Nomor Anda)\n`;
               }
 
               rekapSekarang += `\n_Seluruh status di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
@@ -613,7 +692,7 @@ export default function setupMessageHandler(sock) {
             const parsedMenit = parseInt(inputMenit, 10);
 
             if (isNaN(parsedJam) || isNaN(parsedMenit) || parsedJam < 0 || parsedJam > 23 || parsedMenit < 0 || parsedMenit > 59) {
-              await sock.sendMessage(remoteJid, { text: "❌ Jam atau menit tidak valid! Gunakan rentang 00:00 - 23:59." }, { quoted: msg });
+              await sock.sendMessage(remoteJid, { text: "❌ Jam atau menit tidak valid! Rentang 00:00 - 23:59." }, { quoted: msg });
               break;
             }
 
@@ -622,7 +701,7 @@ export default function setupMessageHandler(sock) {
             saveSettings();
 
             await sock.sendMessage(remoteJid, { 
-              text: `⏰ *Jadwal Jam Auto Follow-up Berhasil Diubah!*\n\nJam Eksekusi Harian: *${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA*\nStatus Auto Follow-up: *${botSettings.autoFollowupSimgos ? 'AKTIF (ON)' : 'NONAKTIF (OFF)'}*` 
+              text: `⏰ *Jadwal Auto Follow-up Diubah!*\n\nJam: *${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA*\nStatus: *${botSettings.autoFollowupSimgos ? 'AKTIF (ON)' : 'NONAKTIF (OFF)'}*` 
             }, { quoted: msg });
             return;
 
@@ -650,7 +729,7 @@ export default function setupMessageHandler(sock) {
                              `   🏥 Status WA: ${px.statusWa} | Dokter: ${px.statusDokter}\n\n`;
               });
 
-              textHasil += `👉 _Ketik *!followupnow me* untuk kirim ke nomor Anda, atau *!followupnow* untuk kirim ke pasien._`;
+              textHasil += `👉 _Ketik *!followupnow me* untuk kirim ke nomor Anda, atau *!followupnow* untuk blast ke pasien._`;
               await sock.sendMessage(remoteJid, { text: textHasil }, { quoted: msg });
             } catch (e) {
               await sock.sendMessage(remoteJid, { text: `❌ *Gagal mengambil data:* ${e.message}` }, { quoted: msg });
@@ -684,7 +763,7 @@ export default function setupMessageHandler(sock) {
                                `👨‍⚕️ *Laporan DPJP Terkirim:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
 
               if (blastResult.isSenderConverted) {
-                rekapAkhir += `🎯 *Catatan:* Pesan pasien dialihkan ke nomor WhatsApp pengirim (${blastResult.convertedToPhone}).\n`;
+                rekapAkhir += `🎯 *Catatan:* Pesan dialihkan ke WhatsApp pengirim (${blastResult.convertedToPhone}).\n`;
               }
 
               rekapAkhir += `\n_Seluruh status di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
@@ -743,7 +822,7 @@ export default function setupMessageHandler(sock) {
                   text: `✅ *Reschedule Berhasil!*\n\n` +
                         `🔖 No. RM: *${rmResched}*\n` +
                         `📅 Jadwal Kontrol Baru: *${dateResched}*\n` +
-                        `Status pasien otomatis direset ke *Pending* agar siap difollow-up kembali saat mendekati jadwal baru.` 
+                        `Status pasien otomatis direset ke *Pending* agar siap difollow-up kembali.` 
                 }, { quoted: msg });
               } else {
                 throw new Error(reschedApi.message);
@@ -786,7 +865,7 @@ export default function setupMessageHandler(sock) {
               if (cfg.status === "success") {
                 const c = cfg.config;
                 let txtCfg = `⚙️ *KONFIGURASI SISTEM SIMGOS KONTROL*\n\n` +
-                             `🕒 Jam Auto Blast Harian: *${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA*\n` +
+                             `🕒 Jam Auto Blast: *${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA*\n` +
                              `🔄 Status Auto Follow-up: *${botSettings.autoFollowupSimgos ? 'AKTIF (ON)' : 'NONAKTIF (OFF)'}*\n` +
                              `🏥 Instansi: ${c.instansi}\n` +
                              `🦷 Poli: ${c.poli}\n\n` +
@@ -818,13 +897,13 @@ export default function setupMessageHandler(sock) {
           case 'getprompt':
             const activeP = await fetchActiveCustomPrompt();
             await sock.sendMessage(remoteJid, { 
-              text: `📋 *SYSTEM PROMPT AKTIF DARI SHEET 'CUSTOM_PROMPT':*\n\n"${activeP}"\n\n⚡ Model: *${GEMINI_MODEL}*` 
+              text: `📋 *SYSTEM PROMPT AKTIF DARI SHEET 'CUSTOM_PROMPT':*\n\n"${activeP}"\n\n⚡ Model AI Utama: *${GEMINI_MODEL}*\n🛡️ Fallback Engine: *Groq AI (${GROQ_MODEL})*` 
             }, { quoted: msg });
             return;
 
           case 'clearpromptcache':
             cachedCustomPrompt = { prompt: '', timestamp: 0 };
-            await sock.sendMessage(remoteJid, { text: "🔄 Cache Custom Prompt berhasil dibersihkan. Prompt baru akan langsung diambil dari Sheet saat chat berikutnya." }, { quoted: msg });
+            await sock.sendMessage(remoteJid, { text: "🔄 Cache Custom Prompt dibersihkan. Prompt baru langsung diambil dari Spreadsheet saat chat berikutnya." }, { quoted: msg });
             return;
 
           case 'ping':
@@ -849,7 +928,7 @@ export default function setupMessageHandler(sock) {
       }
 
       // =====================================================================
-      // 3. HYBRID INTELLIGENT CHAT ENGINE (FAST-PATH INTENT + GEMINI AI)
+      // 3. HYBRID INTELLIGENT CHAT ENGINE (FAST-PATH + GEMINI 3.5 + GROQ AI)
       // =====================================================================
       await sock.sendPresenceUpdate('composing', remoteJid);
 
@@ -874,14 +953,12 @@ export default function setupMessageHandler(sock) {
         const tglKontrolPx = patientData ? patientData.tglKontrol : "jadwal Anda";
 
         if (patientData) {
-          // Update status di database spreadsheet menjadi Hadir
           await callSimgosApi("update_status", { 
             noRm: patientData.noRm, 
             type: "pasien", 
             status: "Hadir (Terkonfirmasi)" 
           }).catch(() => {});
 
-          // Notifikasi langsung ke kedua Dokter DPJP
           const notifDokterHadir = `✅ *KONFIRMASI KEHADIRAN PASIEN (HADIR)*\n\n` +
                                    `Pasien berikut telah mengonfirmasi *HADIR* untuk kontrol gigi:\n` +
                                    `👤 *Nama Pasien:* ${patientData.namaPasien}\n` +
@@ -901,7 +978,7 @@ export default function setupMessageHandler(sock) {
                            `📌 *Pengingat Kontrol:*\n` +
                            `• Harap hadir 15 menit sebelum poli dibuka.\n` +
                            `• Mohon membawa Kartu BPJS / KTP serta kartu kontrol sebelumnya.\n` +
-                           `• Lakukan konfirmasi di loket pendaftaran Poli Konservasi.\n\n` +
+                           `• Lakukan registrasi di loket pendaftaran Poli Konservasi.\n\n` +
                            `Sampai jumpa di poli ya. Semoga proses perawatan giginya berjalan lancar dan lekas sehat selalu! 🦷✨`;
 
         await sock.sendMessage(remoteJid, { text: replyHadir });
@@ -909,12 +986,12 @@ export default function setupMessageHandler(sock) {
         return;
       }
 
-      // --- JALUR CEPAT 2: PASIEN INGIN "RESCHEDULE" ---
+      // --- JALUR CEPAT 2: PASIEN INGIN "RESCHEDULE" / MENGIRIM TANGGAL ---
       if (intent.type === 'RESCHEDULE') {
         const namaPx = patientData ? patientData.namaPasien : pushName;
         const noRmPx = patientData ? patientData.noRm : "-";
 
-        // Kasus 2A: Pasien langsung menyertakan tanggal baru
+        // Kasus 2A: Pasien langsung menyertakan atau membalas tanggal (misal: "2026-09-15" atau "undur ke 25 september")
         if (intent.date && patientData) {
           const newDate = intent.date;
           await callSimgosApi("reschedule_patient", {
@@ -946,7 +1023,7 @@ export default function setupMessageHandler(sock) {
           return;
         }
 
-        // Kasus 2B: Pasien mengetik kata "RESCHEDULE" / "RESCHEDOLE" tanpa tanggal
+        // Kasus 2B: Pasien mengetik kata "RESCHEDULE" tanpa tanggal
         if (patientData) {
           await callSimgosApi("update_status", { 
             noRm: patientData.noRm, 
@@ -956,7 +1033,7 @@ export default function setupMessageHandler(sock) {
         }
 
         const replyAskDate = `Baik Bapak/Ibu *${namaPx}*, kami siap membantu proses penjadwalan ulang (*reschedule*) kontrol perawatan gigi Anda.\n\n` +
-                             `Kira-kira Anda ingin mengajukan kontrol di hari apa atau tanggal berapa? (Contoh format: *2026-09-28* atau *25 September*).\n\n` +
+                             `Kira-kira Anda ingin mengajukan kontrol di hari apa atau tanggal berapa? (Contoh: *2026-09-15* atau *25 September*).\n\n` +
                              `Silakan balas pesan ini dengan tanggal yang Anda inginkan agar langsung kami sesuaikan di sistem SIMGOS ya. 🙏`;
 
         await sock.sendMessage(remoteJid, { text: replyAskDate });
@@ -964,7 +1041,7 @@ export default function setupMessageHandler(sock) {
         return;
       }
 
-      // --- JALUR 3: PERCAKAPAN NATURAL & KONSULTASI GIGI DENGAN GEMINI AI ---
+      // --- JALUR 3: PERCAKAPAN NATURAL & KONSULTASI (GEMINI 3.5 FLASH + GROQ AI FALLBACK) ---
       let userSession = conversationSessions.get(senderPhonePure);
       if (!userSession) {
         userSession = { history: [], lastSeen: Date.now() };
@@ -987,15 +1064,15 @@ export default function setupMessageHandler(sock) {
 
       let rawAiResponse = "";
       try {
-        rawAiResponse = await askGeminiClinic(userSession.history, patientData);
+        rawAiResponse = await askAIClinicUnified(userSession.history, patientData);
       } catch (aiErr) {
-        console.error("[Gemini AI Error]", aiErr.message);
-        rawAiResponse = `Halo Bapak/Ibu ${patientData ? patientData.namaPasien : ""}, terima kasih telah menghubungi Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, staf poli kami siap membantu informasi jadwal dan perawatan gigi Anda. Ada hal yang bisa kami bantu? 🙏`;
+        console.error("[Dual AI Fatal Error]", aiErr.message);
+        rawAiResponse = `Halo Bapak/Ibu ${patientData ? patientData.namaPasien : ""}, terima kasih telah menghubungi Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, staf poli kami siap membantu jadwal kontrol dan perawatan gigi Anda. Ada yang bisa kami bantu? 🙏`;
       } finally {
         clearInterval(typingTimer);
       }
 
-      // Deteksi Tag Reschedule dari AI
+      // Deteksi Tag Reschedule Otomatis dari AI (Gemini / Groq)
       const rescheduleMatch = rawAiResponse.match(/\[ACTION:RESCHEDULE:(\d{4}-\d{2}-\d{2})\]/i);
       let finalClientReply = rawAiResponse.replace(/\[ACTION:RESCHEDULE:\d{4}-\d{2}-\d{2}\]/gi, '').trim();
 
