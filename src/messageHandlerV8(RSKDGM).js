@@ -50,7 +50,7 @@ let cachedSystemConfig = {
 };
 const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000; // Cache lokal 5 menit
 
-// Manajemen Sesi Percakapan Multi-Turn
+// Manajemen Sesi Percakapan Multi-Turn & Cache Pasien Terkait
 const conversationSessions = new Map();
 const SESSION_TTL_MS = 30 * 60 * 1000; // Sesi percakapan 30 menit
 
@@ -141,7 +141,7 @@ function formatForWhatsApp(text) {
 }
 
 /**
- * Kompilasi Variabel Template dari Sheet CUSTOM_FORMAT (Murni Tanpa String Hardcoded di Kodingan)
+ * Kompilasi Variabel Template dari Sheet CUSTOM_FORMAT (Murni 100% Tanpa Teks Langsung di Kodingan)
  */
 function compileTemplateText(templateStr, patient, sysCfg) {
   if (!templateStr) return "";
@@ -154,6 +154,7 @@ function compileTemplateText(templateStr, patient, sysCfg) {
     .replace(/{AGAMA}/g, patient?.agama || "-")
     .replace(/{JENIS_KELAMIN}/g, patient?.jenisKelamin || "-")
     .replace(/{NO_WA}/g, patient?.noHp || "-")
+    .replace(/{NO_SENDER}/g, patient?.noSender || "-")
     .replace(/{DPJP_UTAMA}/g, sysCfg.dpjpUtama || "drg. Hj. Kurniawaty, Sp.KG")
     .replace(/{DPJP_PENDAMPING}/g, sysCfg.dpjpPendamping || "drg. M. Aksa Arsyad")
     .replace(/{NAMA_INSTANSI}/g, sysCfg.instansi || "RSKD Gigi dan Mulut Prov. Sulawesi Selatan")
@@ -459,7 +460,7 @@ Gunakan informasi di atas jika relevan untuk menyapa atau mengonfirmasi jadwal m
 }
 
 // =========================================================================
-// LOGIKA FOLLOW-UP DENGAN FITUR AUTO-CONVERT NOMOR SENDER
+// LOGIKA FOLLOW-UP DENGAN FITUR AUTO-CONVERT NOMOR SENDER (KOLOM 13)
 // =========================================================================
 async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "auto", overrideToSender = false) {
   const resultLog = {
@@ -495,6 +496,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
 
   for (const px of listPasien) {
     const targetJid = (overrideToSender && replyTargetJid) ? sanitizeNumber(replyTargetJid) : sanitizeNumber(px.noHp);
+    const activeSenderNumber = (overrideToSender && senderPure) ? senderPure : extractPureNumberE164(px.noHp);
 
     try {
       let pesanKirim = px.pesan_wa_pasien;
@@ -507,10 +509,19 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
       await sock.sendMessage(targetJid, { text: pesanKirim });
       resultLog.pasienTerkirim++;
       
+      // Update status DAN simpan No Sender aktif ke Kolom 13 Spreadsheet
       await callSimgosApi("update_status", { 
         row: px.rowNumber, 
         type: "pasien", 
-        status: "Terkirim" 
+        status: "Terkirim",
+        noSender: activeSenderNumber
+      });
+
+      // Simpan asosiasi sesi lokal agar instan dikenali
+      conversationSessions.set(activeSenderNumber, {
+        history: [],
+        lastSeen: Date.now(),
+        patientData: px
       });
 
       await new Promise(r => setTimeout(r, 2000));
@@ -520,7 +531,6 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
     }
   }
 
-  // Notifikasi laporan blast ke kedua dokter
   const targetDoctors = followupData.doctors && followupData.doctors.length > 0
     ? followupData.doctors.map(d => sanitizeNumber(d.wa)).filter(Boolean)
     : DOKTER_JID_LIST;
@@ -690,7 +700,7 @@ export default function setupMessageHandler(sock) {
             }
 
             const infoNotice = toSender 
-              ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data... ⚠️ *Fitur Aktif:* Nomor penerima dialihkan ke WhatsApp Anda (*${senderPhonePure}*).`
+              ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data... ⚠️ *Fitur Aktif:* Nomor penerima dialihkan ke WhatsApp Anda (*${senderPhonePure}*) dan dicatat ke Kolom 13 No Sender.`
               : `⚡ *[FOLLOWUP NOW]* Memulai penarikan data dan pengiriman instan ke nomor WhatsApp pasien...`;
 
             await sock.sendMessage(remoteJid, { text: infoNotice }, { quoted: msg });
@@ -713,7 +723,7 @@ export default function setupMessageHandler(sock) {
                                   `👨‍⚕️ *Laporan Terkirim ke DPJP:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
 
               if (blastResult.isSenderConverted) {
-                rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Nomor Anda)\n`;
+                rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Tersimpan di Kolom 13 No Sender)\n`;
               }
 
               rekapSekarang += `\n_Seluruh status di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
@@ -768,7 +778,8 @@ export default function setupMessageHandler(sock) {
 
               resFollowup.data.forEach((px, idx) => {
                 textHasil += `${idx + 1}. *${px.namaPasien}* (RM: ${px.noRm})\n` +
-                             `   📱 WA: ${px.noHp}\n` +
+                             `   📱 WA Pasien: ${px.noHp}\n` +
+                             `   📲 No Sender: ${px.noSender || '-'}\n` +
                              `   🏥 Status WA: ${px.statusWa} | Dokter: ${px.statusDokter}\n\n`;
               });
 
@@ -806,7 +817,7 @@ export default function setupMessageHandler(sock) {
                                `👨‍⚕️ *Laporan DPJP Terkirim:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
 
               if (blastResult.isSenderConverted) {
-                rekapAkhir += `🎯 *Catatan:* Pesan dialihkan ke WhatsApp pengirim (${blastResult.convertedToPhone}).\n`;
+                rekapAkhir += `🎯 *Catatan:* Pesan dialihkan ke WhatsApp pengirim (${blastResult.convertedToPhone}) & Kolom 13 No Sender terupdate.\n`;
               }
 
               rekapAkhir += `\n_Seluruh status di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
@@ -837,6 +848,7 @@ export default function setupMessageHandler(sock) {
                             `   📅 Tgl Masuk: ${p.tglMasuk}\n` +
                             `   📅 Tgl Kontrol: ${p.tglKontrol}\n` +
                             `   📱 No. WA: ${p.noHp}\n` +
+                            `   📲 No. Sender: ${p.noSender || '-'}\n` +
                             `   🎂 Umur / JK: ${p.umur} / ${p.jenisKelamin}\n` +
                             `   Status: Pasien [${p.statusWa}] | Dokter [${p.statusDokter}]\n\n`;
               });
@@ -1017,18 +1029,28 @@ export default function setupMessageHandler(sock) {
       const targetDpjpUtamaWa = sysConfig.doctors?.[0]?.wa || sysConfig.dpjpUtamaWa || "6282291675363";
       const targetDpjpUtamaJid = sanitizeNumber(targetDpjpUtamaWa);
 
-      // B. Identifikasi Data Pasien dari Spreadsheet
+      // B. Identifikasi Data Pasien dari Spreadsheet Berdasarkan No WA / No Sender (Kolom 13)
       let patientData = null;
       try {
         const searchPx = await callSimgosApi("search_patient", { query: senderPhonePure });
         if (searchPx.status === "success" && Array.isArray(searchPx.data) && searchPx.data.length > 0) {
           patientData = searchPx.data[0];
+          console.log(`[Pasien Ditemukan dari Database] Nama: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl: ${patientData.tglKontrol}`);
+        } else {
+          // Cek fallback sesi lokal jika baru saja di-blast
+          const sessionSaved = conversationSessions.get(senderPhonePure);
+          if (sessionSaved && sessionSaved.patientData) {
+            patientData = sessionSaved.patientData;
+            console.log(`[Pasien Dikenali dari Sesi Lokal] Nama: ${patientData.namaPasien}`);
+          } else {
+            console.warn(`[Pasien Tidak Dikenali di Kolom WA maupun Kolom No Sender] Sender: ${senderPhonePure}`);
+          }
         }
       } catch (errSearch) {
         console.warn("[Search Patient Warning]", errSearch.message);
       }
 
-      // Pastikan objek data pasien selalu terisi utuh
+      // Objek Pasien Definitif (Prioritas Database Pasien Asli)
       const pObj = patientData || {
         namaPasien: pushName,
         noRm: "-",
@@ -1037,30 +1059,32 @@ export default function setupMessageHandler(sock) {
         umur: "-",
         agama: "-",
         jenisKelamin: "-",
-        noHp: senderPhonePure
+        noHp: senderPhonePure,
+        noSender: senderPhonePure
       };
 
-      // C. Klasifikasi Niat Pasien (Super Smart NLP)
+      // C. Klasifikasi Niat Pasien (Super Smart NLP: hadir, bisa dok, siap min, reschedule, dll)
       const intent = detectPatientIntent(text);
 
       // =====================================================================
       // JALUR 1: PASIEN KONFIRMASI "HADIR" (BISA DOK / SIAP KAK / BOLEH MIN DLL)
       // =====================================================================
       if (intent.type === 'HADIR') {
-        // 1. Update status di database jika data pasien terdaftar
+        // 1. Update status dan tautkan No Sender aktif ke Kolom 13 di Spreadsheet
         if (patientData && patientData.noRm) {
           try {
             await callSimgosApi("update_status", { 
               noRm: patientData.noRm, 
               type: "pasien", 
-              status: "Hadir (Terkonfirmasi)" 
+              status: "Hadir (Terkonfirmasi)",
+              noSender: senderPhonePure
             });
           } catch (e) {
             console.error("[Update Status Hadir Error]", e.message);
           }
         }
 
-        // 2. KIRIM NOTIFIKASI KE DOKTER DPJP UTAMA (Template: WA_LAPORAN_HADIR_DOKTER)
+        // 2. KIRIM NOTIFIKASI KE DOKTER DPJP UTAMA (100% Template Database WA_LAPORAN_HADIR_DOKTER)
         const templateLaporanHadir = sysConfig.templates["WA_LAPORAN_HADIR_DOKTER"];
         if (templateLaporanHadir) {
           const notifDokterHadir = compileTemplateText(templateLaporanHadir, pObj, sysConfig);
@@ -1071,10 +1095,10 @@ export default function setupMessageHandler(sock) {
             console.error(`[Gagal Kirim ke DPJP Utama: ${targetDpjpUtamaJid}]`, docErr.message);
           }
         } else {
-          console.warn("[Peringatan] Template 'WA_LAPORAN_HADIR_DOKTER' belum terbaca dari CUSTOM_FORMAT.");
+          console.warn("[Peringatan] Template 'WA_LAPORAN_HADIR_DOKTER' belum ditemukan di CUSTOM_FORMAT.");
         }
 
-        // 3. KIRIM BALASAN KE PASIEN (Template: WA_PX_HADIR_CONFIRM)
+        // 3. KIRIM BALASAN KE PASIEN (100% Template Database WA_PX_HADIR_CONFIRM)
         const templateBalasHadir = sysConfig.templates["WA_PX_HADIR_CONFIRM"];
         if (templateBalasHadir) {
           const replyHadir = compileTemplateText(templateBalasHadir, pObj, sysConfig);
@@ -1096,7 +1120,8 @@ export default function setupMessageHandler(sock) {
             try {
               await callSimgosApi("reschedule_patient", {
                 noRm: patientData.noRm,
-                newDate: newDate
+                newDate: newDate,
+                noSender: senderPhonePure
               });
             } catch (e) {
               console.error("[Reschedule API Error]", e.message);
@@ -1105,10 +1130,11 @@ export default function setupMessageHandler(sock) {
 
           const updatedPatientObj = {
             ...pObj,
-            tglKontrol: newDate
+            tglKontrol: newDate,
+            noSender: senderPhonePure
           };
 
-          // 1. KIRIM NOTIFIKASI KE DOKTER DPJP UTAMA (Template: WA_LAPORAN_RESCHEDULE_DOKTER)
+          // 1. KIRIM NOTIFIKASI KE DOKTER DPJP UTAMA (100% Template Database WA_LAPORAN_RESCHEDULE_DOKTER)
           const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
           if (templateLaporanResched) {
             const notifResched = compileTemplateText(templateLaporanResched, updatedPatientObj, sysConfig);
@@ -1119,10 +1145,10 @@ export default function setupMessageHandler(sock) {
               console.error(`[Gagal Kirim ke DPJP Utama: ${targetDpjpUtamaJid}]`, docErr.message);
             }
           } else {
-            console.warn("[Peringatan] Template 'WA_LAPORAN_RESCHEDULE_DOKTER' belum terbaca dari CUSTOM_FORMAT.");
+            console.warn("[Peringatan] Template 'WA_LAPORAN_RESCHEDULE_DOKTER' belum ditemukan di CUSTOM_FORMAT.");
           }
 
-          // 2. KIRIM BALASAN KONFIRMASI KE PASIEN (Template: WA_PX_RESCHEDULE)
+          // 2. KIRIM BALASAN KE PASIEN (100% Template Database WA_PX_RESCHEDULE)
           const templateBalasResched = sysConfig.templates["WA_PX_RESCHEDULE"];
           if (templateBalasResched) {
             const replyResched = compileTemplateText(templateBalasResched, updatedPatientObj, sysConfig);
@@ -1139,12 +1165,13 @@ export default function setupMessageHandler(sock) {
             await callSimgosApi("update_status", { 
               noRm: patientData.noRm, 
               type: "pasien", 
-              status: "Reschedule Diajukan" 
+              status: "Reschedule Diajukan",
+              noSender: senderPhonePure
             });
           } catch (e) {}
         }
 
-        // Tanyakan tanggal dengan template WA_PX_RESCHEDULE_ASK
+        // Tanyakan tanggal dengan 100% Template Database WA_PX_RESCHEDULE_ASK
         const templateTanyaTanggal = sysConfig.templates["WA_PX_RESCHEDULE_ASK"];
         if (templateTanyaTanggal) {
           const replyAskDate = compileTemplateText(templateTanyaTanggal, pObj, sysConfig);
@@ -1160,10 +1187,11 @@ export default function setupMessageHandler(sock) {
       // =====================================================================
       let userSession = conversationSessions.get(senderPhonePure);
       if (!userSession) {
-        userSession = { history: [], lastSeen: Date.now() };
+        userSession = { history: [], lastSeen: Date.now(), patientData: patientData };
         conversationSessions.set(senderPhonePure, userSession);
       }
       userSession.lastSeen = Date.now();
+      if (patientData) userSession.patientData = patientData;
 
       userSession.history.push({
         role: 'user',
@@ -1196,7 +1224,8 @@ export default function setupMessageHandler(sock) {
           await callSimgosApi("update_status", { 
             noRm: patientData.noRm, 
             type: "pasien", 
-            status: "Hadir (Terkonfirmasi)" 
+            status: "Hadir (Terkonfirmasi)",
+            noSender: senderPhonePure
           }).catch(() => {});
         }
 
@@ -1222,14 +1251,15 @@ export default function setupMessageHandler(sock) {
           try {
             await callSimgosApi("reschedule_patient", {
               noRm: patientData.noRm,
-              newDate: newRescheduleDate
+              newDate: newRescheduleDate,
+              noSender: senderPhonePure
             });
           } catch (reschedErr) {
             console.error("[Auto-Reschedule Error]", reschedErr.message);
           }
         }
 
-        const updatedPx = { ...pObj, tglKontrol: newRescheduleDate };
+        const updatedPx = { ...pObj, tglKontrol: newRescheduleDate, noSender: senderPhonePure };
         const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
         if (templateLaporanResched) {
           const notifResched = compileTemplateText(templateLaporanResched, updatedPx, sysConfig);
