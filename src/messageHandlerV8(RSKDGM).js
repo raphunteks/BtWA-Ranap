@@ -239,6 +239,13 @@ function extractDateFromText(text) {
 
 function detectPatientIntent(rawText) {
   const text = rawText.trim().toLowerCase();
+
+  // 1. Deteksi Khusus: Pasien Menyatakan Salah Orang / Salah Sambung
+  const wrongPersonPattern = /\b(salah\s*orang|bukan\s*saya|salah\s*nomor|salah\s*ki|salah\s*kirim|salah\s*target|tidak\s*pernah\s*(ke|periksa|daftar))\b/i;
+  if (wrongPersonPattern.test(text)) {
+    return { type: 'SALAH_ORANG' };
+  }
+
   const isNegative = /\b(tidak|nggak|engga|gak|gk|belum|batal)\s*(bisa|hadir|datang|ikut|boleh)?\b/i.test(text);
 
   const hadirPattern = /\b(hadir|bisa\s*(dok|kak|min|hadir|datang|ikut|ia|ya)?|boleh\s*(dok|kak|min)?|siap\s*(dok|kak|min|hadir|datang)?|oke\s*(dok|kak|min)?|ok\s*(dok|kak|min)?|baik\s*(dok|kak|min)?|insya\s*allah\s*(bisa|hadir|datang)?|datang|dateng|ikut)\b/i;
@@ -463,26 +470,38 @@ async function askGroqClinic(conversationHistory, systemPromptText, aiConfig) {
   throw lastGroqError || new Error("Seluruh model Groq AI gagal.");
 }
 
-async function askAIClinicUnified(conversationHistory, patientContext = null) {
+async function askAIClinicUnified(conversationHistory, patientContext = null, senderPushName = "Pasien") {
   const aiConfig = await fetchSystemAIConfig();
   let systemPromptText = aiConfig.prompt;
 
-  // Pastikan nama instansi di system instruction selalu tepat
-  systemPromptText = systemPromptText.replace(/RSKDGM Care|RSKD Care/g, "RSKD Gigi dan Mulut Prov. Sulsel");
+  // Pastikan nama instansi selalu tepat tanpa sebutan lain
+  systemPromptText = systemPromptText.replace(/RSKDGM Care|RSKD Care/gi, "RSKD Gigi dan Mulut Prov. Sulsel");
 
-  // Injeksi Khusus: Memastikan AI mengenali Nama Pasien Sesuai Database
+  // Injeksi Konteks Pasien yang Sangat Ketat dan Akurat
   if (patientContext && patientContext.namaPasien && patientContext.namaPasien !== "-") {
-    systemPromptText += `\n\n[DATA IDENTITAS RESMI PASIEN DI DATABASE]:
-- Nama Pasien: ${patientContext.namaPasien}
-- Nomor RM: ${patientContext.noRm}
-- Tanggal Kontrol: ${patientContext.tglKontrol}
+    systemPromptText += `\n\n[DATA IDENTITAS RESMI PASIEN SESUAI DATABASE]:
+- Nama Lengkap Resmi: ${patientContext.namaPasien}
+- Nomor Rekam Medis: ${patientContext.noRm}
+- Jadwal Kontrol: ${patientContext.tglKontrol}
 - Status Reschedule: ${patientContext.statusReschedule || "-"}
 - Status Rujukan: ${patientContext.statusRujukan || "Rujukan Aktif"}
 - Rumah Sakit: RSKD Gigi dan Mulut Prov. Sulsel
-- Poli: Poli Konservasi dan Endodonsi
+- Unit Poli: Poli Konservasi dan Endodonsi
 
-INSTRUKSI MUTLAK MENGENAI NAMA:
-Saat merespons pertanyaan apa pun dari pasien ini (termasuk pertanyaan umum, keluhan gigi, atau konsultasi santai), kamu WAJIB menyapa dan memanggil pasien ini secara personal menggunakan nama aslinya di database: "${patientContext.namaPasien}" (contoh: "Halo Bapak/Ibu ${patientContext.namaPasien}..."). JANGAN gunakan sebutan anonim jika nama sudah ada!`;
+ATURAN WAJIB PENYEBUTAN NAMA PASIEN:
+1. Pasien yang sedang chat ini adalah "${patientContext.namaPasien}".
+2. Kamu WAJIB menyapa dan memanggil pasien ini dengan nama resminya "${patientContext.namaPasien}".
+3. DILARANG KERAS memanggil dengan nama lain (seperti Rusdianto, dsb).
+4. Gunakan sapaan identitas "RSKD Gigi dan Mulut Prov. Sulsel", jangan gunakan nama lain.`;
+  } else {
+    systemPromptText += `\n\n[DATA PENGIRIM CHAT]:
+- Nama Profil WhatsApp: ${senderPushName}
+- Status Database: Nomor pengirim ini BELUM TERDAFTAR dalam database kontrol Poli Konservasi.
+
+ATURAN RESPONS PENGIRIM TIDAK TERDAFTAR:
+1. Sapa pengirim dengan nama profil WhatsApp-nya: "${senderPushName}".
+2. JANGAN PERNAH mengarang nama pasien lain atau mengarang tanggal kontrol jika tidak ada di database!
+3. Jika pengirim menyatakan "salah orang", "bukan saya", atau merasa salah kirim, jelaskan dengan sangat ramah dan santun bahwa nomornya mungkin salah tercatat di pendaftaran RSKD Gigi dan Mulut Prov. Sulsel, dan persilakan mengabaikan pesan tersebut.`;
   }
 
   try {
@@ -586,16 +605,19 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
 
       console.log(`[Blast ${modeH.toUpperCase()} Terkirim] ${px.namaPasien} (${px.statusRujukan}) -> JID: ${targetJid}`);
 
-      conversationSessions.set(resolvedLid, {
-        history: [],
-        lastSeen: Date.now(),
-        patientData: px
-      });
-      conversationSessions.set(cleanPhone, {
-        history: [],
-        lastSeen: Date.now(),
-        patientData: px
-      });
+      // HANYA simpan ke sesi lokal jika BUKAN mode override pengirim (mencegah tumpang tindih nama)
+      if (!overrideToSender) {
+        conversationSessions.set(resolvedLid, {
+          history: [],
+          lastSeen: Date.now(),
+          patientData: px
+        });
+        conversationSessions.set(cleanPhone, {
+          history: [],
+          lastSeen: Date.now(),
+          patientData: px
+        });
+      }
 
       await new Promise(r => setTimeout(r, 2000));
     } catch (e) {
@@ -737,7 +759,7 @@ export default function setupMessageHandler(sock) {
       const senderInfo = parseSenderInfo(remoteJid);
       const pushName = msg.pushName || "Pasien";
 
-      console.log(`[Chat 1-on-1] Dari: ${senderInfo.id} (${senderInfo.isLid ? 'LID' : 'Phone'}) (${pushName}) | Pesan: "${text.trim()}"`);
+      console.log(`[Chat 1-on-1] Dari: ${senderInfo.id} (${senderInfo.isLid ? 'LID' : 'Phone'}) (PushName: ${pushName}) | Pesan: "${text.trim()}"`);
 
       // =====================================================================
       // 1. COMMAND ADMIN (PREFIX '!')
@@ -773,7 +795,7 @@ export default function setupMessageHandler(sock) {
                              `* !ping* - Cek kecepatan respon bot\n` +
                              `* !runtime* - Cek waktu aktif bot & server\n` +
                              `* !sticker* / *!s* - Konversi gambar ke stiker\n\n` +
-                             `_💬 Pasien dengan 'Rujukan Habis' otomatis dilewati agar tidak menerima pesan follow-up keliru._`;
+                             `_💬 Rumah Sakit Resmi: *RSKD Gigi dan Mulut Prov. Sulsel*._`;
             await sock.sendMessage(senderInfo.targetJid, { text: menuText }, { quoted: msg });
             return;
 
@@ -1230,27 +1252,19 @@ export default function setupMessageHandler(sock) {
       const targetDpjpUtamaWa = sysConfig.doctors?.[0]?.wa || sysConfig.dpjpUtamaWa || "6282291675363";
       const targetDpjpUtamaJid = sanitizeNumber(targetDpjpUtamaWa);
 
-      // COCOKKAN IDENTITAS SENDER DENGAN DATABASE (VIA NOMOR WA MAUPUN NOMOR LID)
+      // COCOKKAN IDENTITAS SENDER SECARA PRESISI DENGAN DATABASE
       let patientData = null;
       try {
         const searchPx = await callSimgosApi("search_patient", { query: senderInfo.id });
         if (searchPx.status === "success" && Array.isArray(searchPx.data) && searchPx.data.length > 0) {
           patientData = searchPx.data[0];
           console.log(`[Pasien Dikenali dari Database] Nama: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl: ${patientData.tglKontrol}`);
-        } else {
-          const sessionSaved = conversationSessions.get(senderInfo.id);
-          if (sessionSaved && sessionSaved.patientData) {
-            patientData = sessionSaved.patientData;
-            console.log(`[Pasien Dikenali dari Sesi Lokal] Nama: ${patientData.namaPasien}`);
-          } else {
-            console.warn(`[Pasien Belum Tertaut di Database] ID: ${senderInfo.id}`);
-          }
         }
       } catch (errSearch) {
         console.warn("[Search Patient Warning]", errSearch.message);
       }
 
-      // Pastikan nama pasien memakai nama resmi database
+      // Tentukan Nama Sapaan yang Benar: Ambil Nama Database JIKA Terdaftar, JIKA Tidak Pakai pushName WhatsApp
       const officialPatientName = (patientData && patientData.namaPasien && patientData.namaPasien !== "-") 
         ? patientData.namaPasien 
         : pushName;
@@ -1270,6 +1284,19 @@ export default function setupMessageHandler(sock) {
       };
 
       const intent = detectPatientIntent(text);
+
+      // =====================================================================
+      // JALUR KHUSUS: PENGIRIM MENYATAKAN "SALAH ORANG / SALAH NOMOR"
+      // =====================================================================
+      if (intent.type === 'SALAH_ORANG') {
+        const wrongPersonReply = `Mohon maaf yang sebesar-besarnya atas ketidaknyamanan pesan sebelumnya, Bapak/Ibu *${officialPatientName}*. 🙏\n\n` +
+                                 `Kemungkinan nomor telepon ini salah tercatat pada antrean pendaftaran pasien kami di *RSKD Gigi dan Mulut Prov. Sulsel*.\n\n` +
+                                 `Silakan abaikan pesan pengingat tersebut jika Anda tidak memiliki jadwal perawatan di Poli Konservasi. Terima kasih banyak atas konfirmasinya. Salam sehat selalu! 🙏✨`;
+        
+        await sock.sendMessage(senderInfo.targetJid, { text: wrongPersonReply }, { quoted: msg });
+        await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+        return;
+      }
 
       // =====================================================================
       // JALUR 1: PASIEN KONFIRMASI "HADIR"
@@ -1325,7 +1352,7 @@ export default function setupMessageHandler(sock) {
           const newDate = intent.date;
           if (patientData && patientData.noRm) {
             try {
-              // Otomatis update tanggal kontrol & tulis ke Kolom 16 'Status Reschedule'
+              // Update database dan catat ke Kolom 16 'Status Reschedule'
               await callSimgosApi("reschedule_patient", {
                 noRm: patientData.noRm,
                 newDate: newDate,
@@ -1364,7 +1391,6 @@ export default function setupMessageHandler(sock) {
           return;
         }
 
-        // Jika minta reschedule tanpa tanggal
         if (patientData && patientData.noRm) {
           try {
             await callSimgosApi("update_status", { 
@@ -1412,7 +1438,7 @@ export default function setupMessageHandler(sock) {
 
       let rawAiResponse = "";
       try {
-        rawAiResponse = await askAIClinicUnified(userSession.history, patientData);
+        rawAiResponse = await askAIClinicUnified(userSession.history, patientData, pushName);
       } catch (aiErr) {
         console.error("[Dual AI Fatal Error]", aiErr.message);
         rawAiResponse = `Halo Bapak/Ibu ${officialPatientName}, terima kasih telah menghubungi Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, staf poli kami siap membantu jadwal kontrol dan perawatan gigi Anda. Ada yang bisa kami bantu? 🙏`;
@@ -1453,7 +1479,6 @@ export default function setupMessageHandler(sock) {
         const newRescheduleDate = rescheduleMatch[1];
         if (patientData && patientData.noRm) {
           try {
-            // Update database dan catat ke Kolom 16
             await callSimgosApi("reschedule_patient", {
               noRm: patientData.noRm,
               newDate: newRescheduleDate,
