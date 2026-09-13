@@ -40,7 +40,6 @@ function parseSenderInfo(rawJid) {
   const isGroup = jidStr.toLowerCase().endsWith('@g.us');
   const isBroadcast = jidStr.toLowerCase().includes('broadcast');
 
-  // Ambil deretan angka murni ID
   const cleanId = jidStr.replace(/@(lid|s\.whatsapp\.net|broadcast|g\.us)$/i, '').replace(/\D/g, '');
 
   let targetJid = jidStr;
@@ -102,10 +101,11 @@ function compileTemplateText(templateStr, patient, sysCfg) {
     .replace(/{JENIS_KELAMIN}/g, patient?.jenisKelamin || "-")
     .replace(/{NO_WA}/g, patient?.noHp || "-")
     .replace(/{NO_SENDER}/g, patient?.noSender || "-")
+    .replace(/{STATUS_RESCHEDULE}/g, patient?.statusReschedule || "-")
     .replace(/{STATUS_RUJUKAN}/g, patient?.statusRujukan || "Rujukan Habis")
     .replace(/{DPJP_UTAMA}/g, sysCfg.dpjpUtama || "drg. Hj. Kurniawaty, Sp.KG")
     .replace(/{DPJP_PENDAMPING}/g, sysCfg.dpjpPendamping || "drg. M. Aksa Arsyad")
-    .replace(/{NAMA_INSTANSI}/g, sysCfg.instansi || "RSKD Gigi dan Mulut Prov. Sulawesi Selatan")
+    .replace(/{NAMA_INSTANSI}/g, sysCfg.instansi || "RSKD Gigi dan Mulut Prov. Sulsel")
     .replace(/{POLI_KLINIK}/g, sysCfg.poli || "Poli Konservasi dan Endodonsi");
 }
 
@@ -115,7 +115,7 @@ function compileTemplateText(templateStr, patient, sysCfg) {
 let cachedSystemConfig = {
   prompt: '',
   templates: {},
-  instansi: 'RSKD Gigi dan Mulut Prov. Sulawesi Selatan',
+  instansi: 'RSKD Gigi dan Mulut Prov. Sulsel',
   poli: 'Poli Konservasi dan Endodonsi',
   dpjpUtama: 'drg. Hj. Kurniawaty, Sp.KG',
   dpjpUtamaWa: '6282291675363',
@@ -127,7 +127,7 @@ let cachedSystemConfig = {
   doctors: [],
   timestamp: 0
 };
-const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000; // Cache lokal 5 menit
+const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000;
 
 const conversationSessions = new Map();
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -291,7 +291,7 @@ async function fetchSystemAIConfig() {
       cachedSystemConfig = {
         prompt: res.activePrompt || cachedSystemConfig.prompt,
         templates: res.templates || cachedSystemConfig.templates,
-        instansi: res.config?.instansi || cachedSystemConfig.instansi,
+        instansi: res.config?.instansi || "RSKD Gigi dan Mulut Prov. Sulsel",
         poli: res.config?.poli || cachedSystemConfig.poli,
         dpjpUtama: res.config?.doctors?.[0]?.name || "drg. Hj. Kurniawaty, Sp.KG",
         dpjpUtamaWa: res.config?.doctors?.[0]?.wa || "6282291675363",
@@ -312,7 +312,6 @@ async function fetchSystemAIConfig() {
   return cachedSystemConfig;
 }
 
-// Mengambil seluruh data pasien dari database lalu menyaring status rujukan
 async function fetchPatientsByRujukanStatus(statusType) {
   try {
     let res = await callSimgosApi("search_patient", { query: "." });
@@ -468,15 +467,22 @@ async function askAIClinicUnified(conversationHistory, patientContext = null) {
   const aiConfig = await fetchSystemAIConfig();
   let systemPromptText = aiConfig.prompt;
 
-  if (patientContext) {
-    systemPromptText += `\n\nKONTEKS PASIEN YANG SEDANG CHAT SAAT INI:
-- Nama Pasien: ${patientContext.namaPasien || "-"}
-- No. Rekam Medis: ${patientContext.noRm || "-"}
-- Jadwal Kontrol Terdaftar: ${patientContext.tglKontrol || "-"}
-- Status Rujukan: ${patientContext.statusRujukan || "Rujukan Habis"}
-- Dokter DPJP: ${aiConfig.dpjpUtama} & ${aiConfig.dpjpPendamping}
-- Poli: ${aiConfig.poli}
-Gunakan informasi di atas jika relevan untuk menyapa atau mengonfirmasi jadwal mereka secara akrab.`;
+  // Pastikan nama instansi di system instruction selalu tepat
+  systemPromptText = systemPromptText.replace(/RSKDGM Care|RSKD Care/g, "RSKD Gigi dan Mulut Prov. Sulsel");
+
+  // Injeksi Khusus: Memastikan AI mengenali Nama Pasien Sesuai Database
+  if (patientContext && patientContext.namaPasien && patientContext.namaPasien !== "-") {
+    systemPromptText += `\n\n[DATA IDENTITAS RESMI PASIEN DI DATABASE]:
+- Nama Pasien: ${patientContext.namaPasien}
+- Nomor RM: ${patientContext.noRm}
+- Tanggal Kontrol: ${patientContext.tglKontrol}
+- Status Reschedule: ${patientContext.statusReschedule || "-"}
+- Status Rujukan: ${patientContext.statusRujukan || "Rujukan Aktif"}
+- Rumah Sakit: RSKD Gigi dan Mulut Prov. Sulsel
+- Poli: Poli Konservasi dan Endodonsi
+
+INSTRUKSI MUTLAK MENGENAI NAMA:
+Saat merespons pertanyaan apa pun dari pasien ini (termasuk pertanyaan umum, keluhan gigi, atau konsultasi santai), kamu WAJIB menyapa dan memanggil pasien ini secara personal menggunakan nama aslinya di database: "${patientContext.namaPasien}" (contoh: "Halo Bapak/Ibu ${patientContext.namaPasien}..."). JANGAN gunakan sebutan anonim jika nama sudah ada!`;
   }
 
   try {
@@ -534,7 +540,6 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
   const sysConfig = await fetchSystemAIConfig();
 
   for (const px of listPasien) {
-    // PROTEKSI RUJUKAN: JIKA RUJUKAN HABIS, SKIP (JANGAN FOLLOWUP!)
     const statusRujukan = String(px.statusRujukan || "").trim().toLowerCase();
     if (statusRujukan.includes("habis") || !statusRujukan || statusRujukan === "-") {
       console.log(`[SKIP FOLLOWUP] Pasien ${px.namaPasien} (RM: ${px.noRm}) dilewati karena Status Rujukan Habis.`);
@@ -571,7 +576,6 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
       await sock.sendMessage(targetJid, { text: pesanKirim });
       resultLog.pasienTerkirim++;
       
-      // Update status WA ke Terkirim di Spreadsheet
       await callSimgosApi("update_status", { 
         row: px.rowNumber, 
         type: "pasien", 
@@ -600,7 +604,6 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
     }
   }
 
-  // Notifikasi laporan blast ke Dokter DPJP Utama
   const targetDoctors = followupData.doctors && followupData.doctors.length > 0
     ? followupData.doctors.map(d => sanitizeNumber(d.wa)).filter(Boolean)
     : DOKTER_JID_LIST;
@@ -637,7 +640,6 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
     }
   }
 
-  // Update status notifikasi dokter pada pasien yang valid dikirimi
   for (const px of listPasien) {
     const isHabis = String(px.statusRujukan || "").toLowerCase().includes("habis");
     if (!isHabis) {
@@ -775,7 +777,6 @@ export default function setupMessageHandler(sock) {
             await sock.sendMessage(senderInfo.targetJid, { text: menuText }, { quoted: msg });
             return;
 
-          // COMMAND BARU 1: CEK PASIEN DENGAN RUJUKAN AKTIF
           case 'cekrujukanaktif':
           case 'rujukanaktif':
             await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Mengambil data pasien dengan Status Rujukan Aktif dari Google Spreadsheet..._" }, { quoted: msg });
@@ -804,7 +805,6 @@ export default function setupMessageHandler(sock) {
             }
             return;
 
-          // COMMAND BARU 2: CEK PASIEN DENGAN RUJUKAN HABIS
           case 'cekrujukanhabis':
           case 'rujukanhabis':
             await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Mengambil data pasien dengan Status Rujukan Habis dari Google Spreadsheet..._" }, { quoted: msg });
@@ -1049,6 +1049,7 @@ export default function setupMessageHandler(sock) {
                             `   📅 Tgl Kontrol: ${p.tglKontrol}\n` +
                             `   📱 No. WA: ${p.noHp}\n` +
                             `   📋 Status Rujukan: *${iconRujuk}*\n` +
+                            `   🔄 Status Reschedule: *${p.statusReschedule || '-'}*\n` +
                             `   🎂 Umur / JK: ${p.umur} / ${p.jenisKelamin}\n` +
                             `   Status H-2: [${p.statusWaH2}] | Status H-1: [${p.statusWaH1}]\n\n`;
               });
@@ -1077,6 +1078,7 @@ export default function setupMessageHandler(sock) {
                   text: `✅ *Reschedule Berhasil!*\n\n` +
                         `🔖 No. RM: *${rmResched}*\n` +
                         `📅 Jadwal Kontrol Baru: *${dateResched}*\n` +
+                        `📋 Status Database: *Reschedule (${dateResched})*\n` +
                         `Status pasien otomatis direset ke *Pending* untuk jadwal kontrol baru.` 
                 }, { quoted: msg });
               } else {
@@ -1100,7 +1102,8 @@ export default function setupMessageHandler(sock) {
                                  `📥 Di-scrape Hari Ini: *${s.scraped_hari_ini} Pasien*\n\n` +
                                  `*Status Rujukan:* \n` +
                                  `✅ Rujukan Aktif: ${s.rujukan_aktif || 0} Pasien\n` +
-                                 `🚫 Rujukan Habis: ${s.rujukan_habis || 0} Pasien\n\n` +
+                                 `🚫 Rujukan Habis: ${s.rujukan_habis || 0} Pasien\n` +
+                                 `🔄 Total Reschedule: ${s.total_reschedule || 0} Pasien\n\n` +
                                  `*Status Follow-up H-2:*\n` +
                                  `⏳ Pending: ${s.h2_wa_pending} | ✅ Terkirim/Hadir: ${s.h2_wa_terkirim}\n\n` +
                                  `*Status Follow-up H-1 (Pengingat Besok):*\n` +
@@ -1182,7 +1185,7 @@ export default function setupMessageHandler(sock) {
             cachedSystemConfig = {
               prompt: '',
               templates: {},
-              instansi: 'RSKD Gigi dan Mulut Prov. Sulawesi Selatan',
+              instansi: 'RSKD Gigi dan Mulut Prov. Sulsel',
               poli: 'Poli Konservasi dan Endodonsi',
               dpjpUtama: 'drg. Hj. Kurniawaty, Sp.KG',
               dpjpUtamaWa: '6282291675363',
@@ -1227,27 +1230,33 @@ export default function setupMessageHandler(sock) {
       const targetDpjpUtamaWa = sysConfig.doctors?.[0]?.wa || sysConfig.dpjpUtamaWa || "6282291675363";
       const targetDpjpUtamaJid = sanitizeNumber(targetDpjpUtamaWa);
 
+      // COCOKKAN IDENTITAS SENDER DENGAN DATABASE (VIA NOMOR WA MAUPUN NOMOR LID)
       let patientData = null;
       try {
         const searchPx = await callSimgosApi("search_patient", { query: senderInfo.id });
         if (searchPx.status === "success" && Array.isArray(searchPx.data) && searchPx.data.length > 0) {
           patientData = searchPx.data[0];
-          console.log(`[Pasien Ditemukan dari Database] Nama: ${patientData.namaPasien} | RM: ${patientData.noRm} | Rujukan: ${patientData.statusRujukan}`);
+          console.log(`[Pasien Dikenali dari Database] Nama: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl: ${patientData.tglKontrol}`);
         } else {
           const sessionSaved = conversationSessions.get(senderInfo.id);
           if (sessionSaved && sessionSaved.patientData) {
             patientData = sessionSaved.patientData;
             console.log(`[Pasien Dikenali dari Sesi Lokal] Nama: ${patientData.namaPasien}`);
           } else {
-            console.warn(`[Pasien Tidak Dikenali di Kolom WA maupun Kolom No Sender LID] ID: ${senderInfo.id}`);
+            console.warn(`[Pasien Belum Tertaut di Database] ID: ${senderInfo.id}`);
           }
         }
       } catch (errSearch) {
         console.warn("[Search Patient Warning]", errSearch.message);
       }
 
+      // Pastikan nama pasien memakai nama resmi database
+      const officialPatientName = (patientData && patientData.namaPasien && patientData.namaPasien !== "-") 
+        ? patientData.namaPasien 
+        : pushName;
+
       const pObj = patientData || {
-        namaPasien: pushName,
+        namaPasien: officialPatientName,
         noRm: "-",
         tglKontrol: "Terjadwal",
         tglMasuk: "-",
@@ -1256,6 +1265,7 @@ export default function setupMessageHandler(sock) {
         jenisKelamin: "-",
         noHp: senderInfo.id,
         noSender: senderInfo.id,
+        statusReschedule: "-",
         statusRujukan: "Rujukan Aktif"
       };
 
@@ -1286,7 +1296,6 @@ export default function setupMessageHandler(sock) {
           }
         }
 
-        // Kirim notifikasi ke Dokter DPJP Utama (Template: WA_LAPORAN_HADIR_DOKTER)
         const templateLaporanHadir = sysConfig.templates["WA_LAPORAN_HADIR_DOKTER"];
         if (templateLaporanHadir) {
           const notifDokterHadir = compileTemplateText(templateLaporanHadir, pObj, sysConfig);
@@ -1298,7 +1307,6 @@ export default function setupMessageHandler(sock) {
           }
         }
 
-        // Kirim balasan ke pasien (Template: WA_PX_HADIR_CONFIRM)
         const templateBalasHadir = sysConfig.templates["WA_PX_HADIR_CONFIRM"];
         if (templateBalasHadir) {
           const replyHadir = compileTemplateText(templateBalasHadir, pObj, sysConfig);
@@ -1317,6 +1325,7 @@ export default function setupMessageHandler(sock) {
           const newDate = intent.date;
           if (patientData && patientData.noRm) {
             try {
+              // Otomatis update tanggal kontrol & tulis ke Kolom 16 'Status Reschedule'
               await callSimgosApi("reschedule_patient", {
                 noRm: patientData.noRm,
                 newDate: newDate,
@@ -1330,10 +1339,10 @@ export default function setupMessageHandler(sock) {
           const updatedPatientObj = {
             ...pObj,
             tglKontrol: newDate,
+            statusReschedule: `Reschedule (${newDate})`,
             noSender: senderInfo.id
           };
 
-          // Kirim notifikasi ke Dokter DPJP Utama (Template: WA_LAPORAN_RESCHEDULE_DOKTER)
           const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
           if (templateLaporanResched) {
             const notifResched = compileTemplateText(templateLaporanResched, updatedPatientObj, sysConfig);
@@ -1345,7 +1354,6 @@ export default function setupMessageHandler(sock) {
             }
           }
 
-          // Kirim balasan ke pasien (Template: WA_PX_RESCHEDULE)
           const templateBalasResched = sysConfig.templates["WA_PX_RESCHEDULE"];
           if (templateBalasResched) {
             const replyResched = compileTemplateText(templateBalasResched, updatedPatientObj, sysConfig);
@@ -1356,13 +1364,13 @@ export default function setupMessageHandler(sock) {
           return;
         }
 
+        // Jika minta reschedule tanpa tanggal
         if (patientData && patientData.noRm) {
           try {
             await callSimgosApi("update_status", { 
               noRm: patientData.noRm, 
-              type: "pasien", 
+              type: "reschedule", 
               status: "Reschedule Diajukan",
-              mode: "h2",
               no_lid: senderInfo.id
             });
           } catch (e) {}
@@ -1407,7 +1415,7 @@ export default function setupMessageHandler(sock) {
         rawAiResponse = await askAIClinicUnified(userSession.history, patientData);
       } catch (aiErr) {
         console.error("[Dual AI Fatal Error]", aiErr.message);
-        rawAiResponse = `Halo Bapak/Ibu ${pObj.namaPasien}, terima kasih telah menghubungi Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, staf poli kami siap membantu jadwal kontrol dan perawatan gigi Anda. Ada yang bisa kami bantu? 🙏`;
+        rawAiResponse = `Halo Bapak/Ibu ${officialPatientName}, terima kasih telah menghubungi Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, staf poli kami siap membantu jadwal kontrol dan perawatan gigi Anda. Ada yang bisa kami bantu? 🙏`;
       } finally {
         clearInterval(typingTimer);
       }
@@ -1445,6 +1453,7 @@ export default function setupMessageHandler(sock) {
         const newRescheduleDate = rescheduleMatch[1];
         if (patientData && patientData.noRm) {
           try {
+            // Update database dan catat ke Kolom 16
             await callSimgosApi("reschedule_patient", {
               noRm: patientData.noRm,
               newDate: newRescheduleDate,
@@ -1455,7 +1464,13 @@ export default function setupMessageHandler(sock) {
           }
         }
 
-        const updatedPx = { ...pObj, tglKontrol: newRescheduleDate, noSender: senderInfo.id };
+        const updatedPx = { 
+          ...pObj, 
+          tglKontrol: newRescheduleDate, 
+          statusReschedule: `Reschedule (${newRescheduleDate})`,
+          noSender: senderInfo.id 
+        };
+
         const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
         if (templateLaporanResched) {
           const notifResched = compileTemplateText(templateLaporanResched, updatedPx, sysConfig);
