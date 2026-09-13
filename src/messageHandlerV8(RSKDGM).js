@@ -42,7 +42,7 @@ const lidToPhoneMap = new Map();     // Kunci: LID Digits -> Nilai: Phone Digits
 const phoneToLidMap = new Map();     // Kunci: Phone Digits (628xxx) -> Nilai: LID Digits
 const patientCacheMap = new Map();   // Kunci: Phone Digits / LID Digits / No. RM -> { data, cachedAt }
 
-// Cache pasien hanya bertahan 30 detik agar perubahan Spreadsheet langsung terdeteksi
+// Cache pasien hanya bertahan 30 detik agar update Spreadsheet langsung terdeteksi
 const PATIENT_CACHE_TTL_MS = 30 * 1000;
 
 // Normalisasi nomor telepon standar internasional (Wajib awalan 62)
@@ -252,7 +252,7 @@ const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000;
 
 // SMART ISOLATED MEMORY: Obrolan 1-on-1 per Pengirim
 const conversationSessions = new Map();
-const SESSION_TTL_MS = 45 * 60 * 1000; // 45 Menit memori aktif
+const SESSION_TTL_MS = 45 * 60 * 1000;
 
 const settingsFile = `${sessionPath}/settings.json`; 
 
@@ -715,7 +715,6 @@ async function convertAllPatientsToLid(sock, forceAll = false) {
 async function smartVerifyPatient(sock, senderInfo, pushName) {
   let matchedPatient = null;
 
-  // 1. Cek Cepat Memori Lokal Bot dengan TTL 30 Detik
   if (senderInfo.id) {
     matchedPatient = getCachedPatientObject(senderInfo.id);
   }
@@ -723,9 +722,7 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     matchedPatient = getCachedPatientObject(senderInfo.resolvedPhone);
   }
 
-  // Jika memori cache valid dan masih fresh, gunakan
   if (matchedPatient && matchedPatient.namaPasien && matchedPatient.noRm) {
-    // Pastikan fallback tanggal reschedule jika belum terbaca
     if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
       const match = matchedPatient.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
       if (match) matchedPatient.tglReschedule = match[1];
@@ -733,7 +730,6 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     return matchedPatient;
   }
 
-  // 2. Query ke Database SIMGOS untuk Data Paling Terkini (Real-Time Spreadsheet)
   const lookupPhone = senderInfo.resolvedPhone || (senderInfo.isLid ? lidToPhoneMap.get(senderInfo.id) : senderInfo.id);
   const lookupLid = senderInfo.isLid ? senderInfo.id : (phoneToLidMap.get(senderInfo.id) || "");
 
@@ -747,7 +743,6 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     if (searchRes.status === "success" && Array.isArray(searchRes.data) && searchRes.data.length > 0) {
       matchedPatient = searchRes.data[0];
       
-      // Fallback cerdas ekstraksi tanggal dari Kolom Status Reschedule jika Kolom 19 belum terisi
       if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
         const match = matchedPatient.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
         if (match) matchedPatient.tglReschedule = match[1];
@@ -763,7 +758,6 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     }
   } catch (e) {}
 
-  // 3. REVERSE USYNC: JIKA SENDER @lid, TANYAKAN NOMOR WA-NYA KE SERVER WHATSAPP
   if (senderInfo.isLid && !matchedPatient) {
     try {
       const resolvedPhone = await resolvePhoneFromLid(sock, senderInfo.id);
@@ -789,7 +783,6 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     } catch (e) {}
   }
 
-  // 4. Pencocokan Tambahan Berdasarkan Profil PushName
   if (!matchedPatient && pushName && pushName.length >= 3 && pushName !== "Pasien") {
     try {
       const nameCheck = await callSimgosApi("search_patient", { query: pushName, lid: senderInfo.id });
@@ -874,7 +867,7 @@ async function askGeminiClinic(conversationHistory, systemPromptText, aiConfig) 
       parts: [{ text: systemPromptText }]
     },
     generationConfig: {
-      temperature: 0.25,
+      temperature: 0.2,
       maxOutputTokens: 2048,
       topP: 0.85
     }
@@ -938,7 +931,7 @@ async function askGroqClinic(conversationHistory, systemPromptText, aiConfig) {
         body: JSON.stringify({
           model: model,
           messages: groqMessages,
-          temperature: 0.25,
+          temperature: 0.2,
           max_tokens: 2048
         })
       });
@@ -973,12 +966,11 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
   const timeInjection = `\n\n[PANDUAN WAKTU & SALAM LOKAL REAL-TIME MAKASSAR (WITA)]:
 - Waktu Lokal Makassar Saat Ini: ${witaTime.fullWitaStr}
 - Sapaan Waktu Resmi: "${witaTime.greeting}"
-- ATURAN SALAM: Selalu awali percakapan dengan "${witaTime.greeting}". Jangan menyapa pagi/siang jika sekarang sudah malam!`;
+- ATURAN SALAM: Wajib mengawali percakapan secara formal dengan "${witaTime.greeting}". Hindari sapaan yang bertentangan dengan zona waktu saat ini!`;
 
   systemPromptText += timeInjection;
 
   if (patientContext && patientContext.namaPasien && patientContext.namaPasien !== "-") {
-    // Pastikan deteksi tanggal reschedule valid (baik dari Kolom 19 atau Kolom 16)
     let finalReschedDate = (patientContext.tglReschedule && patientContext.tglReschedule !== "-") ? patientContext.tglReschedule : "";
     if (!finalReschedDate && patientContext.statusReschedule) {
       const match = patientContext.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
@@ -988,34 +980,40 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
     const hasResched = !!finalReschedDate;
     const isJknCanceled = String(patientContext.statusReschedule || "").toLowerCase().includes("terbatalkan");
 
-    systemPromptText += `\n\n[DATA RESMI PASIEN SESUAI DATABASE SIMGOS TERBARU]:
-- Nama Lengkap Pasien: ${patientContext.namaPasien}
-- Nomor Rekam Medis (RM): ${patientContext.noRm}
-- Tanggal Kontrol Semula (Awal): ${patientContext.tglKontrol}
-- Tanggal Reschedule Baru (Kolom 19 / Terkonfirmasi): ${hasResched ? finalReschedDate : "-"}
+    systemPromptText += `\n\n[DATA RESMI REKAM MEDIS PASIEN (SIMGOS RSKDGM)]:
+- Nama Lengkap Resmi Pasien: ${patientContext.namaPasien}
+- Nomor Rekam Medis (No. RM): ${patientContext.noRm}
+- Jadwal Kontrol Semula (Awal): ${patientContext.tglKontrol}
+- Jadwal Reschedule Baru (Kolom 19): ${hasResched ? finalReschedDate : "-"}
 - Status Database: ${patientContext.statusReschedule || "-"}
-- Status Rujukan: ${patientContext.statusRujukan || "Rujukan Aktif"}
-- DPJP Utama: ${sysConfig.dpjpUtama}
-- Unit: Poli Konservasi dan Endodonsi RSKD Gigi dan Mulut Prov. Sulsel
+- Status Rujukan BPJS: ${patientContext.statusRujukan || "Rujukan Aktif"}
+- Dokter DPJP Utama: ${sysConfig.dpjpUtama}
+- Unit Kerja Pelayanan: Poli Konservasi dan Endodonsi RSKD Gigi dan Mulut Prov. Sulsel
 
-INSTRUKSI JAWABAN MUTLAK & SUPER CERDAS (HUMAN-LIKE & SANTAI):
-1. Pasien ini TELAH TERVERIFIKASI RESMI di sistem kami. JANGAN PERNAH menolak memberikan info RM atau bilang nomor belum terdaftar!
-2. JIKA PASIEN MENANYAKAN JADWAL KONTROLNYA (Contoh: "jadi tanggal berapa kontrol saya skrg?", "kapan jadwal saya?", dll.):
+PEDOMAN TATA BAHASA & ATURAN MEDIS BIROKRATIS (MUTLAK):
+1. PENYEBUTAN NAMA LENGKAP:
+   Wajib menyapa dan menyebut identitas pasien dengan sebutan kehormatan "Bapak/Ibu/Sdr(i) ${patientContext.namaPasien}" sesuai data resmi database. Dilarang mengubah atau memotong nama pasien.
+2. JAWABAN JADWAL KONTROL & NOMOR RM:
 ${hasResched ? `
-   • STATUS: PASIEN SUDAH MEMILIKI TANGGAL RESCHEDULE BARU yaitu *${finalReschedDate}*!
-   • KAMU WAJIB MENJELASKAN SECARA TEGAS & SANTAI:
-     "Jadwal kontrol semula Bapak/Ibu ${patientContext.namaPasien} pada tanggal ${patientContext.tglKontrol} itu sudah di-reschedule yaa. Jadi jadwal kontrol kamu yang TERBARU dan aktif sekarang adalah tanggal *${finalReschedDate}* bersama dokter penanggung jawab kami ${sysConfig.dpjpUtama} di Poli Konservasi. Nomor RM kamu adalah ${patientContext.noRm}. Jangan sampai salah tanggal yaa kak!"
-   • DILARANG KERAS MENGATAKAN: "jadwal kontrol saat ini tetap dan tidak ada perubahan pada tanggal ${patientContext.tglKontrol}" KARENA JADWALNYA SUDAH RESMI DIUBAH KE ${finalReschedDate}!` : 
+   • STATUS: PASIEN TELAH MEMILIKI TANGGAL RESCHEDULE RESMI YAITU: *${finalReschedDate}*!
+   • PERNYATAAN BIROKRATIS WAJIB:
+     Jelaskan secara formal dan tegas bahwa jadwal kontrol semula pada tanggal ${patientContext.tglKontrol} telah resmi dialihkan/dijadwalkan ulang ke tanggal *${finalReschedDate}* bersama DPJP Utama (${sysConfig.dpjpUtama}). Nomor Rekam Medis (RM) pasien adalah ${patientContext.noRm}.
+   • LARANGAN KERAS: DILARANG KERAS mengatakan "jadwal kontrol tetap dan tidak ada perubahan pada tanggal ${patientContext.tglKontrol}" karena jadwal tersebut telah resmi diperbarui di sistem SIMGOS!` : 
 isJknCanceled ? `
-   • STATUS: PASIEN TERBATALKAN OLEH SISTEM MOBILE JKN!
-   • KAMU WAJIB MENJELASKAN: Jadwal kontrol semula pada tanggal ${patientContext.tglKontrol} memang terbatalkan otomatis oleh sistem Mobile JKN. Laporannya sudah diteruskan ke ${sysConfig.dpjpUtama} dan staf poli kami sedang mengaturkan jadwal penggantinya. Minta pasien santai menunggu konfirmasi jadwal baru di chat ini.` : `
-   • STATUS: TIDAK ADA PERUBAHAN JADWAL. Jadwal kontrol tetap pada tanggal *${patientContext.tglKontrol}* (Nomor RM: ${patientContext.noRm}).`}
-3. GAYA BAHASA: Jawablah dengan santai, luwes, ramah, hangat, TIDAK KAKU, memahami singkatan chat pasien, seperti customer care klinik modern yang asyik diajak ngobrol.`;
+   • STATUS: PASIEN TERBATALKAN OTOMATIS OLEH SISTEM APLIKASI MOBILE JKN!
+   • PERNYATAAN BIROKRATIS WAJIB:
+     Sampaikan bahwa jadwal kontrol semula pada tanggal ${patientContext.tglKontrol} telah tercatat terbatalkan oleh sistem aplikasi Mobile JKN. Laporan tersebut telah diteruskan secara kedinasan kepada DPJP Utama (${sysConfig.dpjpUtama}) untuk penerbitan jadwal kontrol pengganti. Pasien dimohon menunggu konfirmasi jadwal baru melalui saluran komunikasi ini.` : `
+   • STATUS: JADWAL KONTROL AKTIF BERJALAN SESUAI RENCANA.
+     Jadwal kontrol tetap terjadwal pada tanggal *${patientContext.tglKontrol}* bersama ${sysConfig.dpjpUtama} (No. RM: ${patientContext.noRm}).`}
+3. KOMPETENSI KLINIS KEDOKTERAN GIGI:
+   Jawab pertanyaan klinis seputar kesehatan gigi secara ilmiah, komprehensif, dan berbasis bukti medis (spesialisasi Konservasi Gigi/Endodonsi, Bedah Mulut, Ortodonsia, Periodonsia, Prostodonsia, Pedodonsia, Penyakit Mulut, dan Radiologi Dental). Selalu sertakan edukasi bahwa tindakan medis definitif dilakukan langsung oleh DPJP di Dental Chair.
+4. REGISTER BAHASA:
+   Gunakan gaya bahasa birokratis rumah sakit formal, santun, lugas, mengayomi, dan tertata rapi.`;
   } else {
     systemPromptText += `\n\n[DATA PENGIRIM CHAT]:
 - Nama Profil: ${senderPushName}
-- Status: Belum terdata pada antrean kontrol aktif.
-PETUNJUK: Sapa santai dan tanyakan nama lengkap serta tanggal lahir untuk dibantu pengecekan jadwal kontrol.`;
+- Status: Nomor WhatsApp belum terhubung dengan antrean kontrol aktif.
+PETUNJUK: Berikan salam formal birokratis dan persilakan pengirim menginformasikan Nama Lengkap serta Tanggal Lahir guna verifikasi data rekam medis di sistem SIMGOS.`;
   }
 
   let finalReply = "";
@@ -1102,7 +1100,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
     try {
       let pesanKirim = px.pesan_wa_pasien;
       if (overrideToSender) {
-        pesanKirim = `🧪 *[TESTING BLAST ${modeH.toUpperCase()}: NOMOR DIKONVERSI KE SENDER]*\n` +
+        pesanKirim = `🧪 *[SIMULASI BLAST ${modeH.toUpperCase()}: DIARAHKAN KE SENDER]*\n` +
                      `_(Pasien: ${px.namaPasien} | RM: ${px.noRm} | Rujukan: ${px.statusRujukan} | No. Asli: ${px.originalNoHp || px.noHp})_\n\n` + 
                      pesanKirim;
       }
@@ -1204,7 +1202,6 @@ export default function setupMessageHandler(sock) {
 
   prewarmDoctorAndOwnerLids(sock);
 
-  // Jalankan konversi proaktif saat startup
   setTimeout(() => {
     convertAllPatientsToLid(sock, false);
   }, 3000);
@@ -1750,7 +1747,7 @@ export default function setupMessageHandler(sock) {
             try {
               const reschedApi = await callSimgosApi("reschedule_patient", { noRm: rmResched, newDate: dateResched, no_lid: senderInfo.id });
               if (reschedApi.status === "success") {
-                patientCacheMap.clear(); // Bersihkan cache lokal agar data fresh seketika
+                patientCacheMap.clear();
                 await sock.sendMessage(senderInfo.targetJid, { 
                   text: `✅ *Reschedule Berhasil!*\n\n` +
                         `🔖 No. RM: *${rmResched}*\n` +
@@ -2104,7 +2101,6 @@ export default function setupMessageHandler(sock) {
       }
 
       // JALUR 3: PERCAKAPAN UMUM, TANYA NOMOR RM & KONSULTASI GIGI DENGAN AI SUPER SMART
-      // ISOLASI SESI CHAT PER PASIEN (MEMORI 1-ON-1 MANDIRI)
       const sessionKey = senderInfo.id || senderInfo.targetJid;
       let userSession = conversationSessions.get(sessionKey);
       if (!userSession) {
@@ -2115,10 +2111,9 @@ export default function setupMessageHandler(sock) {
 
       userSession.history.push({
         role: 'user',
-        parts: [{ text: text.trim() || "(Mengirimkan bukti tangkapan layar / gambar)" }]
+        parts: [{ text: text.trim() || "(Mengirimkan lampiran dokumen/gambar)" }]
       });
 
-      // Simpan hingga 10 turn percakapan terakhir agar konteks obrolan tetap nyambung
       if (userSession.history.length > 10) {
         userSession.history = userSession.history.slice(-10);
       }
@@ -2134,10 +2129,20 @@ export default function setupMessageHandler(sock) {
         console.error("[Dual AI Fatal Error]", aiErr.message);
         const witaTime = getWitaTimeGreeting();
         if (patientData && patientData.noRm) {
-          const hasResched = patientData.tglReschedule && patientData.tglReschedule !== "-";
-          rawAiResponse = `${witaTime.greeting}, Kak/Bapak/Ibu ${officialPatientName}. Nomor RM kamu adalah *${patientData.noRm}*. ${hasResched ? `Jadwal kontrol kamu yang sebelumnya tanggal ${patientData.tglKontrol} sudah resmi di-reschedule ke tanggal *${patientData.tglReschedule}* yaa.` : `Jadwal kontrol kamu terdaftar pada tanggal *${patientData.tglKontrol}* yaa.`} Ada yang bisa kami bantu lagi seputar perawatan gigi kamu? 🙏`;
+          let hasResched = (patientData.tglReschedule && patientData.tglReschedule !== "-");
+          let finalReschedDate = hasResched ? patientData.tglReschedule : "";
+          if (!finalReschedDate && patientData.statusReschedule) {
+            const mMatch = patientData.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+            if (mMatch) { finalReschedDate = mMatch[1]; hasResched = true; }
+          }
+          
+          if (hasResched) {
+            rawAiResponse = `${witaTime.greeting}, Bapak/Ibu ${officialPatientName}. Berdasarkan catatan sistem rekam medis RSKD Gigi dan Mulut Prov. Sulsel, jadwal kontrol perawatan gigi Anda yang semula pada tanggal ${patientData.tglKontrol} telah resmi dialihkan/dijadwalkan ulang ke tanggal *${finalReschedDate}* bersama DPJP Utama kami, ${sysConfig.dpjpUtama}. Nomor Rekam Medis (RM) Anda adalah *${patientData.noRm}*. Mohon untuk hadir tepat waktu ya, Pak/Bu. Terima kasih. 🙏`;
+          } else {
+            rawAiResponse = `${witaTime.greeting}, Bapak/Ibu ${officialPatientName}. Nomor Rekam Medis (RM) Anda yang terdaftar di Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel adalah *${patientData.noRm}* dengan jadwal kontrol pada tanggal *${patientData.tglKontrol}*. Ada yang dapat kami bantu terkait administrasi perawatan gigi Anda? 🙏`;
+          }
         } else {
-          rawAiResponse = `${witaTime.greeting}, Kak/Bapak/Ibu ${officialPatientName}. Makasih ya sudah menghubungi Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan kamu sudah kami terima, ada yang bisa dibantu untuk kontrol giginya? 🙏`;
+          rawAiResponse = `${witaTime.greeting}, Bapak/Ibu ${officialPatientName}. Terima kasih telah menghubungi Layanan Informasi Medis Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, ada hal yang dapat kami bantu terkait jadwal kontrol atau perawatan gigi Anda? 🙏`;
         }
       } finally {
         clearInterval(typingTimer);
