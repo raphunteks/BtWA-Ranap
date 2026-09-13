@@ -240,7 +240,6 @@ function extractDateFromText(text) {
 function detectPatientIntent(rawText) {
   const text = rawText.trim().toLowerCase();
 
-  // 1. Deteksi Khusus: Pasien Menyatakan Salah Orang / Salah Sambung
   const wrongPersonPattern = /\b(salah\s*orang|bukan\s*saya|salah\s*nomor|salah\s*ki|salah\s*kirim|salah\s*target|tidak\s*pernah\s*(ke|periksa|daftar))\b/i;
   if (wrongPersonPattern.test(text)) {
     return { type: 'SALAH_ORANG' };
@@ -274,12 +273,31 @@ function detectPatientIntent(rawText) {
   return { type: 'GENERAL' };
 }
 
+// CLIENT REST API DENGAN SISTEM AUTO-REDIRECT & DETEKSI RESPON BERSIH
 async function callSimgosApi(action, params = {}) {
   try {
     const query = new URLSearchParams({ action, ...params }).toString();
     const url = `${GAS_URL_SIMGOS}?${query}`;
-    const res = await fetch(url, { method: "GET" });
-    return await res.json();
+    
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: { "Accept": "application/json" }
+    });
+
+    const rawText = await res.text();
+
+    if (!rawText || rawText.trim().startsWith("<")) {
+      console.error(`[SIMGOS HTML Crash on ${action}]:`, rawText.substring(0, 300));
+      throw new Error(`Google Apps Script mengembalikan HTML error (periksa izin deployment / error runtime). Potongan respon: ${rawText.substring(0, 90)}...`);
+    }
+
+    const jsonData = JSON.parse(rawText);
+    if (jsonData.status === "error") {
+      throw new Error(jsonData.message || "Unknown GAS Server Error");
+    }
+
+    return jsonData;
   } catch (err) {
     console.error(`[SIMGOS API Error: ${action}]`, err);
     throw new Error(`Gagal komunikasi dengan API SIMGOS: ${err.message}`);
@@ -474,10 +492,8 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
   const aiConfig = await fetchSystemAIConfig();
   let systemPromptText = aiConfig.prompt;
 
-  // Pastikan nama instansi selalu tepat tanpa sebutan lain
   systemPromptText = systemPromptText.replace(/RSKDGM Care|RSKD Care/gi, "RSKD Gigi dan Mulut Prov. Sulsel");
 
-  // Injeksi Konteks Pasien yang Sangat Ketat dan Akurat
   if (patientContext && patientContext.namaPasien && patientContext.namaPasien !== "-") {
     systemPromptText += `\n\n[DATA IDENTITAS RESMI PASIEN SESUAI DATABASE]:
 - Nama Lengkap Resmi: ${patientContext.namaPasien}
@@ -605,7 +621,6 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
 
       console.log(`[Blast ${modeH.toUpperCase()} Terkirim] ${px.namaPasien} (${px.statusRujukan}) -> JID: ${targetJid}`);
 
-      // HANYA simpan ke sesi lokal jika BUKAN mode override pengirim (mencegah tumpang tindih nama)
       if (!overrideToSender) {
         conversationSessions.set(resolvedLid, {
           history: [],
@@ -759,7 +774,7 @@ export default function setupMessageHandler(sock) {
       const senderInfo = parseSenderInfo(remoteJid);
       const pushName = msg.pushName || "Pasien";
 
-      console.log(`[Chat 1-on-1] Dari: ${senderInfo.id} (${senderInfo.isLid ? 'LID' : 'Phone'}) (PushName: ${pushName}) | Pesan: "${text.trim()}"`);
+      console.log(`[Chat 1-on-1] Dari: ${senderInfo.id} (${senderInfo.isLid ? 'LID' : 'Phone'}) (${pushName}) | Pesan: "${text.trim()}"`);
 
       // =====================================================================
       // 1. COMMAND ADMIN (PREFIX '!')
@@ -1259,6 +1274,14 @@ export default function setupMessageHandler(sock) {
         if (searchPx.status === "success" && Array.isArray(searchPx.data) && searchPx.data.length > 0) {
           patientData = searchPx.data[0];
           console.log(`[Pasien Dikenali dari Database] Nama: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl: ${patientData.tglKontrol}`);
+        } else {
+          const sessionSaved = conversationSessions.get(senderInfo.id);
+          if (sessionSaved && sessionSaved.patientData) {
+            patientData = sessionSaved.patientData;
+            console.log(`[Pasien Dikenali dari Sesi Lokal] Nama: ${patientData.namaPasien}`);
+          } else {
+            console.warn(`[Pasien Belum Tertaut di Database] ID: ${senderInfo.id}`);
+          }
         }
       } catch (errSearch) {
         console.warn("[Search Patient Warning]", errSearch.message);
@@ -1352,7 +1375,6 @@ export default function setupMessageHandler(sock) {
           const newDate = intent.date;
           if (patientData && patientData.noRm) {
             try {
-              // Update database dan catat ke Kolom 16 'Status Reschedule'
               await callSimgosApi("reschedule_patient", {
                 noRm: patientData.noRm,
                 newDate: newDate,
