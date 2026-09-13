@@ -200,6 +200,7 @@ function compileTemplateText(templateStr, patient, sysCfg) {
     .replace(/{NO_WA}/g, patient?.noHp || "-")
     .replace(/{NO_SENDER}/g, patient?.noSender || "-")
     .replace(/{NO_LID}/g, patient?.noLid || "-")
+    .replace(/{TGL_RESCHEDULE}/g, patient?.tglReschedule || "-")
     .replace(/{STATUS_RESCHEDULE}/g, patient?.statusReschedule || "-")
     .replace(/{STATUS_RUJUKAN}/g, patient?.statusRujukan || "Rujukan Habis")
     .replace(/{DPJP_UTAMA}/g, sysCfg.dpjpUtama || "drg. Hj. Kurniawaty, Sp.KG")
@@ -451,14 +452,11 @@ async function fetchSystemAIConfig() {
   return cachedSystemConfig;
 }
 
-// =========================================================================
 // USYNC LID RESOLVER: MEMINTA NOMOR LID ASLI SECARA RESMI KE SERVER WHATSAPP
-// =========================================================================
 async function resolveLidFromWhatsAppServer(sock, rawPhone) {
   const cleanPhone = formatToInternational(rawPhone);
   if (!cleanPhone || cleanPhone.length < 8) return null;
 
-  // 1. Coba kueri standar sock.onWhatsApp
   try {
     const waCheck = await sock.onWhatsApp(cleanPhone);
     if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
@@ -466,7 +464,6 @@ async function resolveLidFromWhatsAppServer(sock, rawPhone) {
     }
   } catch (e) {}
 
-  // 2. Kueri XMPP USync resmi dengan alamat 's.whatsapp.net' (Bebas error karakter @)
   try {
     const usyncIqNode = {
       tag: 'iq',
@@ -629,9 +626,7 @@ async function prewarmDoctorAndOwnerLids(sock) {
   } catch (e) {}
 }
 
-// =========================================================================
-// SUPER RESOLVER: CONVERT ALL PATIENTS TO LID & SAVE TO COLUMN 18 (NO LID)
-// =========================================================================
+// CONVERT ALL PATIENTS TO LID & SAVE TO COLUMN 18 (NO LID)
 async function convertAllPatientsToLid(sock, forceAll = false) {
   console.log(`[Auto-Converter] Memulai konversi satu-satu No WA ke Kolom 18 (No LID)...`);
   try {
@@ -711,7 +706,7 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     return matchedPatient;
   }
 
-  // 2. Query ke Database SIMGOS
+  // 2. Query ke Database SIMGOS (Mencari via Kolom 18 No LID, Kolom 15 No Sender, atau No WA)
   const lookupPhone = senderInfo.resolvedPhone || (senderInfo.isLid ? lidToPhoneMap.get(senderInfo.id) : senderInfo.id);
   const lookupLid = senderInfo.isLid ? senderInfo.id : (phoneToLidMap.get(senderInfo.id) || "");
 
@@ -941,20 +936,30 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
   systemPromptText += timeInjection;
 
   if (patientContext && patientContext.namaPasien && patientContext.namaPasien !== "-") {
-    systemPromptText += `\n\n[DATA RESMI PASIEN SESUAI DATABASE]:
+    const hasResched = patientContext.tglReschedule && patientContext.tglReschedule !== "-";
+    const isJknCanceled = String(patientContext.statusReschedule || "").toLowerCase().includes("terbatalkan");
+
+    systemPromptText += `\n\n[DATA RESMI PASIEN SESUAI DATABASE SIMGOS]:
 - Nama Lengkap Pasien: ${patientContext.namaPasien}
 - Nomor Rekam Medis (RM): ${patientContext.noRm}
-- Tanggal Kontrol: ${patientContext.tglKontrol}
+- Tanggal Kontrol Semula (Awal): ${patientContext.tglKontrol}
+- Tanggal Reschedule Baru (Kolom 19): ${hasResched ? patientContext.tglReschedule : "-"}
 - Status Reschedule: ${patientContext.statusReschedule || "-"}
 - Status Rujukan: ${patientContext.statusRujukan || "Rujukan Aktif"}
 - Instansi: RSKD Gigi dan Mulut Prov. Sulsel
 - Poli: Poli Konservasi dan Endodonsi
 
-PETUNJUK JAWABAN MUTLAK:
-1. Pasien ini TELAH TERVERIFIKASI RESMI di database SIMGOS.
-2. JIKA PASIEN MENANYAKAN "BERAPA NOMOR RM SAYA" ATAU JADWAL KONTROLNYA, KAMU WAJIB LANGSUNG MENJAWAB:
-   "Nomor Rekam Medis (RM) Bapak/Ibu ${patientContext.namaPasien} adalah ${patientContext.noRm} dengan jadwal kontrol pada tanggal ${patientContext.tglKontrol}."
-3. JANGAN PERNAH menolak memberikan nomor RM atau mengatakan nomor belum terdaftar, karena identitas pasien ini SUDAH TERVERIFIKASI LENGKAP 100%.
+PETUNJUK JAWABAN MUTLAK & SUPER CERDAS LIKE HUMAN:
+1. Pasien ini TELAH TERVERIFIKASI RESMI 100% di database kami.
+2. JIKA PASIEN MENANYAKAN JADWAL KONTROL ATAU NOMOR RM (Contoh: "jadi tanggal berapa kontrol saya skrg?", "kapan jadwal saya?"):
+   ${hasResched ? `
+   - PASIEN INI MEMILIKI TANGGAL RESCHEDULE BARU: ${patientContext.tglReschedule}!
+   - KAMU WAJIB MENJELASKAN: Jadwal kontrol semula Bapak/Ibu ${patientContext.namaPasien} pada tanggal ${patientContext.tglKontrol} telah berhasil dijadwalkan ulang (reschedule) ke tanggal *${patientContext.tglReschedule}* bersama DPJP Utama (${sysConfig.dpjpUtama}). Nomor RM Anda adalah ${patientContext.noRm}.` : 
+   isJknCanceled ? `
+   - STATUS PASIEN: TERBATALKAN DI MOBILE JKN!
+   - KAMU WAJIB MENJELASKAN: Jadwal kontrol semula Anda pada tanggal ${patientContext.tglKontrol} terbatalkan otomatis oleh sistem di aplikasi Mobile JKN. Laporan ini telah kami teruskan ke DPJP Utama (${sysConfig.dpjpUtama}) dan saat ini tim poli sedang mengoordinasikan tanggal penggantinya. Mohon ditunggu konfirmasi tanggal baru kami di nomor WA ini.` : `
+   - PASIEN TIDAK DI-RESCHEDULE: Jadwal kontrol aktif tetap pada tanggal *${patientContext.tglKontrol}* (Nomor RM: ${patientContext.noRm}).`}
+3. DILARANG KERAS mengatakan "nomor belum terdaftar" karena pasien ini SUDAH VALID.
 4. Awali jawaban menggunakan sapaan "${witaTime.greeting}, Bapak/Ibu ${patientContext.namaPasien}".`;
   } else {
     systemPromptText += `\n\n[DATA PENGIRIM CHAT]:
@@ -1152,6 +1157,7 @@ export default function setupMessageHandler(sock) {
 
   prewarmDoctorAndOwnerLids(sock);
 
+  // Jalankan konversi proaktif saat startup
   setTimeout(() => {
     convertAllPatientsToLid(sock, false);
   }, 3000);
@@ -1257,7 +1263,7 @@ export default function setupMessageHandler(sock) {
             const menuText = `*🤖 BOT KONTROL RSKDGM (H-2 & H-1 SIMGOS) 🤖*\n\n` +
                              `*🦷 SIMGOS FOLLOW-UP KONTROL:*\n` +
                              `* !converstalltolid* - 🔄 Konversi satu-satu No WA ke Kolom 18 (No LID)\n` +
-                             `* !reschedulepx terbatalkan <No.RM/Nama> <YYYY-MM-DD>* - 🔁 Atur tgl baru & infokan pasien JKN\n` +
+                             `* !reschedulepx terbatalkan <No.RM/Nama> <YYYY-MM-DD>* - 🔁 Jadwal ulang tgl baru & simpan Kolom 19\n` +
                              `* !followupnow* [h1/h2/all] [tgl/auto] [me] - 🚀 Kirim instan ('all' = H-2 & H-1, 'me' = kirim ke Anda)\n` +
                              `* !followup* [h1/h2] [tgl/auto] - Cek antrean kontrol H-2 atau H-1\n` +
                              `* !gassfollowup* [h1/h2] [me] - Kirim WA massal ke Pasien & DPJP Utama\n` +
@@ -1303,8 +1309,7 @@ export default function setupMessageHandler(sock) {
             return;
 
           // =================================================================
-          // PERINTAH BARU: RESCHEDULE PASIEN TERBATALKAN DARI MOBILE JKN
-          // Format: !reschedulepx terbatalkan <No. RM / Nama Lengkap> <YYYY-MM-DD>
+          // RESCHEDULE PASIEN TERBATALKAN DARI MOBILE JKN (DENGAN KOLOM 19)
           // =================================================================
           case 'reschedulepx':
           case 'rescheduleterbatalkan':
@@ -1315,7 +1320,7 @@ export default function setupMessageHandler(sock) {
 
             if (inputArgs.length < 2) {
               await sock.sendMessage(senderInfo.targetJid, {
-                text: `⚠️ Format salah!\nGunakan format:\n*!reschedulepx terbatalkan <No. RM / Nama Lengkap> <YYYY-MM-DD>*\n\nContoh:\n*!reschedulepx terbatalkan 00.06.32.89 2026-09-25*\natau\n*!reschedulepx terbatalkan ILDHAYANI 2026-09-25*`
+                text: `⚠️ Format salah!\nGunakan format:\n*!reschedulepx terbatalkan <No. RM / Nama Lengkap> <YYYY-MM-DD>*\n\nContoh:\n*!reschedulepx terbatalkan 00.06.32.89 2026-09-25*\natau\n*!reschedulepx terbatalkan M. AXA 2026-09-25*`
               }, { quoted: msg });
               break;
             }
@@ -1347,7 +1352,7 @@ export default function setupMessageHandler(sock) {
               const targetPx = searchTarget.data[0];
               const sysCfg = await fetchSystemAIConfig();
 
-              // Update tanggal & status di Google Sheet
+              // Update tanggal reschedule ke Kolom 19 & status di Google Sheet
               await callSimgosApi("reschedule_patient", {
                 noRm: targetPx.noRm,
                 newDate: extractedTargetDate,
@@ -1357,25 +1362,29 @@ export default function setupMessageHandler(sock) {
               // Kirim notifikasi konfirmasi tanggal baru ke WhatsApp Pasien
               const updatedPxObj = {
                 ...targetPx,
-                tglKontrol: extractedTargetDate,
+                tglReschedule: extractedTargetDate,
                 statusReschedule: `Reschedule DPJP (${extractedTargetDate})`
               };
 
-              const templateJknConfirm = sysCfg.templates["WA_PX_RESCHEDULE_JKN_CONFIRM"] || 
-                `Halo, Yth. Bapak/Ibu *{NAMA_PASIEN}* (No. RM: {NO_RM}). 🙏\n\nMenindaklanjuti informasi pembatalan kontrol di aplikasi Mobile JKN sebelumnya, Dokter Penanggung Jawab kami (*{DPJP_UTAMA}*) telah menjadwalkan ulang perawatan gigi lanjutan Anda pada:\n\n📅 *Hari/Tanggal Baru:* {TGL_KONTROL}\n👨‍⚕️ *DPJP:* {DPJP_UTAMA} / {DPJP_PENDAMPING}\n📍 *Lokasi:* {POLI_KLINIK} - {NAMA_INSTANSI}\n\nMohon konfirmasi kehadiran Anda kembali dengan membalas pesan ini:\nKetik *HADIR* jika bisa datang pada jadwal baru tersebut, atau *RESCHEDULE* jika ingin mengajukan jadwal lain.\n\nTerima kasih atas pengertian dan kerja samanya. Salam sehat selalu! 🦷✨`;
+              // Perbarui juga cache memori lokal bot
+              patientCacheMap.set(targetPx.noRm, updatedPxObj);
+              if (targetPx.noLid) patientCacheMap.set(targetPx.noLid, updatedPxObj);
+              if (targetPx.noHp) patientCacheMap.set(formatToInternational(targetPx.noHp), updatedPxObj);
 
+              const templateJknConfirm = sysCfg.templates["WA_PX_RESCHEDULE_JKN_CONFIRM"];
               const msgToPatient = compileTemplateText(templateJknConfirm, updatedPxObj, sysCfg);
               const targetPatientJid = sanitizeNumber(targetPx.noHp);
 
               await sock.sendMessage(targetPatientJid, { text: msgToPatient });
 
-              // Kirim laporan sukses ke dokter/admin pengirim perintah
               const successReport = `✅ *RESCHEDULE PASIEN TERBATALKAN BERHASIL!*\n\n` +
                                     `👤 *Nama Pasien:* ${targetPx.namaPasien}\n` +
                                     `🔖 *No. RM:* ${targetPx.noRm}\n` +
-                                    `📅 *Jadwal Kontrol Baru:* ${extractedTargetDate}\n` +
+                                    `📅 *Jadwal Semula (Awal):* ${targetPx.tglKontrol}\n` +
+                                    `📅 *Tanggal Reschedule Baru:* ${extractedTargetDate}\n` +
                                     `📱 *WhatsApp Pasien:* ${targetPx.noHp}\n` +
-                                    `📋 *Status Spreadsheet:* Reschedule DPJP (${extractedTargetDate})\n\n` +
+                                    `📋 *Status Kolom 16:* Reschedule DPJP (${extractedTargetDate})\n` +
+                                    `💾 *Status Kolom 19 (Tanggal Reschedule):* ${extractedTargetDate}\n\n` +
                                     `_Pesan konfirmasi jadwal baru telah otomatis dikirimkan ke WhatsApp pasien._ 🙏✨`;
 
               await sock.sendMessage(senderInfo.targetJid, { text: successReport }, { quoted: msg });
@@ -1647,7 +1656,7 @@ export default function setupMessageHandler(sock) {
 
           case 'caripasien':
             if (args.length === 0) {
-              await sock.sendMessage(senderInfo.targetJid, { text: "⚠️ Masukkan kata kunci pencarian!\nContoh: *!caripasien 00.06.32.89* atau *!caripasien ILDHAYANI*" }, { quoted: msg });
+              await sock.sendMessage(senderInfo.targetJid, { text: "⚠️ Masukkan kata kunci pencarian!\nContoh: *!caripasien 00.06.32.89* atau *!caripasien M. AXA*" }, { quoted: msg });
               break;
             }
             const queryCari = args.join(" ");
@@ -1665,13 +1674,13 @@ export default function setupMessageHandler(sock) {
                 txtMatch += `${idx + 1}. *${p.namaPasien}*\n` +
                             `   🔖 No. RM: ${p.noRm}\n` +
                             `   📅 Tgl Masuk: ${p.tglMasuk}\n` +
-                            `   📅 Tgl Kontrol: ${p.tglKontrol}\n` +
+                            `   📅 Tgl Kontrol Semula: ${p.tglKontrol}\n` +
+                            `   📅 Tgl Reschedule Baru: *${p.tglReschedule || '-'}*\n` +
                             `   📱 No. WA: ${p.noHp}\n` +
                             `   📋 Status Rujukan: *${iconRujuk}*\n` +
                             `   🔄 Status Reschedule: *${p.statusReschedule || '-'}*\n` +
                             `   🆔 No. LID: *${p.noLid || '-'}*\n` +
-                            `   🎂 Umur / JK: ${p.umur} / ${p.jenisKelamin}\n` +
-                            `   Status H-2: [${p.statusWaH2}] | Status H-1: [${p.statusWaH1}]\n\n`;
+                            `   🎂 Umur / JK: ${p.umur} / ${p.jenisKelamin}\n\n`;
               });
 
               await sock.sendMessage(senderInfo.targetJid, { text: txtMatch }, { quoted: msg });
@@ -1697,9 +1706,9 @@ export default function setupMessageHandler(sock) {
                 await sock.sendMessage(senderInfo.targetJid, { 
                   text: `✅ *Reschedule Berhasil!*\n\n` +
                         `🔖 No. RM: *${rmResched}*\n` +
-                        `📅 Jadwal Kontrol Baru: *${dateResched}*\n` +
+                        `📅 Tanggal Reschedule Baru: *${dateResched}*\n` +
                         `📋 Status Database: *Reschedule (${dateResched})*\n` +
-                        `Status pasien otomatis direset ke *Pending* untuk jadwal kontrol baru.` 
+                        `💾 Kolom 19 (Tanggal Reschedule) berhasil diperbarui ke ${dateResched}.` 
                 }, { quoted: msg });
               } else {
                 throw new Error(reschedApi.message);
@@ -1861,7 +1870,7 @@ export default function setupMessageHandler(sock) {
       // VERIFIKASI IDENTITAS PASIEN SECARA CERDAS LINTAS LID <-> HP DATABASE
       const patientData = await smartVerifyPatient(sock, senderInfo, pushName);
       if (patientData) {
-        console.log(`[Pasien Terverifikasi] Nama: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl: ${patientData.tglKontrol}`);
+        console.log(`[Pasien Terverifikasi] Nama: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl: ${patientData.tglKontrol} | Reschedule: ${patientData.tglReschedule || '-'}`);
       } else {
         console.log(`[Pengirim Belum Terdaftar] Sender ID: ${senderInfo.id} | PushName: ${pushName}`);
       }
@@ -1882,7 +1891,8 @@ export default function setupMessageHandler(sock) {
         noSender: senderInfo.id,
         statusReschedule: "-",
         statusRujukan: "Rujukan Aktif",
-        noLid: senderInfo.id
+        noLid: senderInfo.id,
+        tglReschedule: "-"
       };
 
       const intent = detectPatientIntent(text);
@@ -1891,16 +1901,16 @@ export default function setupMessageHandler(sock) {
       if (intent.type === 'TERBATALKAN_JKN') {
         if (patientData && patientData.noRm) {
           try {
-            await callSimgosApi("update_status", {
-              noRm: patientData.noRm,
-              type: "reschedule",
+            await callSimgosApi("update_status", { 
+              noRm: patientData.noRm, 
+              type: "reschedule", 
               status: "Terbatalkan Mobile JKN",
               no_lid: senderInfo.id
             });
           } catch (e) {}
         }
 
-        // 1. Kirim Laporan ke WhatsApp DPJP Utama
+        // Kirim Laporan ke WhatsApp DPJP Utama
         const templateLaporanJkn = sysConfig.templates["WA_LAPORAN_TERBATALKAN_JKN"];
         if (templateLaporanJkn) {
           const notifDokterJkn = compileTemplateText(templateLaporanJkn, pObj, sysConfig);
@@ -1910,7 +1920,7 @@ export default function setupMessageHandler(sock) {
           } catch (docErr) {}
         }
 
-        // 2. Kirim Balasan Konfirmasi Empatik ke Pasien
+        // Kirim Balasan Konfirmasi Empatik ke Pasien
         const templateBalasJkn = sysConfig.templates["WA_PX_TERBATALKAN_JKN_CONFIRM"];
         let replyJknPasien = "";
         if (templateBalasJkn) {
@@ -1994,7 +2004,7 @@ export default function setupMessageHandler(sock) {
 
           const updatedPatientObj = {
             ...pObj,
-            tglKontrol: newDate,
+            tglReschedule: newDate,
             statusReschedule: `Reschedule (${newDate})`,
             noSender: senderInfo.id,
             noLid: senderInfo.id
@@ -2039,7 +2049,7 @@ export default function setupMessageHandler(sock) {
         return;
       }
 
-      // JALUR 3: PERCAKAPAN UMUM, TANYA NOMOR RM & KONSULTASI GIGI DENGAN AI
+      // JALUR 3: PERCAKAPAN UMUM, TANYA NOMOR RM & KONSULTASI GIGI DENGAN AI SUPER SMART
       let userSession = conversationSessions.get(senderInfo.id);
       if (!userSession) {
         userSession = { history: [], lastSeen: Date.now() };
@@ -2067,7 +2077,8 @@ export default function setupMessageHandler(sock) {
         console.error("[Dual AI Fatal Error]", aiErr.message);
         const witaTime = getWitaTimeGreeting();
         if (patientData && patientData.noRm) {
-          rawAiResponse = `${witaTime.greeting}, Bapak/Ibu ${officialPatientName}. Nomor Rekam Medis (RM) Anda yang terdaftar di Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel adalah *${patientData.noRm}* dengan jadwal kontrol pada tanggal *${patientData.tglKontrol}*. Ada yang bisa kami bantu seputar perawatan gigi Anda? 🙏`;
+          const hasResched = patientData.tglReschedule && patientData.tglReschedule !== "-";
+          rawAiResponse = `${witaTime.greeting}, Bapak/Ibu ${officialPatientName}. Nomor Rekam Medis (RM) Anda yang terdaftar di Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel adalah *${patientData.noRm}*. ${hasResched ? `Jadwal kontrol Anda sebelumnya pada tanggal ${patientData.tglKontrol} telah berhasil dijadwalkan ulang ke tanggal *${patientData.tglReschedule}*.` : `Jadwal kontrol Anda terdaftar pada tanggal *${patientData.tglKontrol}*.`} Ada yang bisa kami bantu seputar perawatan gigi Anda? 🙏`;
         } else {
           rawAiResponse = `${witaTime.greeting}, Bapak/Ibu ${officialPatientName}. Terima kasih telah menghubungi Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, staf poli kami siap membantu jadwal kontrol dan perawatan gigi Anda. Ada yang bisa kami bantu? 🙏`;
         }
@@ -2137,7 +2148,7 @@ export default function setupMessageHandler(sock) {
 
         const updatedPx = { 
           ...pObj, 
-          tglKontrol: newRescheduleDate, 
+          tglReschedule: newRescheduleDate, 
           statusReschedule: `Reschedule (${newRescheduleDate})`,
           noSender: senderInfo.id,
           noLid: senderInfo.id
