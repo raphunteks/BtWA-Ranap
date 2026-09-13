@@ -321,11 +321,22 @@ function extractDateFromText(text) {
 function detectPatientIntent(rawText) {
   const text = rawText.trim().toLowerCase();
 
+  // 1. Deteksi Khusus: Pasien Menyatakan Terbatalkan di Aplikasi Mobile JKN
+  const jknCancelPattern1 = /\b(terbatalkan|batal|dibatalkan)\b.*\b(mobile\s*jkn|jkn|aplikasi|bpjs|sistem)\b/i;
+  const jknCancelPattern2 = /\b(mobile\s*jkn|jkn)\b.*\b(terbatalkan|batal|dibatalkan)\b/i;
+  const jknExactPhrase = /saya\s*terbatalkan\s*(di\s*aplikasi)?\s*mobile\s*jkn/i;
+
+  if (jknExactPhrase.test(text) || jknCancelPattern1.test(text) || jknCancelPattern2.test(text)) {
+    return { type: 'TERBATALKAN_JKN' };
+  }
+
+  // 2. Deteksi Salah Orang / Salah Sambung
   const wrongPersonPattern = /\b(salah\s*orang|bukan\s*saya|salah\s*nomor|salah\s*ki|salah\s*kirim|salah\s*target|tidak\s*pernah\s*(ke|periksa|daftar))\b/i;
   if (wrongPersonPattern.test(text)) {
     return { type: 'SALAH_ORANG' };
   }
 
+  // 3. Deteksi Reschedule / Jadwal Ulang
   const isNegative = /\b(tidak|nggak|engga|gak|gk|belum|batal)\s*(bisa|hadir|datang|ikut|boleh)?\b/i.test(text);
 
   const hadirPattern = /\b(hadir|bisa\s*(dok|kak|min|hadir|datang|ikut|ia|ya)?|boleh\s*(dok|kak|min)?|siap\s*(dok|kak|min|hadir|datang)?|oke\s*(dok|kak|min)?|ok\s*(dok|kak|min)?|baik\s*(dok|kak|min)?|insya\s*allah\s*(bisa|hadir|datang)?|datang|dateng|ikut)\b/i;
@@ -447,7 +458,7 @@ async function resolveLidFromWhatsAppServer(sock, rawPhone) {
   const cleanPhone = formatToInternational(rawPhone);
   if (!cleanPhone || cleanPhone.length < 8) return null;
 
-  // 1. Cek langsung via sock.onWhatsApp jika versi Baileys mengembalikannya
+  // 1. Coba kueri standar sock.onWhatsApp
   try {
     const waCheck = await sock.onWhatsApp(cleanPhone);
     if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
@@ -455,13 +466,12 @@ async function resolveLidFromWhatsAppServer(sock, rawPhone) {
     }
   } catch (e) {}
 
-  // 2. Kirim USync IQ Query tingkat rendah yang menyertakan protokol LID resmi
+  // 2. Kueri XMPP USync resmi dengan alamat 's.whatsapp.net' (Bebas error karakter @)
   try {
-    const iqTag = (sock.generateMessageTag ? sock.generateMessageTag() : Date.now().toString());
     const usyncIqNode = {
       tag: 'iq',
       attrs: {
-        to: '@s.whatsapp.net',
+        to: 's.whatsapp.net',
         type: 'get',
         xmlns: 'usync',
       },
@@ -469,7 +479,7 @@ async function resolveLidFromWhatsAppServer(sock, rawPhone) {
         {
           tag: 'usync',
           attrs: {
-            sid: iqTag,
+            sid: `usync-lid-${Date.now()}`,
             mode: 'query',
             last: 'true',
             index: '0',
@@ -481,7 +491,7 @@ async function resolveLidFromWhatsAppServer(sock, rawPhone) {
               attrs: {},
               content: [
                 { tag: 'contact', attrs: {} },
-                { tag: 'lid', attrs: {} } // Protokol wajib agar WA mengembalikan nomor LID
+                { tag: 'lid', attrs: {} }
               ]
             },
             {
@@ -490,10 +500,7 @@ async function resolveLidFromWhatsAppServer(sock, rawPhone) {
               content: [
                 {
                   tag: 'user',
-                  attrs: {},
-                  content: [
-                    { tag: 'contact', attrs: {}, content: `+${cleanPhone}` }
-                  ]
+                  attrs: { jid: `${cleanPhone}@s.whatsapp.net` }
                 }
               ]
             }
@@ -519,11 +526,80 @@ async function resolveLidFromWhatsAppServer(sock, rawPhone) {
       };
 
       const foundLid = extractLid(res);
-      if (foundLid) {
-        return foundLid;
-      }
+      if (foundLid) return foundLid;
     }
   } catch (errUsync) {}
+
+  return null;
+}
+
+// REVERSE RESOLVER: DARI NOMOR LID MENCARI NOMOR TELEPON RESMI WHATSAPP
+async function resolvePhoneFromLid(sock, rawLid) {
+  const cleanLid = String(rawLid).replace(/\D/g, '');
+  if (!cleanLid) return null;
+
+  try {
+    const usyncNode = {
+      tag: 'iq',
+      attrs: {
+        to: 's.whatsapp.net',
+        type: 'get',
+        xmlns: 'usync',
+      },
+      content: [
+        {
+          tag: 'usync',
+          attrs: {
+            sid: `usync-rev-${Date.now()}`,
+            mode: 'query',
+            last: 'true',
+            index: '0',
+            context: 'interactive',
+          },
+          content: [
+            {
+              tag: 'query',
+              attrs: {},
+              content: [
+                { tag: 'contact', attrs: {} }
+              ]
+            },
+            {
+              tag: 'list',
+              attrs: {},
+              content: [
+                {
+                  tag: 'user',
+                  attrs: { jid: `${cleanLid}@lid` }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+
+    const res = await sock.query(usyncNode);
+    if (res && res.content) {
+      const extractPhone = (node) => {
+        if (!node) return null;
+        if (node.tag === 'contact' && node.attrs && (node.attrs.phone || node.attrs.jid)) {
+          const raw = node.attrs.phone || node.attrs.jid;
+          return formatToInternational(raw);
+        }
+        if (Array.isArray(node.content)) {
+          for (const c of node.content) {
+            const found = extractPhone(c);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+
+      const foundPhone = extractPhone(res);
+      if (foundPhone) return foundPhone;
+    }
+  } catch (e) {}
 
   return null;
 }
@@ -635,7 +711,7 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     return matchedPatient;
   }
 
-  // 2. Query ke Database SIMGOS (Mencari via Kolom 18 No LID, Kolom 15 No Sender, atau No WA)
+  // 2. Query ke Database SIMGOS
   const lookupPhone = senderInfo.resolvedPhone || (senderInfo.isLid ? lidToPhoneMap.get(senderInfo.id) : senderInfo.id);
   const lookupLid = senderInfo.isLid ? senderInfo.id : (phoneToLidMap.get(senderInfo.id) || "");
 
@@ -657,45 +733,29 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     }
   } catch (e) {}
 
-  // 3. JIKA SENDER ADALAH @lid DAN BELUM ADA DI MEMORI: Scan dan Bind On-the-Fly
+  // 3. REVERSE USYNC: JIKA SENDER @lid, TANYAKAN NOMOR WA-NYA KE SERVER WHATSAPP
   if (senderInfo.isLid && !matchedPatient) {
     try {
-      console.log(`[On-the-Fly Binding] Mencari kepemilikan LID ${senderInfo.id} di spreadsheet...`);
-      const allPxRes = await callSimgosApi("get_all_patient_phones");
-      if (allPxRes.status === "success" && Array.isArray(allPxRes.data)) {
-        for (const px of allPxRes.data) {
-          const phoneFull = formatToInternational(px.cleanPhone || px.noHp);
-          if (!phoneFull) continue;
-
-          try {
-            const currentLid = await resolveLidFromWhatsAppServer(sock, phoneFull);
-            if (currentLid) {
-              registerIdentityMapping(currentLid, phoneFull);
-              px.noLid = currentLid;
-              patientCacheMap.set(currentLid, px);
-              patientCacheMap.set(phoneFull, px);
-
-              if (currentLid === senderInfo.id) {
-                console.log(`[Binding Berhasil!] Pasien: ${px.namaPasien} (RM: ${px.noRm}) Cocok dengan LID ${senderInfo.id}`);
-                callSimgosApi("update_status", {
-                  row: px.rowNumber,
-                  type: "pasien",
-                  status: "Pending",
-                  no_lid: currentLid
-                }).catch(() => {});
-
-                matchedPatient = px;
-                break;
-              }
-            }
-          } catch (e) {}
+      const resolvedPhone = await resolvePhoneFromLid(sock, senderInfo.id);
+      if (resolvedPhone) {
+        registerIdentityMapping(senderInfo.id, resolvedPhone);
+        const searchRev = await callSimgosApi("search_patient", {
+          phone: resolvedPhone,
+          lid: senderInfo.id,
+          query: resolvedPhone
+        });
+        if (searchRev.status === "success" && Array.isArray(searchRev.data) && searchRev.data.length > 0) {
+          matchedPatient = searchRev.data[0];
+          patientCacheMap.set(senderInfo.id, matchedPatient);
+          patientCacheMap.set(resolvedPhone, matchedPatient);
+          return matchedPatient;
         }
       }
     } catch (e) {}
   }
 
   // 4. Pencocokan Tambahan Berdasarkan Profil PushName
-  if (!matchedPatient && pushName && pushName.length >= 4 && pushName !== "Pasien") {
+  if (!matchedPatient && pushName && pushName.length >= 3 && pushName !== "Pasien") {
     try {
       const nameCheck = await callSimgosApi("search_patient", { query: pushName, lid: senderInfo.id });
       if (nameCheck.status === "success" && Array.isArray(nameCheck.data) && nameCheck.data.length === 1) {
@@ -884,7 +944,7 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
     systemPromptText += `\n\n[DATA RESMI PASIEN SESUAI DATABASE]:
 - Nama Lengkap Pasien: ${patientContext.namaPasien}
 - Nomor Rekam Medis (RM): ${patientContext.noRm}
-- Jadwal Kontrol: ${patientContext.tglKontrol}
+- Tanggal Kontrol: ${patientContext.tglKontrol}
 - Status Reschedule: ${patientContext.statusReschedule || "-"}
 - Status Rujukan: ${patientContext.statusRujukan || "Rujukan Aktif"}
 - Instansi: RSKD Gigi dan Mulut Prov. Sulsel
@@ -1092,7 +1152,6 @@ export default function setupMessageHandler(sock) {
 
   prewarmDoctorAndOwnerLids(sock);
 
-  // Jalankan konversi satu-satu secara proaktif saat startup
   setTimeout(() => {
     convertAllPatientsToLid(sock, false);
   }, 3000);
@@ -1171,7 +1230,9 @@ export default function setupMessageHandler(sock) {
                    msg.message.imageMessage?.caption || 
                    msg.message.videoMessage?.caption || '';
       
-      if (!text.trim()) return;
+      const isImage = !!(msg.message.imageMessage);
+
+      if (!text.trim() && !isImage) return;
 
       const rawParticipant = msg.key.participant || msg.key.participantPn || msg.participantPn || '';
       if (rawParticipant && remoteJid.endsWith('@lid')) {
@@ -1195,7 +1256,8 @@ export default function setupMessageHandler(sock) {
           case 'help':
             const menuText = `*🤖 BOT KONTROL RSKDGM (H-2 & H-1 SIMGOS) 🤖*\n\n` +
                              `*🦷 SIMGOS FOLLOW-UP KONTROL:*\n` +
-                             `* !convertalltolid* - 🔄 Konversi satu-satu No WA ke Kolom 18 (No LID)\n` +
+                             `* !converstalltolid* - 🔄 Konversi satu-satu No WA ke Kolom 18 (No LID)\n` +
+                             `* !reschedulepx terbatalkan <No.RM/Nama> <YYYY-MM-DD>* - 🔁 Atur tgl baru & infokan pasien JKN\n` +
                              `* !followupnow* [h1/h2/all] [tgl/auto] [me] - 🚀 Kirim instan ('all' = H-2 & H-1, 'me' = kirim ke Anda)\n` +
                              `* !followup* [h1/h2] [tgl/auto] - Cek antrean kontrol H-2 atau H-1\n` +
                              `* !gassfollowup* [h1/h2] [me] - Kirim WA massal ke Pasien & DPJP Utama\n` +
@@ -1223,13 +1285,13 @@ export default function setupMessageHandler(sock) {
             await sock.sendMessage(senderInfo.targetJid, { text: menuText }, { quoted: msg });
             return;
 
-          case 'convertalltolid':
           case 'converstalltolid':
+          case 'convertalltolid':
           case 'syncalllid':
           case 'syncalldb':
           case 'synclids':
           case 'syncpasien':
-            await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Memulai konversi satu-satu No WA database ke Kolom 18 (No LID)... Mohon tunggu beberapa detik._" }, { quoted: msg });
+            await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Memulai konversi satu-satu No WA database ke Kolom 18 (No LID) via USync Server WhatsApp... Mohon tunggu sebentar._" }, { quoted: msg });
             const syncResult = await convertAllPatientsToLid(sock, true);
             await sock.sendMessage(senderInfo.targetJid, { 
               text: `✅ *SINKRONISASI KOLOM 18 (NO LID) SELESAI!*\n\n` +
@@ -1238,6 +1300,89 @@ export default function setupMessageHandler(sock) {
                     `💾 Status: Tersimpan permanen ke Kolom 18 (No LID) & Kolom 15 di Spreadsheet.\n\n` +
                     `_Sekarang pasien yang chat melalui LID langsung dikenali nama & No RM aslinya secara akurat!_ 🚀`
             }, { quoted: msg });
+            return;
+
+          // =================================================================
+          // PERINTAH BARU: RESCHEDULE PASIEN TERBATALKAN DARI MOBILE JKN
+          // Format: !reschedulepx terbatalkan <No. RM / Nama Lengkap> <YYYY-MM-DD>
+          // =================================================================
+          case 'reschedulepx':
+          case 'rescheduleterbatalkan':
+            let inputArgs = [...args];
+            if (inputArgs[0] && inputArgs[0].toLowerCase() === 'terbatalkan') {
+              inputArgs.shift();
+            }
+
+            if (inputArgs.length < 2) {
+              await sock.sendMessage(senderInfo.targetJid, {
+                text: `⚠️ Format salah!\nGunakan format:\n*!reschedulepx terbatalkan <No. RM / Nama Lengkap> <YYYY-MM-DD>*\n\nContoh:\n*!reschedulepx terbatalkan 00.06.32.89 2026-09-25*\natau\n*!reschedulepx terbatalkan ILDHAYANI 2026-09-25*`
+              }, { quoted: msg });
+              break;
+            }
+
+            const newDateParam = inputArgs.pop();
+            const extractedTargetDate = extractDateFromText(newDateParam) || newDateParam;
+            const targetIdentifier = inputArgs.join(" ").replace(/\//g, "").trim();
+
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(extractedTargetDate)) {
+              await sock.sendMessage(senderInfo.targetJid, {
+                text: `❌ Tanggal tidak valid! Gunakan format *YYYY-MM-DD* (contoh: *2026-09-25*).`
+              }, { quoted: msg });
+              break;
+            }
+
+            await sock.sendMessage(senderInfo.targetJid, {
+              text: `⏳ _Mencari data pasien "${targetIdentifier}" untuk dijadwalkan ulang ke ${extractedTargetDate}..._`
+            }, { quoted: msg });
+
+            try {
+              const searchTarget = await callSimgosApi("search_patient", { query: targetIdentifier });
+              if (searchTarget.status !== "success" || !Array.isArray(searchTarget.data) || searchTarget.data.length === 0) {
+                await sock.sendMessage(senderInfo.targetJid, {
+                  text: `❌ Data pasien dengan kata kunci *"${targetIdentifier}"* tidak ditemukan di spreadsheet.`
+                }, { quoted: msg });
+                break;
+              }
+
+              const targetPx = searchTarget.data[0];
+              const sysCfg = await fetchSystemAIConfig();
+
+              // Update tanggal & status di Google Sheet
+              await callSimgosApi("reschedule_patient", {
+                noRm: targetPx.noRm,
+                newDate: extractedTargetDate,
+                customStatus: `Reschedule DPJP (${extractedTargetDate})`
+              });
+
+              // Kirim notifikasi konfirmasi tanggal baru ke WhatsApp Pasien
+              const updatedPxObj = {
+                ...targetPx,
+                tglKontrol: extractedTargetDate,
+                statusReschedule: `Reschedule DPJP (${extractedTargetDate})`
+              };
+
+              const templateJknConfirm = sysCfg.templates["WA_PX_RESCHEDULE_JKN_CONFIRM"] || 
+                `Halo, Yth. Bapak/Ibu *{NAMA_PASIEN}* (No. RM: {NO_RM}). 🙏\n\nMenindaklanjuti informasi pembatalan kontrol di aplikasi Mobile JKN sebelumnya, Dokter Penanggung Jawab kami (*{DPJP_UTAMA}*) telah menjadwalkan ulang perawatan gigi lanjutan Anda pada:\n\n📅 *Hari/Tanggal Baru:* {TGL_KONTROL}\n👨‍⚕️ *DPJP:* {DPJP_UTAMA} / {DPJP_PENDAMPING}\n📍 *Lokasi:* {POLI_KLINIK} - {NAMA_INSTANSI}\n\nMohon konfirmasi kehadiran Anda kembali dengan membalas pesan ini:\nKetik *HADIR* jika bisa datang pada jadwal baru tersebut, atau *RESCHEDULE* jika ingin mengajukan jadwal lain.\n\nTerima kasih atas pengertian dan kerja samanya. Salam sehat selalu! 🦷✨`;
+
+              const msgToPatient = compileTemplateText(templateJknConfirm, updatedPxObj, sysCfg);
+              const targetPatientJid = sanitizeNumber(targetPx.noHp);
+
+              await sock.sendMessage(targetPatientJid, { text: msgToPatient });
+
+              // Kirim laporan sukses ke dokter/admin pengirim perintah
+              const successReport = `✅ *RESCHEDULE PASIEN TERBATALKAN BERHASIL!*\n\n` +
+                                    `👤 *Nama Pasien:* ${targetPx.namaPasien}\n` +
+                                    `🔖 *No. RM:* ${targetPx.noRm}\n` +
+                                    `📅 *Jadwal Kontrol Baru:* ${extractedTargetDate}\n` +
+                                    `📱 *WhatsApp Pasien:* ${targetPx.noHp}\n` +
+                                    `📋 *Status Spreadsheet:* Reschedule DPJP (${extractedTargetDate})\n\n` +
+                                    `_Pesan konfirmasi jadwal baru telah otomatis dikirimkan ke WhatsApp pasien._ 🙏✨`;
+
+              await sock.sendMessage(senderInfo.targetJid, { text: successReport }, { quoted: msg });
+
+            } catch (errReschedPx) {
+              await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal eksekusi reschedule pasien:* ${errReschedPx.message}` }, { quoted: msg });
+            }
             return;
 
           case 'cekrujukanaktif':
@@ -1742,6 +1887,46 @@ export default function setupMessageHandler(sock) {
 
       const intent = detectPatientIntent(text);
 
+      // JALUR KHUSUS: PASIEN MENYATAKAN "TERBATALKAN DI APLIKASI MOBILE JKN"
+      if (intent.type === 'TERBATALKAN_JKN') {
+        if (patientData && patientData.noRm) {
+          try {
+            await callSimgosApi("update_status", {
+              noRm: patientData.noRm,
+              type: "reschedule",
+              status: "Terbatalkan Mobile JKN",
+              no_lid: senderInfo.id
+            });
+          } catch (e) {}
+        }
+
+        // 1. Kirim Laporan ke WhatsApp DPJP Utama
+        const templateLaporanJkn = sysConfig.templates["WA_LAPORAN_TERBATALKAN_JKN"];
+        if (templateLaporanJkn) {
+          const notifDokterJkn = compileTemplateText(templateLaporanJkn, pObj, sysConfig);
+          try {
+            await sock.sendMessage(targetDpjpUtamaJid, { text: notifDokterJkn });
+            console.log(`[Laporan Terbatalkan JKN Terkirim ke DPJP Utama] ${targetDpjpUtamaJid}`);
+          } catch (docErr) {}
+        }
+
+        // 2. Kirim Balasan Konfirmasi Empatik ke Pasien
+        const templateBalasJkn = sysConfig.templates["WA_PX_TERBATALKAN_JKN_CONFIRM"];
+        let replyJknPasien = "";
+        if (templateBalasJkn) {
+          replyJknPasien = compileTemplateText(templateBalasJkn, pObj, sysConfig);
+        } else {
+          replyJknPasien = `Baik Bapak/Ibu *${officialPatientName}* (No. RM: ${pObj.noRm}), terima kasih banyak atas konfirmasinya. 🙏\n\n` +
+                           `Laporan bahwa jadwal kontrol Anda terbatalkan oleh sistem di aplikasi *Mobile JKN* telah kami teruskan langsung ke Dokter Penanggung Jawab (*${sysConfig.dpjpUtama}*).\n\n` +
+                           `Tim poli kami akan segera mengoordinasikan jadwal kontrol pengganti dan kami akan mengabarkan tanggal pastinya kepada Anda di nomor WhatsApp ini ya.\n\n` +
+                           `Mohon ditunggu ya, Bapak/Ibu. Salam sehat selalu dari *${sysConfig.poli} - ${sysConfig.instansi}*. 🦷✨`;
+        }
+
+        await sock.sendMessage(senderInfo.targetJid, { text: replyJknPasien });
+        await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+        return;
+      }
+
       // JALUR KHUSUS: PENGIRIM MENYATAKAN "SALAH ORANG / SALAH NOMOR"
       if (intent.type === 'SALAH_ORANG') {
         const witaTime = getWitaTimeGreeting();
@@ -1864,7 +2049,7 @@ export default function setupMessageHandler(sock) {
 
       userSession.history.push({
         role: 'user',
-        parts: [{ text: text.trim() }]
+        parts: [{ text: text.trim() || "(Mengirimkan bukti tangkapan layar / gambar)" }]
       });
 
       if (userSession.history.length > 8) {
@@ -1890,7 +2075,29 @@ export default function setupMessageHandler(sock) {
         clearInterval(typingTimer);
       }
 
-      // Deteksi Tag Aksi [ACTION:HADIR]
+      // Deteksi Tag Aksi [ACTION:TERBATALKAN_JKN] dari AI
+      if (rawAiResponse.includes('[ACTION:TERBATALKAN_JKN]')) {
+        rawAiResponse = rawAiResponse.replace(/\[ACTION:TERBATALKAN_JKN\]/gi, '').trim();
+
+        if (patientData && patientData.noRm) {
+          await callSimgosApi("update_status", { 
+            noRm: patientData.noRm, 
+            type: "reschedule", 
+            status: "Terbatalkan Mobile JKN",
+            no_lid: senderInfo.id
+          }).catch(() => {});
+        }
+
+        const templateLaporanJkn = sysConfig.templates["WA_LAPORAN_TERBATALKAN_JKN"];
+        if (templateLaporanJkn) {
+          const notifDokterJkn = compileTemplateText(templateLaporanJkn, pObj, sysConfig);
+          try {
+            await sock.sendMessage(targetDpjpUtamaJid, { text: notifDokterJkn });
+          } catch (e) {}
+        }
+      }
+
+      // Deteksi Tag Aksi [ACTION:HADIR] dari AI
       if (rawAiResponse.includes('[ACTION:HADIR]')) {
         rawAiResponse = rawAiResponse.replace(/\[ACTION:HADIR\]/gi, '').trim();
 
@@ -1912,7 +2119,7 @@ export default function setupMessageHandler(sock) {
         }
       }
 
-      // Deteksi Tag Aksi [ACTION:RESCHEDULE:YYYY-MM-DD]
+      // Deteksi Tag Aksi [ACTION:RESCHEDULE:YYYY-MM-DD] dari AI
       const rescheduleMatch = rawAiResponse.match(/\[ACTION:RESCHEDULE:(\d{4}-\d{2}-\d{2})\]/i);
       let finalClientReply = rawAiResponse.replace(/\[ACTION:RESCHEDULE:\d{4}-\d{2}-\d{2}\]/gi, '').trim();
 
