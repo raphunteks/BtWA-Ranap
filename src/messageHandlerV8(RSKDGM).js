@@ -240,6 +240,7 @@ function extractDateFromText(text) {
 function detectPatientIntent(rawText) {
   const text = rawText.trim().toLowerCase();
 
+  // 1. Deteksi Khusus: Pasien Menyatakan Salah Orang / Salah Sambung
   const wrongPersonPattern = /\b(salah\s*orang|bukan\s*saya|salah\s*nomor|salah\s*ki|salah\s*kirim|salah\s*target|tidak\s*pernah\s*(ke|periksa|daftar))\b/i;
   if (wrongPersonPattern.test(text)) {
     return { type: 'SALAH_ORANG' };
@@ -275,33 +276,41 @@ function detectPatientIntent(rawText) {
 
 // CLIENT REST API DENGAN SISTEM AUTO-REDIRECT & DETEKSI RESPON BERSIH
 async function callSimgosApi(action, params = {}) {
-  try {
-    const query = new URLSearchParams({ action, ...params }).toString();
-    const url = `${GAS_URL_SIMGOS}?${query}`;
-    
-    const res = await fetch(url, {
-      method: "GET",
-      redirect: "follow",
-      headers: { "Accept": "application/json" }
-    });
+  const query = new URLSearchParams({ action, ...params }).toString();
+  const url = `${GAS_URL_SIMGOS}?${query}`;
+  
+  let lastError = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        headers: { 
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+      });
 
-    const rawText = await res.text();
+      const rawText = await res.text();
 
-    if (!rawText || rawText.trim().startsWith("<")) {
-      console.error(`[SIMGOS HTML Crash on ${action}]:`, rawText.substring(0, 300));
-      throw new Error(`Google Apps Script mengembalikan HTML error (periksa izin deployment / error runtime). Potongan respon: ${rawText.substring(0, 90)}...`);
+      if (!rawText || rawText.trim().startsWith("<")) {
+        console.error(`[SIMGOS HTML Response on ${action} (Attempt ${attempt})]:`, rawText.substring(0, 200));
+        throw new Error(`Google Apps Script mengembalikan halaman HTML/Error. Pastikan Web App di-deploy dengan akses 'Anyone' (Siapa saja) dan versi terbaru telah disimpan.`);
+      }
+
+      const jsonData = JSON.parse(rawText);
+      if (jsonData.status === "error") {
+        throw new Error(jsonData.message || "GAS Server Error");
+      }
+
+      return jsonData;
+    } catch (err) {
+      lastError = err;
+      if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
     }
-
-    const jsonData = JSON.parse(rawText);
-    if (jsonData.status === "error") {
-      throw new Error(jsonData.message || "Unknown GAS Server Error");
-    }
-
-    return jsonData;
-  } catch (err) {
-    console.error(`[SIMGOS API Error: ${action}]`, err);
-    throw new Error(`Gagal komunikasi dengan API SIMGOS: ${err.message}`);
   }
+  
+  throw new Error(`Gagal komunikasi dengan API SIMGOS: ${lastError.message}`);
 }
 
 async function fetchSystemAIConfig() {
@@ -337,28 +346,35 @@ async function fetchSystemAIConfig() {
   return cachedSystemConfig;
 }
 
+// Mengambil seluruh data pasien dari database lalu menyaring status rujukan secara aman
 async function fetchPatientsByRujukanStatus(statusType) {
+  const collected = new Map();
   try {
-    let res = await callSimgosApi("search_patient", { query: "." });
-    if (!res || !res.data || res.data.length === 0) {
-      res = await callSimgosApi("search_patient", { query: "0" });
-    }
+    const [h2Res, h1Res] = await Promise.all([
+      callSimgosApi("get_followup", { mode: "h2", tgl: "auto" }).catch(() => null),
+      callSimgosApi("get_followup", { mode: "h1", tgl: "auto" }).catch(() => null)
+    ]);
 
-    if (res && res.status === "success" && Array.isArray(res.data)) {
-      return res.data.filter(p => {
-        const r = String(p.statusRujukan || "").toLowerCase();
-        if (statusType === "aktif") {
-          return r.includes("aktif");
-        } else if (statusType === "habis") {
-          return r.includes("habis") || !r || r === "-";
+    const candidateLists = [];
+    if (h2Res?.status === "success" && Array.isArray(h2Res.data)) candidateLists.push(...h2Res.data);
+    if (h1Res?.status === "success" && Array.isArray(h1Res.data)) candidateLists.push(...h1Res.data);
+
+    for (const p of candidateLists) {
+      if (!p || !p.noRm) continue;
+      const r = String(p.statusRujukan || "").toLowerCase();
+      const isAktif = r.includes("aktif");
+      const isHabis = r.includes("habis") || !r || r === "-";
+
+      if ((statusType === "aktif" && isAktif) || (statusType === "habis" && isHabis)) {
+        if (!collected.has(p.noRm)) {
+          collected.set(p.noRm, p);
         }
-        return false;
-      });
+      }
     }
   } catch (e) {
     console.error("[Get Patients By Rujukan Error]", e);
   }
-  return [];
+  return Array.from(collected.values());
 }
 
 // =========================================================================
@@ -492,13 +508,15 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
   const aiConfig = await fetchSystemAIConfig();
   let systemPromptText = aiConfig.prompt;
 
+  // Pastikan nama instansi selalu tepat tanpa sebutan lain
   systemPromptText = systemPromptText.replace(/RSKDGM Care|RSKD Care/gi, "RSKD Gigi dan Mulut Prov. Sulsel");
 
+  // Injeksi Konteks Pasien yang Sangat Ketat dan Akurat
   if (patientContext && patientContext.namaPasien && patientContext.namaPasien !== "-") {
     systemPromptText += `\n\n[DATA IDENTITAS RESMI PASIEN SESUAI DATABASE]:
 - Nama Lengkap Resmi: ${patientContext.namaPasien}
 - Nomor Rekam Medis: ${patientContext.noRm}
-- Jadwal Kontrol: ${patientContext.tglKontrol}
+- Tanggal Kontrol: ${patientContext.tglKontrol}
 - Status Reschedule: ${patientContext.statusReschedule || "-"}
 - Status Rujukan: ${patientContext.statusRujukan || "Rujukan Aktif"}
 - Rumah Sakit: RSKD Gigi dan Mulut Prov. Sulsel
@@ -520,18 +538,16 @@ ATURAN RESPONS PENGIRIM TIDAK TERDAFTAR:
 3. Jika pengirim menyatakan "salah orang", "bukan saya", atau merasa salah kirim, jelaskan dengan sangat ramah dan santun bahwa nomornya mungkin salah tercatat di pendaftaran RSKD Gigi dan Mulut Prov. Sulsel, dan persilakan mengabaikan pesan tersebut.`;
   }
 
+  let finalReply = "";
   try {
-    return await askGeminiClinic(conversationHistory, systemPromptText, aiConfig);
+    finalReply = await askGeminiClinic(conversationHistory, systemPromptText, aiConfig);
   } catch (geminiErr) {
     console.warn(`[Gemini Error -> Beralih ke Groq AI Fallback]`, geminiErr.message);
+    finalReply = await askGroqClinic(conversationHistory, systemPromptText, aiConfig);
   }
 
-  try {
-    return await askGroqClinic(conversationHistory, systemPromptText, aiConfig);
-  } catch (groqErr) {
-    console.error(`[Groq Fallback Error]`, groqErr.message);
-    throw new Error(`Kedua Engine AI (Gemini & Groq) gagal merespons.`);
-  }
+  // Filter pengaman agar teks bot tidak memuat kata RSKDGM Care / RSKD Care
+  return finalReply.replace(/RSKDGM Care|RSKD Care/gi, "RSKD Gigi dan Mulut Prov. Sulsel");
 }
 
 // =========================================================================
@@ -621,6 +637,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
 
       console.log(`[Blast ${modeH.toUpperCase()} Terkirim] ${px.namaPasien} (${px.statusRujukan}) -> JID: ${targetJid}`);
 
+      // HANYA simpan ke sesi lokal jika BUKAN mode override pengirim (mencegah tumpang tindih nama)
       if (!overrideToSender) {
         conversationSessions.set(resolvedLid, {
           history: [],
@@ -774,7 +791,7 @@ export default function setupMessageHandler(sock) {
       const senderInfo = parseSenderInfo(remoteJid);
       const pushName = msg.pushName || "Pasien";
 
-      console.log(`[Chat 1-on-1] Dari: ${senderInfo.id} (${senderInfo.isLid ? 'LID' : 'Phone'}) (${pushName}) | Pesan: "${text.trim()}"`);
+      console.log(`[Chat 1-on-1] Dari: ${senderInfo.id} (${senderInfo.isLid ? 'LID' : 'Phone'}) (PushName: ${pushName}) | Pesan: "${text.trim()}"`);
 
       // =====================================================================
       // 1. COMMAND ADMIN (PREFIX '!')
@@ -788,7 +805,7 @@ export default function setupMessageHandler(sock) {
           case 'help':
             const menuText = `*🤖 BOT KONTROL RSKDGM (H-2 & H-1 SIMGOS) 🤖*\n\n` +
                              `*🦷 SIMGOS FOLLOW-UP KONTROL:*\n` +
-                             `* !followupnow* [h1/h2] [tgl/auto] [me] - 🚀 Kirim instan ('me' = kirim ke Anda)\n` +
+                             `* !followupnow* [h1/h2/all] [tgl/auto] [me] - 🚀 Kirim instan ('all' = H-2 & H-1, 'me' = kirim ke Anda)\n` +
                              `* !followup* [h1/h2] [tgl/auto] - Cek daftar antrean kontrol H-2 atau H-1\n` +
                              `* !gassfollowup* [h1/h2] [me] - Kirim WA massal ke Pasien & DPJP Utama\n` +
                              `* !cekrujukanaktif* - 📋 Lihat seluruh pasien dengan Rujukan Aktif\n` +
@@ -820,7 +837,7 @@ export default function setupMessageHandler(sock) {
             try {
               const pasienAktif = await fetchPatientsByRujukanStatus("aktif");
               if (pasienAktif.length === 0) {
-                await sock.sendMessage(senderInfo.targetJid, { text: "ℹ️ Tidak ditemukan pasien dengan status *Rujukan Aktif* di database." }, { quoted: msg });
+                await sock.sendMessage(senderInfo.targetJid, { text: "ℹ️ Tidak ditemukan pasien dengan status *Rujukan Aktif* di antrean kontrol." }, { quoted: msg });
                 break;
               }
 
@@ -848,7 +865,7 @@ export default function setupMessageHandler(sock) {
             try {
               const pasienHabis = await fetchPatientsByRujukanStatus("habis");
               if (pasienHabis.length === 0) {
-                await sock.sendMessage(senderInfo.targetJid, { text: "ℹ️ Tidak ditemukan pasien dengan status *Rujukan Habis* di database." }, { quoted: msg });
+                await sock.sendMessage(senderInfo.targetJid, { text: "ℹ️ Tidak ditemukan pasien dengan status *Rujukan Habis* di antrean kontrol." }, { quoted: msg });
                 break;
               }
 
@@ -905,6 +922,7 @@ export default function setupMessageHandler(sock) {
             let tglTarget = "auto";
             let toSender = false;
             let modeHNow = "h2";
+            let isAllModes = false;
 
             for (const arg of args) {
               const lowerArg = arg.toLowerCase();
@@ -914,41 +932,46 @@ export default function setupMessageHandler(sock) {
                 modeHNow = "h1";
               } else if (lowerArg === 'h2') {
                 modeHNow = "h2";
+              } else if (lowerArg === 'all') {
+                isAllModes = true;
               } else if (lowerArg !== 'auto') {
                 tglTarget = arg;
               }
             }
 
+            const modesToRun = isAllModes ? ["h2", "h1"] : [modeHNow];
             const infoNotice = toSender 
-              ? `⚡ *[FOLLOWUP NOW ${modeHNow.toUpperCase()}]* Memulai penarikan data... ⚠️ *Fitur Aktif:* Nomor penerima dialihkan ke WhatsApp Anda (*${senderInfo.id}*) & disimpan ke Kolom 15.`
-              : `⚡ *[FOLLOWUP NOW ${modeHNow.toUpperCase()}]* Memulai pengiriman instan ke nomor WhatsApp pasien (Rujukan Habis otomatis diskip)...`;
+              ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data (${modesToRun.map(m => m.toUpperCase()).join(" & ")})... ⚠️ *Mode Simulasi:* Pesan dialihkan ke WhatsApp Anda (*${senderInfo.id}*).`
+              : `⚡ *[FOLLOWUP NOW]* Memulai pengiriman instan (${modesToRun.map(m => m.toUpperCase()).join(" & ")}) ke nomor pasien (Rujukan Habis otomatis diskip)...`;
 
             await sock.sendMessage(senderInfo.targetJid, { text: infoNotice }, { quoted: msg });
             
             try {
-              const blastResult = await executeFollowupBlast(sock, remoteJid, tglTarget, toSender, modeHNow);
+              for (const currentMode of modesToRun) {
+                const blastResult = await executeFollowupBlast(sock, remoteJid, tglTarget, toSender, currentMode);
 
-              if (blastResult.totalTarget === 0) {
-                await sock.sendMessage(senderInfo.targetJid, { 
-                  text: `ℹ️ Tidak ada antrean pasien kontrol berstatus *Pending* untuk target ${modeHNow.toUpperCase()} tanggal ${blastResult.targetDate}.` 
-                }, { quoted: msg });
-                break;
+                if (blastResult.totalTarget === 0) {
+                  await sock.sendMessage(senderInfo.targetJid, { 
+                    text: `ℹ️ Tidak ada antrean pasien kontrol berstatus *Pending* untuk target ${currentMode.toUpperCase()} tanggal ${blastResult.targetDate}.` 
+                  }, { quoted: msg });
+                  continue;
+                }
+
+                let rekapSekarang = `🚀 *[FOLLOWUP NOW ${currentMode.toUpperCase()} SELESAI]*\n\n` +
+                                    `📅 *Target Kontrol:* ${blastResult.targetDate}\n` +
+                                    `👥 *Total Pasien Terjadwal:* ${blastResult.totalTarget}\n` +
+                                    `📲 *Pesan Terkirim (Aktif):* ${blastResult.pasienTerkirim}\n` +
+                                    `🚫 *Dilewati (Rujukan Habis):* ${blastResult.pasienSkipRujukanHabis}\n` +
+                                    `⚠️ *Pesan Gagal:* ${blastResult.pasienGagal}\n` +
+                                    `👨‍⚕️ *Laporan Terkirim ke DPJP Utama:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
+
+                if (blastResult.isSenderConverted) {
+                  rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Tersimpan di Kolom 15 No Sender)\n`;
+                }
+
+                rekapSekarang += `\n_Status di Google Spreadsheet telah diperbarui ke Terkirim._ 📊`;
+                await sock.sendMessage(senderInfo.targetJid, { text: rekapSekarang }, { quoted: msg });
               }
-
-              let rekapSekarang = `🚀 *[FOLLOWUP NOW ${modeHNow.toUpperCase()} SELESAI]*\n\n` +
-                                  `📅 *Target Kontrol:* ${blastResult.targetDate}\n` +
-                                  `👥 *Total Pasien Terjadwal:* ${blastResult.totalTarget}\n` +
-                                  `📲 *Pesan Terkirim (Aktif):* ${blastResult.pasienTerkirim}\n` +
-                                  `🚫 *Dilewati (Rujukan Habis):* ${blastResult.pasienSkipRujukanHabis}\n` +
-                                  `⚠️ *Pesan Gagal:* ${blastResult.pasienGagal}\n` +
-                                  `👨‍⚕️ *Laporan Terkirim ke DPJP Utama:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
-
-              if (blastResult.isSenderConverted) {
-                rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Tersimpan di Kolom 15 No Sender)\n`;
-              }
-
-              rekapSekarang += `\n_Seluruh status di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
-              await sock.sendMessage(senderInfo.targetJid, { text: rekapSekarang }, { quoted: msg });
             } catch (errNow) {
               await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal eksekusi Followup Now:* ${errNow.message}` }, { quoted: msg });
             }
@@ -1274,20 +1297,12 @@ export default function setupMessageHandler(sock) {
         if (searchPx.status === "success" && Array.isArray(searchPx.data) && searchPx.data.length > 0) {
           patientData = searchPx.data[0];
           console.log(`[Pasien Dikenali dari Database] Nama: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl: ${patientData.tglKontrol}`);
-        } else {
-          const sessionSaved = conversationSessions.get(senderInfo.id);
-          if (sessionSaved && sessionSaved.patientData) {
-            patientData = sessionSaved.patientData;
-            console.log(`[Pasien Dikenali dari Sesi Lokal] Nama: ${patientData.namaPasien}`);
-          } else {
-            console.warn(`[Pasien Belum Tertaut di Database] ID: ${senderInfo.id}`);
-          }
         }
       } catch (errSearch) {
         console.warn("[Search Patient Warning]", errSearch.message);
       }
 
-      // Tentukan Nama Sapaan yang Benar: Ambil Nama Database JIKA Terdaftar, JIKA Tidak Pakai pushName WhatsApp
+      // Pastikan nama pasien memakai nama resmi database jika terdaftar
       const officialPatientName = (patientData && patientData.namaPasien && patientData.namaPasien !== "-") 
         ? patientData.namaPasien 
         : pushName;
@@ -1439,11 +1454,10 @@ export default function setupMessageHandler(sock) {
       // =====================================================================
       let userSession = conversationSessions.get(senderInfo.id);
       if (!userSession) {
-        userSession = { history: [], lastSeen: Date.now(), patientData: patientData };
+        userSession = { history: [], lastSeen: Date.now() };
         conversationSessions.set(senderInfo.id, userSession);
       }
       userSession.lastSeen = Date.now();
-      if (patientData) userSession.patientData = patientData;
 
       userSession.history.push({
         role: 'user',
