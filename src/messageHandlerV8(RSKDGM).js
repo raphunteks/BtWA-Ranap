@@ -179,9 +179,6 @@ function getWitaTimeGreeting() {
   return { hour, greeting, fullWitaStr };
 }
 
-/**
- * PEMBERSIH SALAM OTOMATIS: Mencegah AI salah sapa Selamat Siang di waktu malam
- */
 function enforceCorrectGreeting(text, correctGreeting) {
   if (!text) return text;
   return text.replace(/\b(selamat\s+(pagi|siang|sore|malam))\b/gi, correctGreeting);
@@ -443,6 +440,94 @@ async function fetchSystemAIConfig() {
   return cachedSystemConfig;
 }
 
+// =========================================================================
+// USYNC LID RESOLVER: MEMINTA NOMOR LID ASLI SECARA RESMI KE SERVER WHATSAPP
+// =========================================================================
+async function resolveLidFromWhatsAppServer(sock, rawPhone) {
+  const cleanPhone = formatToInternational(rawPhone);
+  if (!cleanPhone || cleanPhone.length < 8) return null;
+
+  // 1. Cek langsung via sock.onWhatsApp jika versi Baileys mengembalikannya
+  try {
+    const waCheck = await sock.onWhatsApp(cleanPhone);
+    if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
+      return String(waCheck[0].lid).replace(/\D/g, '');
+    }
+  } catch (e) {}
+
+  // 2. Kirim USync IQ Query tingkat rendah yang menyertakan protokol LID resmi
+  try {
+    const iqTag = (sock.generateMessageTag ? sock.generateMessageTag() : Date.now().toString());
+    const usyncIqNode = {
+      tag: 'iq',
+      attrs: {
+        to: '@s.whatsapp.net',
+        type: 'get',
+        xmlns: 'usync',
+      },
+      content: [
+        {
+          tag: 'usync',
+          attrs: {
+            sid: iqTag,
+            mode: 'query',
+            last: 'true',
+            index: '0',
+            context: 'interactive',
+          },
+          content: [
+            {
+              tag: 'query',
+              attrs: {},
+              content: [
+                { tag: 'contact', attrs: {} },
+                { tag: 'lid', attrs: {} } // Protokol wajib agar WA mengembalikan nomor LID
+              ]
+            },
+            {
+              tag: 'list',
+              attrs: {},
+              content: [
+                {
+                  tag: 'user',
+                  attrs: {},
+                  content: [
+                    { tag: 'contact', attrs: {}, content: `+${cleanPhone}` }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+
+    const res = await sock.query(usyncIqNode);
+    if (res && res.content) {
+      const extractLid = (node) => {
+        if (!node) return null;
+        if (node.tag === 'lid' && node.attrs && (node.attrs.val || node.attrs.jid)) {
+          return String(node.attrs.val || node.attrs.jid).replace(/\D/g, '');
+        }
+        if (Array.isArray(node.content)) {
+          for (const c of node.content) {
+            const found = extractLid(c);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+
+      const foundLid = extractLid(res);
+      if (foundLid) {
+        return foundLid;
+      }
+    }
+  } catch (errUsync) {}
+
+  return null;
+}
+
 // PRE-WARMING DOKTER & OWNER
 async function prewarmDoctorAndOwnerLids(sock) {
   try {
@@ -457,9 +542,8 @@ async function prewarmDoctorAndOwnerLids(sock) {
     for (const phone of phoneCandidates) {
       if (!phoneToLidMap.has(phone)) {
         try {
-          const res = await sock.onWhatsApp(phone);
-          if (res && res.length > 0 && res[0].lid) {
-            const lid = String(res[0].lid).replace(/\D/g, '');
+          const lid = await resolveLidFromWhatsAppServer(sock, phone);
+          if (lid) {
             registerIdentityMapping(lid, phone);
             console.log(`[Identity Pre-warm] ${phone} <-> ${lid}@lid`);
           }
@@ -470,11 +554,10 @@ async function prewarmDoctorAndOwnerLids(sock) {
 }
 
 // =========================================================================
-// PROACTIVE AUTO-CONVERTER (NO WA DATABASE -> NO LID KOLOM 18)
-// Memperbaiki pemanggilan onWhatsApp() dengan format internasional '628...'
+// SUPER RESOLVER: CONVERT ALL PATIENTS TO LID & SAVE TO COLUMN 18 (NO LID)
 // =========================================================================
-async function syncAllPatientLids(sock, forceAll = false) {
-  console.log(`[Auto-Converter] Memulai sinkronisasi No WA database ke Kolom 18 (No LID)...`);
+async function convertAllPatientsToLid(sock, forceAll = false) {
+  console.log(`[Auto-Converter] Memulai konversi satu-satu No WA ke Kolom 18 (No LID)...`);
   try {
     const actionToCall = forceAll ? "get_all_patient_phones" : "get_unlinked_patients";
     const res = await callSimgosApi(actionToCall);
@@ -485,22 +568,19 @@ async function syncAllPatientLids(sock, forceAll = false) {
     }
 
     const patientList = res.data;
-    console.log(`[Auto-Converter] Memproses ${patientList.length} pasien untuk konversi LID...`);
+    console.log(`[Auto-Converter] Memproses ${patientList.length} pasien untuk konversi LID resmi...`);
 
     const batchUpdates = [];
     let matchedCount = 0;
 
     for (const p of patientList) {
-      // Pastikan format nomor diawali 62 untuk API WhatsApp
       const phoneFull = formatToInternational(p.cleanPhone || p.noHp);
-      if (!phoneFull || phoneFull.length < 9) continue;
+      if (!phoneFull || phoneFull.length < 8) continue;
 
       try {
-        const waCheck = await sock.onWhatsApp(phoneFull);
-        if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
-          const resolvedLid = String(waCheck[0].lid).replace(/\D/g, '');
+        const resolvedLid = await resolveLidFromWhatsAppServer(sock, phoneFull);
+        if (resolvedLid) {
           registerIdentityMapping(resolvedLid, phoneFull);
-
           p.noLid = resolvedLid;
           p.noSender = resolvedLid;
           patientCacheMap.set(resolvedLid, p);
@@ -514,11 +594,11 @@ async function syncAllPatientLids(sock, forceAll = false) {
           });
 
           matchedCount++;
-          console.log(`[LID Terkonversi] ${p.namaPasien} (RM: ${p.noRm}): WA ${phoneFull} -> LID: ${resolvedLid}`);
+          console.log(`[LID Match SUKSES] ${p.namaPasien} (RM: ${p.noRm}): No WA ${phoneFull} -> LID: ${resolvedLid}`);
         }
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 250));
       } catch (errCheck) {
-        console.warn(`[onWhatsApp Error: ${phoneFull}]`, errCheck.message);
+        console.warn(`[Resolve Error: ${phoneFull}]`, errCheck.message);
       }
     }
 
@@ -527,7 +607,7 @@ async function syncAllPatientLids(sock, forceAll = false) {
         action: "batch_update_lids",
         updates: batchUpdates
       });
-      console.log(`[Auto-Converter] Sukses! ${batchUpdates.length} LID tersimpan di Kolom 18 (No LID) Spreadsheet.`);
+      console.log(`[Auto-Converter] Sukses menyimpan ${batchUpdates.length} data ke Kolom 18 (No LID) Spreadsheet!`);
     }
 
     return { total: patientList.length, matched: matchedCount };
@@ -577,10 +657,10 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     }
   } catch (e) {}
 
-  // 3. JIKA SENDER ADALAH @lid DAN BELUM COCOK: Scan Proaktif Langsung Pasien Spreadsheet On-the-Fly
+  // 3. JIKA SENDER ADALAH @lid DAN BELUM ADA DI MEMORI: Scan dan Bind On-the-Fly
   if (senderInfo.isLid && !matchedPatient) {
     try {
-      console.log(`[Smart Resolver On-the-Fly] Menelusuri seluruh pasien untuk LID: ${senderInfo.id}...`);
+      console.log(`[On-the-Fly Binding] Mencari kepemilikan LID ${senderInfo.id} di spreadsheet...`);
       const allPxRes = await callSimgosApi("get_all_patient_phones");
       if (allPxRes.status === "success" && Array.isArray(allPxRes.data)) {
         for (const px of allPxRes.data) {
@@ -588,16 +668,15 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
           if (!phoneFull) continue;
 
           try {
-            const check = await sock.onWhatsApp(phoneFull);
-            if (check && check.length > 0 && check[0].lid) {
-              const currentLid = String(check[0].lid).replace(/\D/g, '');
+            const currentLid = await resolveLidFromWhatsAppServer(sock, phoneFull);
+            if (currentLid) {
               registerIdentityMapping(currentLid, phoneFull);
               px.noLid = currentLid;
               patientCacheMap.set(currentLid, px);
               patientCacheMap.set(phoneFull, px);
 
               if (currentLid === senderInfo.id) {
-                console.log(`[Match Sukses On-The-Fly!] Pasien: ${px.namaPasien} (RM: ${px.noRm}) Cocok dengan LID ${senderInfo.id}`);
+                console.log(`[Binding Berhasil!] Pasien: ${px.namaPasien} (RM: ${px.noRm}) Cocok dengan LID ${senderInfo.id}`);
                 callSimgosApi("update_status", {
                   row: px.rowNumber,
                   type: "pasien",
@@ -805,7 +884,7 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
     systemPromptText += `\n\n[DATA RESMI PASIEN SESUAI DATABASE]:
 - Nama Lengkap Pasien: ${patientContext.namaPasien}
 - Nomor Rekam Medis (RM): ${patientContext.noRm}
-- Tanggal Kontrol: ${patientContext.tglKontrol}
+- Jadwal Kontrol: ${patientContext.tglKontrol}
 - Status Reschedule: ${patientContext.statusReschedule || "-"}
 - Status Rujukan: ${patientContext.statusRujukan || "Rujukan Aktif"}
 - Instansi: RSKD Gigi dan Mulut Prov. Sulsel
@@ -815,7 +894,7 @@ PETUNJUK JAWABAN MUTLAK:
 1. Pasien ini TELAH TERVERIFIKASI RESMI di database SIMGOS.
 2. JIKA PASIEN MENANYAKAN "BERAPA NOMOR RM SAYA" ATAU JADWAL KONTROLNYA, KAMU WAJIB LANGSUNG MENJAWAB:
    "Nomor Rekam Medis (RM) Bapak/Ibu ${patientContext.namaPasien} adalah ${patientContext.noRm} dengan jadwal kontrol pada tanggal ${patientContext.tglKontrol}."
-3. JANGAN PERNAH menolak memberikan nomor RM atau mengatakan nomor belum terdaftar, karena pasien ini SUDAH TERVERIFIKASI LENGKAP 100%.
+3. JANGAN PERNAH menolak memberikan nomor RM atau mengatakan nomor belum terdaftar, karena identitas pasien ini SUDAH TERVERIFIKASI LENGKAP 100%.
 4. Awali jawaban menggunakan sapaan "${witaTime.greeting}, Bapak/Ibu ${patientContext.namaPasien}".`;
   } else {
     systemPromptText += `\n\n[DATA PENGIRIM CHAT]:
@@ -894,9 +973,8 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
       resolvedLid = senderInfo.id;
     } else {
       try {
-        const waCheck = await sock.onWhatsApp(cleanPhone);
-        if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
-          resolvedLid = String(waCheck[0].lid).replace(/\D/g, '');
+        resolvedLid = await resolveLidFromWhatsAppServer(sock, cleanPhone);
+        if (resolvedLid) {
           registerIdentityMapping(resolvedLid, cleanPhone);
           px.noLid = resolvedLid;
           patientCacheMap.set(resolvedLid, px);
@@ -1014,9 +1092,9 @@ export default function setupMessageHandler(sock) {
 
   prewarmDoctorAndOwnerLids(sock);
 
-  // Jalankan auto-konversi No WA ke Kolom 18 No LID saat bot aktif
+  // Jalankan konversi satu-satu secara proaktif saat startup
   setTimeout(() => {
-    syncAllPatientLids(sock, false);
+    convertAllPatientsToLid(sock, false);
   }, 3000);
 
   if (!isIntervalStarted) {
@@ -1069,7 +1147,7 @@ export default function setupMessageHandler(sock) {
     // 2. Scheduler Rutin Sinkronisasi Pasien Setiap 30 Menit
     setInterval(() => {
       if (currentSock) {
-        syncAllPatientLids(currentSock, false);
+        convertAllPatientsToLid(currentSock, false);
       }
     }, 30 * 60 * 1000);
 
@@ -1117,7 +1195,7 @@ export default function setupMessageHandler(sock) {
           case 'help':
             const menuText = `*🤖 BOT KONTROL RSKDGM (H-2 & H-1 SIMGOS) 🤖*\n\n` +
                              `*🦷 SIMGOS FOLLOW-UP KONTROL:*\n` +
-                             `* !syncalllid* / *!synclids* - 🔄 Konversi satu-satu No WA ke Kolom 18 (No LID)\n` +
+                             `* !convertalltolid* - 🔄 Konversi satu-satu No WA ke Kolom 18 (No LID)\n` +
                              `* !followupnow* [h1/h2/all] [tgl/auto] [me] - 🚀 Kirim instan ('all' = H-2 & H-1, 'me' = kirim ke Anda)\n` +
                              `* !followup* [h1/h2] [tgl/auto] - Cek antrean kontrol H-2 atau H-1\n` +
                              `* !gassfollowup* [h1/h2] [me] - Kirim WA massal ke Pasien & DPJP Utama\n` +
@@ -1145,13 +1223,14 @@ export default function setupMessageHandler(sock) {
             await sock.sendMessage(senderInfo.targetJid, { text: menuText }, { quoted: msg });
             return;
 
+          case 'convertalltolid':
+          case 'converstalltolid':
           case 'syncalllid':
           case 'syncalldb':
           case 'synclids':
           case 'syncpasien':
-          case 'syncwa':
             await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Memulai konversi satu-satu No WA database ke Kolom 18 (No LID)... Mohon tunggu beberapa detik._" }, { quoted: msg });
-            const syncResult = await syncAllPatientLids(sock, true);
+            const syncResult = await convertAllPatientsToLid(sock, true);
             await sock.sendMessage(senderInfo.targetJid, { 
               text: `✅ *SINKRONISASI KOLOM 18 (NO LID) SELESAI!*\n\n` +
                     `📁 Total Nomor WA Diperiksa: *${syncResult.total} Pasien*\n` +
@@ -1600,7 +1679,7 @@ export default function setupMessageHandler(sock) {
               try { fs.unlinkSync(lidCacheFile); } catch (e) {}
             }
             await prewarmDoctorAndOwnerLids(sock);
-            await syncAllPatientLids(sock, true);
+            await convertAllPatientsToLid(sock, true);
             await sock.sendMessage(senderInfo.targetJid, { text: "🔄 Cache Custom Prompt, Template, Kredensial AI & Pemetaan LID berhasil disegarkan dan disinkronkan ulang." }, { quoted: msg });
             return;
 
