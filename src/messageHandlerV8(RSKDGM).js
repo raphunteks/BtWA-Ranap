@@ -42,6 +42,16 @@ const lidToPhoneMap = new Map();     // Kunci: LID Digits -> Nilai: Phone Digits
 const phoneToLidMap = new Map();     // Kunci: Phone Digits (628xxx) -> Nilai: LID Digits
 const patientCacheMap = new Map();   // Kunci: Phone Digits / LID Digits -> Nilai: Objek Data Pasien Lengkap
 
+// Normalisasi nomor telepon standar internasional (Wajib awalan 62)
+function formatToInternational(raw) {
+  if (!raw && raw !== 0) return '';
+  let p = String(raw).trim().replace(/\D/g, '');
+  if (p.startsWith('0')) p = '62' + p.substring(1);
+  else if (p.startsWith('8')) p = '62' + p;
+  else if (!p.startsWith('62') && p.length >= 8) p = '62' + p;
+  return p;
+}
+
 // Muat cache LID persisten dari disk jika ada
 if (fs.existsSync(lidCacheFile)) {
   try {
@@ -68,9 +78,7 @@ function persistLidMappings() {
 function registerIdentityMapping(lidDigits, phoneDigits) {
   if (!lidDigits || !phoneDigits) return;
   const cleanLid = String(lidDigits).replace(/\D/g, '');
-  let cleanPhone = String(phoneDigits).replace(/\D/g, '');
-  if (cleanPhone.startsWith('0')) cleanPhone = '62' + cleanPhone.substring(1);
-  else if (cleanPhone.startsWith('8')) cleanPhone = '62' + cleanPhone;
+  const cleanPhone = formatToInternational(phoneDigits);
 
   if (cleanLid && cleanPhone && cleanLid !== cleanPhone) {
     lidToPhoneMap.set(cleanLid, cleanPhone);
@@ -99,10 +107,7 @@ function parseSenderInfo(rawJid) {
       resolvedPhone = lidToPhoneMap.get(cleanId);
     }
   } else if (!isGroup && !isBroadcast) {
-    let phone = cleanId;
-    if (phone.startsWith('0')) phone = '62' + phone.substring(1);
-    else if (phone.startsWith('8')) phone = '62' + phone;
-    else if (!phone.startsWith('62') && phone.length >= 8) phone = '62' + phone;
+    let phone = formatToInternational(cleanId);
     targetJid = `${phone}@s.whatsapp.net`;
     resolvedPhone = phone;
     if (phoneToLidMap.has(phone)) {
@@ -127,10 +132,7 @@ function sanitizeNumber(rawNumber) {
     return str.replace(/\D/g, '') + '@lid';
   }
   let cleaned = str.replace(/@s\.whatsapp\.net$/i, '').replace(/\D/g, '');
-  if (cleaned.startsWith('0')) cleaned = '62' + cleaned.substring(1);
-  else if (cleaned.startsWith('8')) cleaned = '62' + cleaned;
-  else if (!cleaned.startsWith('62') && cleaned.length >= 8) cleaned = '62' + cleaned;
-  return cleaned + '@s.whatsapp.net';
+  return formatToInternational(cleaned) + '@s.whatsapp.net';
 }
 
 function formatForWhatsApp(text) {
@@ -178,7 +180,7 @@ function getWitaTimeGreeting() {
 }
 
 /**
- * PEMBERSIH SALAM OTOMATIS: Mencegah AI salah sapa Selamat Siang di malam hari
+ * PEMBERSIH SALAM OTOMATIS: Mencegah AI salah sapa Selamat Siang di waktu malam
  */
 function enforceCorrectGreeting(text, correctGreeting) {
   if (!text) return text;
@@ -200,6 +202,7 @@ function compileTemplateText(templateStr, patient, sysCfg) {
     .replace(/{JENIS_KELAMIN}/g, patient?.jenisKelamin || "-")
     .replace(/{NO_WA}/g, patient?.noHp || "-")
     .replace(/{NO_SENDER}/g, patient?.noSender || "-")
+    .replace(/{NO_LID}/g, patient?.noLid || "-")
     .replace(/{STATUS_RESCHEDULE}/g, patient?.statusReschedule || "-")
     .replace(/{STATUS_RUJUKAN}/g, patient?.statusRujukan || "Rujukan Habis")
     .replace(/{DPJP_UTAMA}/g, sysCfg.dpjpUtama || "drg. Hj. Kurniawaty, Sp.KG")
@@ -440,16 +443,16 @@ async function fetchSystemAIConfig() {
   return cachedSystemConfig;
 }
 
-// PRE-WARMING DOKTER & ADMIN
+// PRE-WARMING DOKTER & OWNER
 async function prewarmDoctorAndOwnerLids(sock) {
   try {
     const sysCfg = await fetchSystemAIConfig();
     const phoneCandidates = [
-      ownerNumber.replace(/\D/g, ''),
-      ...(sysCfg.doctors || []).map(d => String(d.wa).replace(/\D/g, '')),
+      ownerNumber,
+      ...(sysCfg.doctors || []).map(d => d.wa),
       "6282291675363",
       "6285256739684"
-    ].filter(Boolean);
+    ].map(p => formatToInternational(p)).filter(Boolean);
 
     for (const phone of phoneCandidates) {
       if (!phoneToLidMap.has(phone)) {
@@ -467,54 +470,56 @@ async function prewarmDoctorAndOwnerLids(sock) {
 }
 
 // =========================================================================
-// PROACTIVE AUTO-CONVERTER (NO WA DATABASE -> LID RESMI SPREADSHEET)
-// MENGONVERSI JID/NO HP DI KOLOM 15 MENJADI NOMOR LID ASLI SECARA MASSAL
+// PROACTIVE AUTO-CONVERTER (NO WA DATABASE -> NO LID KOLOM 18)
+// Memperbaiki pemanggilan onWhatsApp() dengan format internasional '628...'
 // =========================================================================
 async function syncAllPatientLids(sock, forceAll = false) {
-  console.log(`[Auto-Converter] Memulai sinkronisasi No WA database ke LID resmi WhatsApp...`);
+  console.log(`[Auto-Converter] Memulai sinkronisasi No WA database ke Kolom 18 (No LID)...`);
   try {
     const actionToCall = forceAll ? "get_all_patient_phones" : "get_unlinked_patients";
     const res = await callSimgosApi(actionToCall);
 
     if (res.status !== "success" || !Array.isArray(res.data) || res.data.length === 0) {
-      console.log(`[Auto-Converter] Semua pasien di spreadsheet telah memiliki LID resmi.`);
+      console.log(`[Auto-Converter] Semua pasien di spreadsheet telah memiliki No LID resmi.`);
       return { total: 0, matched: 0 };
     }
 
     const patientList = res.data;
-    console.log(`[Auto-Converter] Memproses ${patientList.length} pasien untuk registrasi LID...`);
+    console.log(`[Auto-Converter] Memproses ${patientList.length} pasien untuk konversi LID...`);
 
     const batchUpdates = [];
     let matchedCount = 0;
 
     for (const p of patientList) {
-      const phone = p.cleanPhone;
-      if (!phone || phone.length < 8) continue;
+      // Pastikan format nomor diawali 62 untuk API WhatsApp
+      const phoneFull = formatToInternational(p.cleanPhone || p.noHp);
+      if (!phoneFull || phoneFull.length < 9) continue;
 
       try {
-        const waCheck = await sock.onWhatsApp(phone);
+        const waCheck = await sock.onWhatsApp(phoneFull);
         if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
           const resolvedLid = String(waCheck[0].lid).replace(/\D/g, '');
-          registerIdentityMapping(resolvedLid, phone);
+          registerIdentityMapping(resolvedLid, phoneFull);
 
+          p.noLid = resolvedLid;
+          p.noSender = resolvedLid;
           patientCacheMap.set(resolvedLid, p);
-          patientCacheMap.set(phone, p);
+          patientCacheMap.set(phoneFull, p);
 
-          // Masukkan ke batch jika Kolom 15 belum LID asli (atau masih berisi nomor telepon biasa)
-          if (p.existingNoSender !== resolvedLid) {
-            batchUpdates.push({
-              noRm: p.noRm,
-              phone: phone,
-              lid: resolvedLid,
-              rowNumber: p.rowNumber
-            });
-          }
+          batchUpdates.push({
+            noRm: p.noRm,
+            phone: phoneFull,
+            lid: resolvedLid,
+            rowNumber: p.rowNumber
+          });
 
           matchedCount++;
-          console.log(`[LID Terkonversi] ${p.namaPasien} (RM: ${p.noRm}): No WA ${phone} -> LID: ${resolvedLid}`);
+          console.log(`[LID Terkonversi] ${p.namaPasien} (RM: ${p.noRm}): WA ${phoneFull} -> LID: ${resolvedLid}`);
         }
-        await new Promise(r => setTimeout(r, 150));
-      } catch (errCheck) {}
+        await new Promise(r => setTimeout(r, 200));
+      } catch (errCheck) {
+        console.warn(`[onWhatsApp Error: ${phoneFull}]`, errCheck.message);
+      }
     }
 
     if (batchUpdates.length > 0) {
@@ -522,7 +527,7 @@ async function syncAllPatientLids(sock, forceAll = false) {
         action: "batch_update_lids",
         updates: batchUpdates
       });
-      console.log(`[Auto-Converter] Berhasil memperbarui ${batchUpdates.length} LID asli di Kolom 15 Spreadsheet!`);
+      console.log(`[Auto-Converter] Sukses! ${batchUpdates.length} LID tersimpan di Kolom 18 (No LID) Spreadsheet.`);
     }
 
     return { total: patientList.length, matched: matchedCount };
@@ -536,7 +541,7 @@ async function syncAllPatientLids(sock, forceAll = false) {
 async function smartVerifyPatient(sock, senderInfo, pushName) {
   let matchedPatient = null;
 
-  // 1. Cek Cepat Memori Lokal Bot (Kecepatan 0ms)
+  // 1. Cek Cepat Memori Lokal Bot
   if (senderInfo.id) {
     if (patientCacheMap.has(senderInfo.id)) {
       matchedPatient = patientCacheMap.get(senderInfo.id);
@@ -550,14 +555,14 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     return matchedPatient;
   }
 
-  // 2. Query ke Database SIMGOS
+  // 2. Query ke Database SIMGOS (Mencari via Kolom 18 No LID, Kolom 15 No Sender, atau No WA)
   const lookupPhone = senderInfo.resolvedPhone || (senderInfo.isLid ? lidToPhoneMap.get(senderInfo.id) : senderInfo.id);
   const lookupLid = senderInfo.isLid ? senderInfo.id : (phoneToLidMap.get(senderInfo.id) || "");
 
   try {
     const searchRes = await callSimgosApi("search_patient", {
-      phone: lookupPhone || "",
-      lid: lookupLid || "",
+      phone: lookupPhone ? formatToInternational(lookupPhone) : "",
+      lid: lookupLid || senderInfo.id,
       query: lookupPhone || lookupLid || senderInfo.id
     });
 
@@ -566,31 +571,33 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
       if (matchedPatient.noHp) {
         registerIdentityMapping(senderInfo.id, matchedPatient.noHp);
         patientCacheMap.set(senderInfo.id, matchedPatient);
-        patientCacheMap.set(matchedPatient.noHp.replace(/\D/g, ''), matchedPatient);
+        patientCacheMap.set(formatToInternational(matchedPatient.noHp), matchedPatient);
       }
       return matchedPatient;
     }
   } catch (e) {}
 
-  // 3. JIKA SENDER ADALAH @lid DAN BELUM ADA DI MEMORI: Scan Langsung Pasien Spreadsheet On-the-Fly
+  // 3. JIKA SENDER ADALAH @lid DAN BELUM COCOK: Scan Proaktif Langsung Pasien Spreadsheet On-the-Fly
   if (senderInfo.isLid && !matchedPatient) {
     try {
+      console.log(`[Smart Resolver On-the-Fly] Menelusuri seluruh pasien untuk LID: ${senderInfo.id}...`);
       const allPxRes = await callSimgosApi("get_all_patient_phones");
       if (allPxRes.status === "success" && Array.isArray(allPxRes.data)) {
         for (const px of allPxRes.data) {
-          const cleanPxPhone = px.cleanPhone;
-          if (!cleanPxPhone) continue;
+          const phoneFull = formatToInternational(px.cleanPhone || px.noHp);
+          if (!phoneFull) continue;
 
           try {
-            const check = await sock.onWhatsApp(cleanPxPhone);
+            const check = await sock.onWhatsApp(phoneFull);
             if (check && check.length > 0 && check[0].lid) {
               const currentLid = String(check[0].lid).replace(/\D/g, '');
-              registerIdentityMapping(currentLid, cleanPxPhone);
+              registerIdentityMapping(currentLid, phoneFull);
+              px.noLid = currentLid;
               patientCacheMap.set(currentLid, px);
-              patientCacheMap.set(cleanPxPhone, px);
+              patientCacheMap.set(phoneFull, px);
 
               if (currentLid === senderInfo.id) {
-                console.log(`[Smart Match Berhasil] ${px.namaPasien} (${px.noRm}) cocok dengan LID ${senderInfo.id}`);
+                console.log(`[Match Sukses On-The-Fly!] Pasien: ${px.namaPasien} (RM: ${px.noRm}) Cocok dengan LID ${senderInfo.id}`);
                 callSimgosApi("update_status", {
                   row: px.rowNumber,
                   type: "pasien",
@@ -806,9 +813,9 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
 
 PETUNJUK JAWABAN MUTLAK:
 1. Pasien ini TELAH TERVERIFIKASI RESMI di database SIMGOS.
-2. Jika pasien menanyakan "berapa nomor RM saya" atau jadwal kontrolnya, LANGSUNG SEBUTKAN:
+2. JIKA PASIEN MENANYAKAN "BERAPA NOMOR RM SAYA" ATAU JADWAL KONTROLNYA, KAMU WAJIB LANGSUNG MENJAWAB:
    "Nomor Rekam Medis (RM) Bapak/Ibu ${patientContext.namaPasien} adalah ${patientContext.noRm} dengan jadwal kontrol pada tanggal ${patientContext.tglKontrol}."
-3. JANGAN PERNAH menolak memberikan nomor RM atau mengatakan nomor belum terdaftar, karena pasien ini SUDAH TERVERIFIKASI LENGKAP.
+3. JANGAN PERNAH menolak memberikan nomor RM atau mengatakan nomor belum terdaftar, karena pasien ini SUDAH TERVERIFIKASI LENGKAP 100%.
 4. Awali jawaban menggunakan sapaan "${witaTime.greeting}, Bapak/Ibu ${patientContext.namaPasien}".`;
   } else {
     systemPromptText += `\n\n[DATA PENGIRIM CHAT]:
@@ -828,7 +835,6 @@ PETUNJUK RESPONS:
     finalReply = await askGroqClinic(conversationHistory, systemPromptText, aiConfig);
   }
 
-  // Filter sanitasi akhir: Ganti kata salam yang salah secara otomatis
   finalReply = enforceCorrectGreeting(finalReply, witaTime.greeting);
   return finalReply.replace(/RSKDGM Care|RSKD Care/gi, "RSKD Gigi dan Mulut Prov. Sulsel");
 }
@@ -881,7 +887,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
       continue;
     }
 
-    const cleanPhone = String(px.noHp || '').replace(/\D/g, '');
+    const cleanPhone = formatToInternational(px.noHp);
     let resolvedLid = "";
 
     if (overrideToSender && senderInfo.id) {
@@ -892,6 +898,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
         if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
           resolvedLid = String(waCheck[0].lid).replace(/\D/g, '');
           registerIdentityMapping(resolvedLid, cleanPhone);
+          px.noLid = resolvedLid;
           patientCacheMap.set(resolvedLid, px);
           patientCacheMap.set(cleanPhone, px);
         }
@@ -1007,10 +1014,10 @@ export default function setupMessageHandler(sock) {
 
   prewarmDoctorAndOwnerLids(sock);
 
-  // Jalankan auto-konversi No WA ke LID secara proaktif saat inisialisasi
+  // Jalankan auto-konversi No WA ke Kolom 18 No LID saat bot aktif
   setTimeout(() => {
     syncAllPatientLids(sock, false);
-  }, 3500);
+  }, 3000);
 
   if (!isIntervalStarted) {
     // 1. Scheduler Auto Blast Jam 08:30 WITA
@@ -1110,12 +1117,12 @@ export default function setupMessageHandler(sock) {
           case 'help':
             const menuText = `*🤖 BOT KONTROL RSKDGM (H-2 & H-1 SIMGOS) 🤖*\n\n` +
                              `*🦷 SIMGOS FOLLOW-UP KONTROL:*\n` +
+                             `* !syncalllid* / *!synclids* - 🔄 Konversi satu-satu No WA ke Kolom 18 (No LID)\n` +
                              `* !followupnow* [h1/h2/all] [tgl/auto] [me] - 🚀 Kirim instan ('all' = H-2 & H-1, 'me' = kirim ke Anda)\n` +
-                             `* !followup* [h1/h2] [tgl/auto] - Cek daftar antrean kontrol H-2 atau H-1\n` +
+                             `* !followup* [h1/h2] [tgl/auto] - Cek antrean kontrol H-2 atau H-1\n` +
                              `* !gassfollowup* [h1/h2] [me] - Kirim WA massal ke Pasien & DPJP Utama\n` +
-                             `* !synclids* - 🔄 Konversi proaktif No WA Database -> LID resmi\n` +
-                             `* !cekrujukanaktif* - 📋 Lihat seluruh pasien dengan Rujukan Aktif\n` +
-                             `* !cekrujukanhabis* - ⚠️ Lihat seluruh pasien dengan Rujukan Habis\n` +
+                             `* !cekrujukanaktif* - 📋 Lihat pasien dengan Rujukan Aktif\n` +
+                             `* !cekrujukanhabis* - ⚠️ Lihat pasien dengan Rujukan Habis\n` +
                              `* !bindpasien* <No.RM> - 🔗 Tautkan WhatsApp Anda ke No RM Pasien\n` +
                              `* !caripasien* <No.RM/Nama/WA/LID> - Cari data pasien di Spreadsheet\n` +
                              `* !reschedule* <No.RM> <YYYY-MM-DD> - Ubah tanggal kontrol manual\n` +
@@ -1138,17 +1145,19 @@ export default function setupMessageHandler(sock) {
             await sock.sendMessage(senderInfo.targetJid, { text: menuText }, { quoted: msg });
             return;
 
+          case 'syncalllid':
+          case 'syncalldb':
           case 'synclids':
           case 'syncpasien':
           case 'syncwa':
-            await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Memulai konversi proaktif seluruh No WA pasien di spreadsheet menjadi LID resmi WhatsApp..._" }, { quoted: msg });
+            await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Memulai konversi satu-satu No WA database ke Kolom 18 (No LID)... Mohon tunggu beberapa detik._" }, { quoted: msg });
             const syncResult = await syncAllPatientLids(sock, true);
             await sock.sendMessage(senderInfo.targetJid, { 
-              text: `✅ *SINKRONISASI LID SELESAI!*\n\n` +
-                    `📁 Total Nomor Diperiksa: *${syncResult.total} Pasien*\n` +
+              text: `✅ *SINKRONISASI KOLOM 18 (NO LID) SELESAI!*\n\n` +
+                    `📁 Total Nomor WA Diperiksa: *${syncResult.total} Pasien*\n` +
                     `🎯 Berhasil Dikonversi ke LID: *${syncResult.matched} Pasien*\n` +
-                    `💾 Status: Tersimpan permanen ke Kolom 15 (No Sender) di Spreadsheet.\n\n` +
-                    `_Sekarang semua pasien yang chat via LID akan langsung dikenali nama dan No RM resminya secara otomatis!_ 🚀`
+                    `💾 Status: Tersimpan permanen ke Kolom 18 (No LID) & Kolom 15 di Spreadsheet.\n\n` +
+                    `_Sekarang pasien yang chat melalui LID langsung dikenali nama & No RM aslinya secara akurat!_ 🚀`
             }, { quoted: msg });
             return;
 
@@ -1292,7 +1301,7 @@ export default function setupMessageHandler(sock) {
                                     `👨‍⚕️ *Laporan Terkirim ke DPJP Utama:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
 
                 if (blastResult.isSenderConverted) {
-                  rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Tersimpan di Kolom 15 No Sender)\n`;
+                  rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Tersimpan di Kolom 15 & 18)\n`;
                 }
 
                 rekapSekarang += `\n_Status di Google Spreadsheet telah diperbarui ke Terkirim._ 📊`;
@@ -1436,6 +1445,7 @@ export default function setupMessageHandler(sock) {
                             `   📱 No. WA: ${p.noHp}\n` +
                             `   📋 Status Rujukan: *${iconRujuk}*\n` +
                             `   🔄 Status Reschedule: *${p.statusReschedule || '-'}*\n` +
+                            `   🆔 No. LID: *${p.noLid || '-'}*\n` +
                             `   🎂 Umur / JK: ${p.umur} / ${p.jenisKelamin}\n` +
                             `   Status H-2: [${p.statusWaH2}] | Status H-1: [${p.statusWaH1}]\n\n`;
               });
@@ -1647,7 +1657,8 @@ export default function setupMessageHandler(sock) {
         noHp: senderInfo.resolvedPhone || senderInfo.id,
         noSender: senderInfo.id,
         statusReschedule: "-",
-        statusRujukan: "Rujukan Aktif"
+        statusRujukan: "Rujukan Aktif",
+        noLid: senderInfo.id
       };
 
       const intent = detectPatientIntent(text);
@@ -1721,7 +1732,8 @@ export default function setupMessageHandler(sock) {
             ...pObj,
             tglKontrol: newDate,
             statusReschedule: `Reschedule (${newDate})`,
-            noSender: senderInfo.id
+            noSender: senderInfo.id,
+            noLid: senderInfo.id
           };
 
           const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
@@ -1841,7 +1853,8 @@ export default function setupMessageHandler(sock) {
           ...pObj, 
           tglKontrol: newRescheduleDate, 
           statusReschedule: `Reschedule (${newRescheduleDate})`,
-          noSender: senderInfo.id 
+          noSender: senderInfo.id,
+          noLid: senderInfo.id
         };
 
         const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
