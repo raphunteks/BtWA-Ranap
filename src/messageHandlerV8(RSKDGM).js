@@ -12,7 +12,7 @@ import handleStickerCommand from './commands/sticker.js';
 const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 
 // URL REST API Google Apps Script (GAS) SIMGOS RSKDGM
-const GAS_URL_SIMGOS = process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbxyhqtMxKBxrXScl39RkAoxXM2IQRYpv0Nnsgdib3eeU_sqZdPznQaaUp42aaUVPM8/exec";
+const GAS_URL_SIMGOS = process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbzCOj9YFKEqXRfMEKBugnEhqzuC7MoJfIyc5PihST3bxmJaseaKKX9YifotK2qpT38/exec";
 
 // Kontak WhatsApp Dokter Cadangan jika Setting Belum Terisi
 const DOKTER_JID_LIST = [
