@@ -31,7 +31,7 @@ const GROQ_ALLOWED_MODELS = [
 ];
 
 // =========================================================================
-// SMART BIDIRECTIONAL RESOLVER & TEMPORARY CACHE (DENGAN TTL REAL-TIME)
+// SMART BIDIRECTIONAL RESOLVER & TEMPORARY CACHE (TTL REAL-TIME 30 DETIK)
 // =========================================================================
 const sessionPath = './session';
 const lidCacheFile = `${sessionPath}/lid_mappings.json`;
@@ -42,10 +42,8 @@ const lidToPhoneMap = new Map();     // Kunci: LID Digits -> Nilai: Phone Digits
 const phoneToLidMap = new Map();     // Kunci: Phone Digits (628xxx) -> Nilai: LID Digits
 const patientCacheMap = new Map();   // Kunci: Phone Digits / LID Digits / No. RM -> { data, cachedAt }
 
-// Cache pasien hanya bertahan 30 detik agar update Spreadsheet langsung terdeteksi
 const PATIENT_CACHE_TTL_MS = 30 * 1000;
 
-// Normalisasi nomor telepon standar internasional (Wajib awalan 62)
 function formatToInternational(raw) {
   if (!raw && raw !== 0) return '';
   let p = String(raw).trim().replace(/\D/g, '');
@@ -55,7 +53,6 @@ function formatToInternational(raw) {
   return p;
 }
 
-// Muat cache LID persisten dari disk jika ada
 if (fs.existsSync(lidCacheFile)) {
   try {
     const savedMappings = JSON.parse(fs.readFileSync(lidCacheFile, 'utf-8'));
@@ -92,19 +89,17 @@ function registerIdentityMapping(lidDigits, phoneDigits) {
 
 function cachePatientObject(key, patientObj) {
   if (!key || !patientObj) return;
-  patientCacheMap.set(String(key).trim(), {
+  patientCacheMap.set(key, {
     data: patientObj,
     cachedAt: Date.now()
   });
 }
 
 function getCachedPatientObject(key) {
-  if (!key) return null;
-  const k = String(key).trim();
-  if (!patientCacheMap.has(k)) return null;
-  const item = patientCacheMap.get(k);
+  if (!key || !patientCacheMap.has(key)) return null;
+  const item = patientCacheMap.get(key);
   if (Date.now() - item.cachedAt > PATIENT_CACHE_TTL_MS) {
-    patientCacheMap.delete(k);
+    patientCacheMap.delete(key);
     return null;
   }
   return item.data;
@@ -170,9 +165,6 @@ function formatForWhatsApp(text) {
   return formatted.trim();
 }
 
-/**
- * GENERATOR WAKTU LOKAL REAL-TIME MAKASSAR (WITA / UTC+8)
- */
 function getWitaTimeGreeting() {
   const now = new Date();
   const hourStr = new Intl.DateTimeFormat('en-US', {
@@ -207,9 +199,6 @@ function enforceCorrectGreeting(text, correctGreeting) {
   return text.replace(/\b(selamat\s+(pagi|siang|sore|malam))\b/gi, correctGreeting);
 }
 
-/**
- * Kompilasi Variabel Template dari Sheet CUSTOM_FORMAT
- */
 function compileTemplateText(templateStr, patient, sysCfg) {
   if (!templateStr) return "";
   return templateStr
@@ -247,12 +236,14 @@ let cachedSystemConfig = {
   geminiModel: 'gemini-3.5-flash',
   groqApiKey: '',
   groqModel: 'openai/gpt-oss-120b',
+  nineRouterUrl: process.env.NINEROUTER_URL || 'http://127.0.0.1:20128/v1/chat/completions',
+  nineRouterApiKey: process.env.NINEROUTER_API_KEY || '9router',
+  nineRouterModel: process.env.NINEROUTER_MODEL || 'auto',
   doctors: [],
   timestamp: 0
 };
 const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000;
 
-// SMART ISOLATED MEMORY: Obrolan 1-on-1 per Pengirim
 const conversationSessions = new Map();
 const SESSION_TTL_MS = 45 * 60 * 1000;
 
@@ -346,7 +337,6 @@ function extractDateFromText(text) {
 function detectPatientIntent(rawText) {
   const text = rawText.trim().toLowerCase();
 
-  // 1. Deteksi Khusus: Pasien Menyatakan Terbatalkan di Aplikasi Mobile JKN
   const jknCancelPattern1 = /\b(terbatalkan|batal|dibatalkan)\b.*\b(mobile\s*jkn|jkn|aplikasi|bpjs|sistem)\b/i;
   const jknCancelPattern2 = /\b(mobile\s*jkn|jkn)\b.*\b(terbatalkan|batal|dibatalkan)\b/i;
   const jknExactPhrase = /saya\s*terbatalkan\s*(di\s*aplikasi)?\s*mobile\s*jkn/i;
@@ -355,13 +345,11 @@ function detectPatientIntent(rawText) {
     return { type: 'TERBATALKAN_JKN' };
   }
 
-  // 2. Deteksi Salah Orang / Salah Sambung
   const wrongPersonPattern = /\b(salah\s*orang|bukan\s*saya|salah\s*nomor|salah\s*ki|salah\s*kirim|salah\s*target|tidak\s*pernah\s*(ke|periksa|daftar))\b/i;
   if (wrongPersonPattern.test(text)) {
     return { type: 'SALAH_ORANG' };
   }
 
-  // 3. Deteksi Reschedule / Jadwal Ulang
   const isNegative = /\b(tidak|nggak|engga|gak|gk|belum|batal)\s*(bisa|hadir|datang|ikut|boleh)?\b/i.test(text);
 
   const hadirPattern = /\b(hadir|bisa\s*(dok|kak|min|hadir|datang|ikut|ia|ya)?|boleh\s*(dok|kak|min)?|siap\s*(dok|kak|min|hadir|datang)?|oke\s*(dok|kak|min)?|ok\s*(dok|kak|min)?|baik\s*(dok|kak|min)?|insya\s*allah\s*(bisa|hadir|datang)?|datang|dateng|ikut)\b/i;
@@ -445,17 +433,14 @@ async function callSimgosPost(payload = {}) {
   }
 }
 
-/**
- * Pengambilan Konfigurasi AI & Template dari Database dengan Mode Force Refresh
- */
-async function fetchSystemAIConfig(forceRefresh = false) {
+async function fetchSystemAIConfig() {
   const now = Date.now();
-  if (!forceRefresh && cachedSystemConfig.prompt && cachedSystemConfig.geminiApiKey && (now - cachedSystemConfig.timestamp < CONFIG_CACHE_TTL_MS)) {
+  if (cachedSystemConfig.prompt && cachedSystemConfig.geminiApiKey && (now - cachedSystemConfig.timestamp < CONFIG_CACHE_TTL_MS)) {
     return cachedSystemConfig;
   }
 
   try {
-    const res = await callSimgosApi("get_active_prompt", { _t: Date.now() });
+    const res = await callSimgosApi("get_active_prompt");
     if (res && res.status === "success") {
       cachedSystemConfig = {
         prompt: res.activePrompt || cachedSystemConfig.prompt,
@@ -469,22 +454,20 @@ async function fetchSystemAIConfig(forceRefresh = false) {
         geminiModel: res.aiConfig?.geminiModel || "gemini-3.5-flash",
         groqApiKey: res.aiConfig?.groqApiKey || cachedSystemConfig.groqApiKey,
         groqModel: res.aiConfig?.groqModel || "openai/gpt-oss-120b",
+        nineRouterUrl: res.aiConfig?.nineRouterUrl || cachedSystemConfig.nineRouterUrl,
+        nineRouterApiKey: res.aiConfig?.nineRouterApiKey || cachedSystemConfig.nineRouterApiKey,
+        nineRouterModel: res.aiConfig?.nineRouterModel || cachedSystemConfig.nineRouterModel,
         doctors: res.config?.doctors || [],
         timestamp: now
       };
-      console.log(`[Config Sync] Berhasil memuat System Prompt (${cachedSystemConfig.prompt.length} karakter) & ${Object.keys(cachedSystemConfig.templates).length} Template.`);
       return cachedSystemConfig;
-    } else {
-      throw new Error(res?.message || "Format respon API get_active_prompt tidak valid.");
     }
-  } catch (e) {
-    console.error(`[Config Sync Error]`, e.message);
-  }
+  } catch (e) {}
 
   return cachedSystemConfig;
 }
 
-// USYNC LID RESOLVER: MEMINTA NOMOR LID ASLI SECARA RESMI KE SERVER WHATSAPP
+// USYNC LID RESOLVER
 async function resolveLidFromWhatsAppServer(sock, rawPhone) {
   const cleanPhone = formatToInternational(rawPhone);
   if (!cleanPhone || cleanPhone.length < 8) return null;
@@ -562,7 +545,7 @@ async function resolveLidFromWhatsAppServer(sock, rawPhone) {
   return null;
 }
 
-// REVERSE RESOLVER: DARI NOMOR LID MENCARI NOMOR TELEPON RESMI WHATSAPP
+// REVERSE RESOLVER
 async function resolvePhoneFromLid(sock, rawLid) {
   const cleanLid = String(rawLid).replace(/\D/g, '');
   if (!cleanLid) return null;
@@ -660,18 +643,18 @@ async function prewarmDoctorAndOwnerLids(sock) {
 
 // CONVERT ALL PATIENTS TO LID & SAVE TO COLUMN 18 (NO LID)
 async function convertAllPatientsToLid(sock, forceAll = false) {
-  console.log(`[Auto-Converter] Memulai sinkronisasi identitas No WA ke Kolom 18 (No LID)...`);
+  console.log(`[Auto-Converter] Memulai konversi satu-satu No WA ke Kolom 18 (No LID)...`);
   try {
     const actionToCall = forceAll ? "get_all_patient_phones" : "get_unlinked_patients";
-    const res = await callSimgosApi(actionToCall, { _t: Date.now() });
+    const res = await callSimgosApi(actionToCall);
 
     if (res.status !== "success" || !Array.isArray(res.data) || res.data.length === 0) {
-      console.log(`[Auto-Converter] Semua pasien di spreadsheet telah terpetakan dengan baik.`);
+      console.log(`[Auto-Converter] Semua pasien di spreadsheet telah memiliki No LID resmi.`);
       return { total: 0, matched: 0 };
     }
 
     const patientList = res.data;
-    console.log(`[Auto-Converter] Memproses ${patientList.length} pasien untuk pemetaan memori & LID...`);
+    console.log(`[Auto-Converter] Memproses ${patientList.length} pasien untuk konversi LID resmi...`);
 
     const batchUpdates = [];
     let matchedCount = 0;
@@ -680,14 +663,6 @@ async function convertAllPatientsToLid(sock, forceAll = false) {
       const phoneFull = formatToInternational(p.cleanPhone || p.noHp);
       if (!phoneFull || phoneFull.length < 8) continue;
 
-      // Selalu cache pasien ke RAM
-      cachePatientObject(p.noRm, p);
-      cachePatientObject(phoneFull, p);
-      if (p.existingLid) {
-        registerIdentityMapping(p.existingLid, phoneFull);
-        cachePatientObject(p.existingLid, p);
-      }
-
       try {
         const resolvedLid = await resolveLidFromWhatsAppServer(sock, phoneFull);
         if (resolvedLid) {
@@ -695,6 +670,8 @@ async function convertAllPatientsToLid(sock, forceAll = false) {
           p.noLid = resolvedLid;
           p.noSender = resolvedLid;
           cachePatientObject(resolvedLid, p);
+          cachePatientObject(phoneFull, p);
+          cachePatientObject(p.noRm, p);
 
           batchUpdates.push({
             noRm: p.noRm,
@@ -706,7 +683,7 @@ async function convertAllPatientsToLid(sock, forceAll = false) {
           matchedCount++;
           console.log(`[LID Match SUKSES] ${p.namaPasien} (RM: ${p.noRm}): No WA ${phoneFull} -> LID: ${resolvedLid}`);
         }
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 250));
       } catch (errCheck) {
         console.warn(`[Resolve Error: ${phoneFull}]`, errCheck.message);
       }
@@ -753,8 +730,7 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
     const searchRes = await callSimgosApi("search_patient", {
       phone: lookupPhone ? formatToInternational(lookupPhone) : "",
       lid: lookupLid || senderInfo.id,
-      query: lookupPhone || lookupLid || senderInfo.id,
-      _t: Date.now()
+      query: lookupPhone || lookupLid || senderInfo.id
     });
 
     if (searchRes.status === "success" && Array.isArray(searchRes.data) && searchRes.data.length > 0) {
@@ -783,8 +759,7 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
         const searchRev = await callSimgosApi("search_patient", {
           phone: resolvedPhone,
           lid: senderInfo.id,
-          query: resolvedPhone,
-          _t: Date.now()
+          query: resolvedPhone
         });
         if (searchRev.status === "success" && Array.isArray(searchRev.data) && searchRev.data.length > 0) {
           matchedPatient = searchRev.data[0];
@@ -803,7 +778,7 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
 
   if (!matchedPatient && pushName && pushName.length >= 3 && pushName !== "Pasien") {
     try {
-      const nameCheck = await callSimgosApi("search_patient", { query: pushName, lid: senderInfo.id, _t: Date.now() });
+      const nameCheck = await callSimgosApi("search_patient", { query: pushName, lid: senderInfo.id });
       if (nameCheck.status === "success" && Array.isArray(nameCheck.data) && nameCheck.data.length === 1) {
         matchedPatient = nameCheck.data[0];
         if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
@@ -813,7 +788,6 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
         if (matchedPatient.noHp) {
           registerIdentityMapping(senderInfo.id, matchedPatient.noHp);
           cachePatientObject(senderInfo.id, matchedPatient);
-          cachePatientObject(matchedPatient.noRm, matchedPatient);
         }
       }
     } catch (e) {}
@@ -827,8 +801,8 @@ async function fetchPatientsByRujukanStatus(statusType) {
   const collected = new Map();
   try {
     const [h2Res, h1Res] = await Promise.all([
-      callSimgosApi("get_followup", { mode: "h2", tgl: "auto", _t: Date.now() }).catch(() => null),
-      callSimgosApi("get_followup", { mode: "h1", tgl: "auto", _t: Date.now() }).catch(() => null)
+      callSimgosApi("get_followup", { mode: "h2", tgl: "auto" }).catch(() => null),
+      callSimgosApi("get_followup", { mode: "h1", tgl: "auto" }).catch(() => null)
     ]);
 
     const candidateLists = [];
@@ -852,7 +826,64 @@ async function fetchPatientsByRujukanStatus(statusType) {
 }
 
 // =========================================================================
-// ENGINE 1: GOOGLE AI STUDIO (GEMINI 3.5 FLASH)
+// ENGINE 1 (UTAMA): 9ROUTER AI GATEWAY (OPENAI-COMPATIBLE ENDPOINT)
+// Menghubungkan ke 60+ Provider AI (Claude 3.7, GPT-4o, DeepSeek, Gemini, dll)
+// =========================================================================
+async function ask9RouterClinic(conversationHistory, systemPromptText, aiConfig) {
+  const endpoint = aiConfig.nineRouterUrl || process.env.NINEROUTER_URL || "http://127.0.0.1:20128/v1/chat/completions";
+  const apiKey = aiConfig.nineRouterApiKey || process.env.NINEROUTER_API_KEY || "9router";
+  const model = aiConfig.nineRouterModel || process.env.NINEROUTER_MODEL || "auto";
+
+  const openAiMessages = [
+    { role: "system", content: systemPromptText }
+  ];
+
+  for (const turn of conversationHistory) {
+    const role = turn.role === 'model' ? 'assistant' : 'user';
+    const text = turn.parts?.[0]?.text || '';
+    if (text.trim()) {
+      openAiMessages.push({ role, content: text.trim() });
+    }
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: openAiMessages,
+        temperature: 0.2,
+        max_tokens: 2048
+      }),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const errBody = await res.text();
+      throw new Error(`9Router (${res.status}): ${errBody}`);
+    }
+
+    const data = await res.json();
+    const reply = data.choices?.[0]?.message?.content;
+    if (!reply || !reply.trim()) throw new Error("Respon dari 9Router kosong.");
+    return reply.trim();
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
+  }
+}
+
+// =========================================================================
+// ENGINE 2 (CADANGAN 1): GOOGLE AI STUDIO (GEMINI 3.5 FLASH DIRECT)
 // =========================================================================
 async function askGeminiClinic(conversationHistory, systemPromptText, aiConfig) {
   const apiKey = aiConfig.geminiApiKey ? aiConfig.geminiApiKey.trim() : "";
@@ -914,7 +945,7 @@ async function askGeminiClinic(conversationHistory, systemPromptText, aiConfig) 
 }
 
 // =========================================================================
-// ENGINE 2: GROQ AI FALLBACK ENGINE
+// ENGINE 3 (CADANGAN 2): GROQ AI FALLBACK ENGINE
 // =========================================================================
 async function askGroqClinic(conversationHistory, systemPromptText, aiConfig) {
   const groqKey = aiConfig.groqApiKey ? aiConfig.groqApiKey.trim() : "";
@@ -974,9 +1005,11 @@ async function askGroqClinic(conversationHistory, systemPromptText, aiConfig) {
   throw lastGroqError || new Error("Seluruh model Groq AI gagal.");
 }
 
+// =========================================================================
+// UNIFIED INTELLIGENT AI WITH 3-TIER MULTI-GATEWAY (9ROUTER -> GEMINI -> GROQ)
+// =========================================================================
 async function askAIClinicUnified(conversationHistory, patientContext = null, senderPushName = "Pasien", senderInfo = null) {
   const aiConfig = await fetchSystemAIConfig();
-  const sysConfig = aiConfig; // Penjamin scope variabel sysConfig
   let systemPromptText = aiConfig.prompt;
 
   systemPromptText = systemPromptText.replace(/RSKDGM Care|RSKD Care/gi, "RSKD Gigi dan Mulut Prov. Sulsel");
@@ -1012,7 +1045,7 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
 
 PEDOMAN TATA BAHASA & ATURAN MEDIS BIROKRATIS (MUTLAK):
 1. PENYEBUTAN NAMA LENGKAP:
-   Wajib menyapa dan menyebut identitas pasien dengan sebutan kehormatan "Bapak/Ibu/Sdr(i) ${patientContext.namaPasien}" sesuai data resmi database. Dilarang mengubah atau memotong nama pasien.
+   Wajib menyapa dan menyebut identitas pasien dengan sebutan kehormatan "Bapak/Ibu/Sdr(i) ${patientContext.namaPasien}" sesuai data resmi database rekam medis. Dilarang mengubah, memotong, atau menggunakan nama samaran lain.
 2. JAWABAN JADWAL KONTROL & NOMOR RM:
 ${hasResched ? `
    • STATUS: PASIEN TELAH MEMILIKI TANGGAL RESCHEDULE RESMI YAITU: *${finalReschedDate}*!
@@ -1037,11 +1070,20 @@ PETUNJUK: Berikan salam formal birokratis dan persilakan pengirim menginformasik
   }
 
   let finalReply = "";
+
+  // 1. Prioritas Utama: 9Router Gateway
   try {
-    finalReply = await askGeminiClinic(conversationHistory, systemPromptText, aiConfig);
-  } catch (geminiErr) {
-    console.warn(`[Gemini Failover -> Groq AI]`, geminiErr.message);
-    finalReply = await askGroqClinic(conversationHistory, systemPromptText, aiConfig);
+    finalReply = await ask9RouterClinic(conversationHistory, systemPromptText, aiConfig);
+  } catch (nineRouterErr) {
+    console.warn(`[9Router Failover -> Beralih ke Gemini Direct]`, nineRouterErr.message);
+    // 2. Cadangan 1: Google AI Studio Gemini Direct
+    try {
+      finalReply = await askGeminiClinic(conversationHistory, systemPromptText, aiConfig);
+    } catch (geminiErr) {
+      console.warn(`[Gemini Failover -> Beralih ke Groq AI]`, geminiErr.message);
+      // 3. Cadangan 2: Groq AI
+      finalReply = await askGroqClinic(conversationHistory, systemPromptText, aiConfig);
+    }
   }
 
   finalReply = enforceCorrectGreeting(finalReply, witaTime.greeting);
@@ -1066,7 +1108,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
   };
 
   const senderInfo = parseSenderInfo(replyTargetJid);
-  const apiParams = { tgl: tglParam, mode: modeH, _t: Date.now() };
+  const apiParams = { tgl: tglParam, mode: modeH };
 
   if (overrideToSender && senderInfo.id) {
     apiParams.override_wa = senderInfo.id;
@@ -1131,7 +1173,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
       await callSimgosApi("update_status", { 
         row: px.rowNumber, 
         type: "pasien", 
-        status: "Terkirim", 
+        status: "Terkirim",
         mode: modeH,
         no_lid: resolvedLid
       });
@@ -1201,8 +1243,8 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
         await callSimgosApi("update_status", { 
           row: px.rowNumber, 
           type: "dokter", 
-          status: "Terkirim", 
-          mode: modeH 
+          status: "Terkirim",
+          mode: modeH
         });
       } catch (err) {}
     }
@@ -1402,7 +1444,7 @@ export default function setupMessageHandler(sock) {
             }, { quoted: msg });
 
             try {
-              const searchTarget = await callSimgosApi("search_patient", { query: targetIdentifier, _t: Date.now() });
+              const searchTarget = await callSimgosApi("search_patient", { query: targetIdentifier });
               if (searchTarget.status !== "success" || !Array.isArray(searchTarget.data) || searchTarget.data.length === 0) {
                 await sock.sendMessage(senderInfo.targetJid, {
                   text: `❌ Data pasien dengan kata kunci *"${targetIdentifier}"* tidak ditemukan di spreadsheet.`
@@ -1413,21 +1455,18 @@ export default function setupMessageHandler(sock) {
               const targetPx = searchTarget.data[0];
               const sysCfg = await fetchSystemAIConfig();
 
-              // Update tanggal reschedule ke Kolom 19 & status di Google Sheet
               await callSimgosApi("reschedule_patient", {
                 noRm: targetPx.noRm,
                 newDate: extractedTargetDate,
                 customStatus: `Reschedule DPJP (${extractedTargetDate})`
               });
 
-              // Kirim notifikasi konfirmasi tanggal baru ke WhatsApp Pasien
               const updatedPxObj = {
                 ...targetPx,
                 tglReschedule: extractedTargetDate,
                 statusReschedule: `Reschedule DPJP (${extractedTargetDate})`
               };
 
-              // Perbarui memori cache lokal bot secara real-time
               cachePatientObject(targetPx.noRm, updatedPxObj);
               if (targetPx.noLid) cachePatientObject(targetPx.noLid, updatedPxObj);
               if (targetPx.noHp) cachePatientObject(formatToInternational(targetPx.noHp), updatedPxObj);
@@ -1530,7 +1569,7 @@ export default function setupMessageHandler(sock) {
                 no_lid: senderInfo.id
               });
 
-              const searchCheck = await callSimgosApi("search_patient", { query: targetRmBind, lid: senderInfo.id, _t: Date.now() });
+              const searchCheck = await callSimgosApi("search_patient", { query: targetRmBind, lid: senderInfo.id });
               const pxName = (searchCheck.status === "success" && searchCheck.data?.[0]?.namaPasien) ? searchCheck.data[0].namaPasien : targetRmBind;
 
               if (searchCheck.data?.[0]?.noHp) {
@@ -1645,7 +1684,7 @@ export default function setupMessageHandler(sock) {
 
             await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Mengambil data pasien kontrol siap follow-up (${modeHFU.toUpperCase()}) dari Google Spreadsheet..._` }, { quoted: msg });
             try {
-              const resFollowup = await callSimgosApi("get_followup", { tgl: tglArg, mode: modeHFU, _t: Date.now() });
+              const resFollowup = await callSimgosApi("get_followup", { tgl: tglArg, mode: modeHFU });
 
               if (resFollowup.status !== "success" || !resFollowup.data || resFollowup.data.length === 0) {
                 await sock.sendMessage(senderInfo.targetJid, { 
@@ -1723,7 +1762,7 @@ export default function setupMessageHandler(sock) {
             const queryCari = args.join(" ");
             await sock.sendMessage(senderInfo.targetJid, { text: `🔍 _Mencari data pasien "${queryCari}"..._` }, { quoted: msg });
             try {
-              const hasilCari = await callSimgosApi("search_patient", { query: queryCari, _t: Date.now() });
+              const hasilCari = await callSimgosApi("search_patient", { query: queryCari });
               if (hasilCari.status !== "success" || !hasilCari.data || hasilCari.data.length === 0) {
                 await sock.sendMessage(senderInfo.targetJid, { text: `❌ Data pasien dengan kata kunci *"${queryCari}"* tidak ditemukan.` }, { quoted: msg });
                 break;
@@ -1784,7 +1823,7 @@ export default function setupMessageHandler(sock) {
           case 'statssimgos':
             await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Menghitung statistik follow-up klinik..._" }, { quoted: msg });
             try {
-              const statsRes = await callSimgosApi("get_summary_stats", { _t: Date.now() });
+              const statsRes = await callSimgosApi("get_summary_stats");
               if (statsRes.status === "success") {
                 const s = statsRes.statistics;
                 const repStats = `📊 *STATISTIK KONTROL POLI SIMGOS*\n` +
@@ -1811,7 +1850,7 @@ export default function setupMessageHandler(sock) {
 
           case 'settingssimgos':
             try {
-              const cfg = await callSimgosApi("get_active_prompt", { _t: Date.now() });
+              const cfg = await callSimgosApi("get_active_prompt");
               if (cfg.status === "success") {
                 const c = cfg.config;
                 let txtCfg = `⚙️ *KONFIGURASI SISTEM SIMGOS KONTROL*\n\n` +
@@ -1832,7 +1871,7 @@ export default function setupMessageHandler(sock) {
 
           case 'templatesimgos':
             try {
-              const sysCfg = await fetchSystemAIConfig(true);
+              const sysCfg = await fetchSystemAIConfig();
               let tplTxt = `📝 *TEMPLATE PESAN SPREADSHEET (CUSTOM_FORMAT):*\n\n`;
               for (const [kode, isi] of Object.entries(sysCfg.templates)) {
                 tplTxt += `🔖 *Kode:* \`${kode}\`\n${isi}\n\n-------------------------\n\n`;
@@ -1872,72 +1911,35 @@ export default function setupMessageHandler(sock) {
             }, { quoted: msg });
             return;
 
-          // =================================================================
-          // SUPER UPGRADE: CLEAR & RELOAD PROMPT, TEMPLATES & DATA PASIEN
-          // =================================================================
           case 'clearpromptcache':
-            await sock.sendMessage(senderInfo.targetJid, { 
-              text: "⏳ _Memulai penyegaran total: Mengunduh Custom Prompt, Template, Konfigurasi AI & Sinkronisasi Pasien langsung dari Spreadsheet..._" 
-            }, { quoted: msg });
-
-            try {
-              // 1. Bersihkan memory cache lokal
-              cachedSystemConfig.timestamp = 0;
-              patientCacheMap.clear();
-              conversationSessions.clear();
-
-              // 2. Ambil paksa (Force Refresh) Config & Prompt & Template dari GAS
-              const freshCfg = await fetchSystemAIConfig(true);
-              
-              // 3. Pre-warm kontak dokter & owner
-              await prewarmDoctorAndOwnerLids(sock);
-
-              // 4. Unduh seluruh data pasien terkini dan masukkan ke RAM cache
-              const allPxRes = await callSimgosApi("get_all_patient_phones", { _t: Date.now() });
-              let totalPxLoaded = 0;
-              if (allPxRes.status === "success" && Array.isArray(allPxRes.data)) {
-                for (const px of allPxRes.data) {
-                  cachePatientObject(px.noRm, px);
-                  const cleanPhone = formatToInternational(px.cleanPhone || px.noHp);
-                  if (cleanPhone) cachePatientObject(cleanPhone, px);
-                  if (px.existingLid) {
-                    registerIdentityMapping(px.existingLid, cleanPhone);
-                    cachePatientObject(px.existingLid, px);
-                  }
-                  totalPxLoaded++;
-                }
-              }
-
-              // 5. Jalankan konversi LID untuk pasien yang belum memiliki LID resmi
-              const syncLidRes = await convertAllPatientsToLid(sock, false);
-
-              const gemMask = freshCfg.geminiApiKey ? `${freshCfg.geminiApiKey.substring(0, 7)}...${freshCfg.geminiApiKey.slice(-4)}` : "❌ KOSONG";
-              const groqMask = freshCfg.groqApiKey ? `${freshCfg.groqApiKey.substring(0, 7)}...${freshCfg.groqApiKey.slice(-4)}` : "❌ KOSONG";
-              const promptPreview = freshCfg.prompt ? (freshCfg.prompt.substring(0, 120) + "...") : "❌ PROMPT KOSONG";
-
-              const reportSuccess = `🔄 *PENYEGARAN DATABASE BERHASIL 100%!* 🚀\n\n` +
-                                    `🧠 *1. Custom System Prompt:*\n` +
-                                    `• Status: *Aktif & Termutakhirkan*\n` +
-                                    `• Panjang Karakter: *${freshCfg.prompt.length} karakter*\n` +
-                                    `• Ringkasan: _"${promptPreview}"_\n\n` +
-                                    `📝 *2. Template Format (CUSTOM_FORMAT):*\n` +
-                                    `• Total Tersinkron: *${Object.keys(freshCfg.templates).length} Template*\n\n` +
-                                    `👥 *3. Database Rekam Medis (DATA_PASIEN):*\n` +
-                                    `• Pasien Termuat ke Memori RAM: *${totalPxLoaded} Pasien*\n` +
-                                    `• Tambahan Sinkronisasi LID: *${syncLidRes.matched} Pasien*\n\n` +
-                                    `🤖 *4. Kredensial AI:*\n` +
-                                    `• Gemini API (${freshCfg.geminiModel}): ${gemMask}\n` +
-                                    `• Groq API (${freshCfg.groqModel}): ${groqMask}\n\n` +
-                                    `💬 *5. Sesi Percakapan:* Direset bersih.\n` +
-                                    `🕒 *Waktu Sinkronisasi:* ${getWitaTimeGreeting().fullWitaStr}`;
-
-              await sock.sendMessage(senderInfo.targetJid, { text: reportSuccess }, { quoted: msg });
-            } catch (errClear) {
-              console.error("[Clear Cache Error]", errClear);
-              await sock.sendMessage(senderInfo.targetJid, { 
-                text: `❌ *Gagal Menyegarkan Database:* ${errClear.message}\n\n_Pastikan Google Apps Script telah di-deploy sebagai Web App baru (akses 'Anyone')._` 
-              }, { quoted: msg });
+            cachedSystemConfig = {
+              prompt: '',
+              templates: {},
+              instansi: 'RSKD Gigi dan Mulut Prov. Sulsel',
+              poli: 'Poli Konservasi dan Endodonsi',
+              dpjpUtama: 'drg. Hj. Kurniawaty, Sp.KG',
+              dpjpUtamaWa: '6282291675363',
+              dpjpPendamping: 'drg. M. Aksa Arsyad',
+              geminiApiKey: '',
+              geminiModel: 'gemini-3.5-flash',
+              groqApiKey: '',
+              groqModel: 'openai/gpt-oss-120b',
+              nineRouterUrl: process.env.NINEROUTER_URL || 'http://127.0.0.1:20128/v1/chat/completions',
+              nineRouterApiKey: process.env.NINEROUTER_API_KEY || '9router',
+              nineRouterModel: process.env.NINEROUTER_MODEL || 'auto',
+              doctors: [],
+              timestamp: 0
+            };
+            lidToPhoneMap.clear();
+            phoneToLidMap.clear();
+            patientCacheMap.clear();
+            conversationSessions.clear();
+            if (fs.existsSync(lidCacheFile)) {
+              try { fs.unlinkSync(lidCacheFile); } catch (e) {}
             }
+            await prewarmDoctorAndOwnerLids(sock);
+            await convertAllPatientsToLid(sock, true);
+            await sock.sendMessage(senderInfo.targetJid, { text: "🔄 Seluruh Cache Prompt, Template, Data Pasien & Sesi Obrolan berhasil disegarkan!" }, { quoted: msg });
             return;
 
           case 'ping':
@@ -2020,6 +2022,7 @@ export default function setupMessageHandler(sock) {
           const notifDokterJkn = compileTemplateText(templateLaporanJkn, pObj, sysConfig);
           try {
             await sock.sendMessage(targetDpjpUtamaJid, { text: notifDokterJkn });
+            console.log(`[Laporan Terbatalkan JKN Terkirim ke DPJP Utama] ${targetDpjpUtamaJid}`);
           } catch (docErr) {}
         }
 
@@ -2058,14 +2061,14 @@ export default function setupMessageHandler(sock) {
             await callSimgosApi("update_status", { 
               noRm: patientData.noRm, 
               type: "pasien", 
-              status: "Hadir (Terkonfirmasi)", 
+              status: "Hadir (Terkonfirmasi)",
               mode: "h2",
               no_lid: senderInfo.id
             });
             await callSimgosApi("update_status", { 
               noRm: patientData.noRm, 
               type: "pasien", 
-              status: "Hadir (Terkonfirmasi)", 
+              status: "Hadir (Terkonfirmasi)",
               mode: "h1",
               no_lid: senderInfo.id
             });
@@ -2237,7 +2240,7 @@ export default function setupMessageHandler(sock) {
           await callSimgosApi("update_status", { 
             noRm: patientData.noRm, 
             type: "pasien", 
-            status: "Hadir (Terkonfirmasi)", 
+            status: "Hadir (Terkonfirmasi)",
             no_lid: senderInfo.id
           }).catch(() => {});
           patientCacheMap.delete(patientData.noRm);
