@@ -12,7 +12,7 @@ import handleStickerCommand from './commands/sticker.js';
 const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 
 // URL REST API Google Apps Script (GAS) SIMGOS RSKDGM
-const GAS_URL_SIMGOS = process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbzCOj9YFKEqXRfMEKBugnEhqzuC7MoJfIyc5PihST3bxmJaseaKKX9YifotK2qpT38/exec";
+const GAS_URL_SIMGOS = process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbxyhqtMxKBxrXScl39RkAoxXM2IQRYpv0Nnsgdib3eeU_sqZdPznQaaUp42aaUVPM8/exec";
 
 // Kontak WhatsApp Dokter Cadangan jika Setting Belum Terisi
 const DOKTER_JID_LIST = [
@@ -1179,6 +1179,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
         pasienTerkirim: 0,
         pasienGagal: 0,
         pasienSkipRujukanHabis: 0,
+        pasienWaTidakTerdaftar: 0,
         laporanDokterTerkirim: 0,
         laporanDokterGagal: 0,
         targetDate: "",
@@ -1211,16 +1212,24 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
     const delaySeconds = parseInt(followupData?.delay_chat || sysConfig?.delayChat, 10) || 60;
     const effectiveDelayMs = overrideToSender ? 3000 : (delaySeconds * 1000);
 
+    const targetDoctors = followupData.doctors && followupData.doctors.length > 0
+        ? followupData.doctors.map(d => sanitizeNumber(d.wa)).filter(Boolean)
+        : DOKTER_JID_LIST;
+
+    const currentDocTargets = (overrideToSender && replyTargetJid) ? [senderInfo.targetJid] : targetDoctors;
+
+    console.log(`[FOLLOWUP BLAST] Memulai pengiriman (${modeH.toUpperCase()}) satu-satu untuk ${listPasien.length} target. Mode: ${overrideToSender ? 'SIMULASI SENDER' : 'REAL BLAST'}, Delay: ${effectiveDelayMs / 1000}s`);
+
     for (let pxIndex = 0; pxIndex < listPasien.length; pxIndex++) {
         const px = listPasien[pxIndex];
         const statusRujukan = String(px.statusRujukan || "").trim().toLowerCase();
         if (statusRujukan.includes("habis") || !statusRujukan || statusRujukan === "-") {
-            console.log(`[SKIP FOLLOWUP] Pasien ${px.namaPasien} (RM: ${px.noRm}) dilewati karena Status Rujukan Habis.`);
+            console.log(`[SKIP FOLLOWUP] Pasien #${pxIndex + 1} ${px.namaPasien} (RM: ${px.noRm}) dilewati karena Status Rujukan Habis.`);
             resultLog.pasienSkipRujukanHabis++;
             continue;
         }
 
-        // CIRCUIT BREAKER PRE-CHECK: Pastikan koneksi WebSocket WhatsApp aktif sebelum kirim
+        // 1. CIRCUIT BREAKER PRE-CHECK: Pastikan koneksi WebSocket WhatsApp aktif
         let activeSock = currentSock || sock;
         if (!isSocketAlive(activeSock)) {
             console.warn(`[Circuit Breaker Pre-Check] Koneksi terputus sebelum memproses pasien #${pxIndex + 1} (${px.namaPasien}). Menunggu pemulihan koneksi...`);
@@ -1233,56 +1242,96 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
 
         const cleanPhone = formatToInternational(px.noHp);
         let resolvedLid = "";
+        let targetPatientJid = "";
+        let isWaRegistered = true;
 
         if (overrideToSender && senderInfo.id) {
             resolvedLid = senderInfo.id;
+            targetPatientJid = senderInfo.targetJid;
         } else {
             try {
-                resolvedLid = await resolveLidFromWhatsAppServer(activeSock, cleanPhone);
-                if (resolvedLid) {
-                    registerIdentityMapping(resolvedLid, cleanPhone);
-                    px.noLid = resolvedLid;
-                    cachePatientObject(resolvedLid, px);
-                    cachePatientObject(cleanPhone, px);
+                const waCheck = await activeSock.onWhatsApp(cleanPhone);
+                if (waCheck && waCheck.length > 0 && waCheck[0]?.exists) {
+                    targetPatientJid = waCheck[0].jid || sanitizeNumber(cleanPhone);
+                    if (waCheck[0].lid) {
+                        resolvedLid = String(waCheck[0].lid).replace(/\D/g, '');
+                        registerIdentityMapping(resolvedLid, cleanPhone);
+                        px.noLid = resolvedLid;
+                        cachePatientObject(resolvedLid, px);
+                        cachePatientObject(cleanPhone, px);
+                    }
+                } else {
+                    isWaRegistered = false;
                 }
-            } catch (errCheck) { }
+            } catch (errCheck) {
+                targetPatientJid = sanitizeNumber(cleanPhone);
+            }
 
             if (!resolvedLid) resolvedLid = cleanPhone;
         }
 
-        const targetJid = (overrideToSender && replyTargetJid) ? senderInfo.targetJid : sanitizeNumber(px.noHp);
+        // 2. JIKA NOMOR PASIEN TIDAK TERDAFTAR DI WHATSAPP
+        if (!isWaRegistered) {
+            console.warn(`[WA TIDAK TERDAFTAR] Pasien #${pxIndex + 1} ${px.namaPasien} (${cleanPhone}) tidak memiliki akun WhatsApp aktif.`);
+            resultLog.pasienWaTidakTerdaftar++;
+            resultLog.pasienGagal++;
 
-        try {
-            let pesanKirim = px.pesan_wa_pasien;
-            if (overrideToSender) {
-                pesanKirim = `🧪 *[SIMULASI BLAST ${modeH.toUpperCase()}: DIARAHKAN KE SENDER]*\n` +
-                    `_(Pasien: ${px.namaPasien} | RM: ${px.noRm} | Rujukan: ${px.statusRujukan} | No. Asli: ${px.originalNoHp || px.noHp})_\n\n` +
-                    pesanKirim;
+            try {
+                await callSimgosApi("update_status", {
+                    row: px.rowNumber,
+                    type: "both",
+                    status: "Bukan Nomor WA",
+                    doctor_status: "Bukan Nomor WA",
+                    mode: modeH,
+                    no_lid: resolvedLid
+                });
+            } catch (uErr) { }
+
+            // Notifikasi transparan ke Dokter (SATU-SATU) agar dokter mengetahui nomor tidak ada WA
+            for (const docJid of currentDocTargets) {
+                try {
+                    await activeSock.sendMessage(docJid, {
+                        text: `⚠️ *[PERINGATAN DPJP: NO. WA TIDAK AKTIF]*\n\n` +
+                            `👤 *Nama Pasien:* ${px.namaPasien}\n` +
+                            `🔖 *No. RM:* ${px.noRm}\n` +
+                            `📱 *No. Telepon:* ${px.noHp}\n` +
+                            `📅 *Jadwal Kontrol:* ${px.tglKontrol}\n` +
+                            `📋 *Status Rujukan:* ${px.statusRujukan}\n\n` +
+                            `_Nomor di atas tidak terdaftar di WhatsApp. Status di Google Spreadsheet telah ditandai sebagai 'Bukan Nomor WA'. Mohon hubungi pasien melalui panggilan telepon seluler biasa._ 🙏`
+                    });
+                } catch (wErr) { }
             }
 
-            // Simulasi Mengetik Manusiawi (Humanized Typing Presence)
+            if (pxIndex < listPasien.length - 1) {
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            continue;
+        }
+
+        // 3. KIRIM PESAN KE PASIEN (SATU-SATU)
+        let patientSentSuccess = false;
+        let pesanKirimPasien = px.pesan_wa_pasien;
+        if (overrideToSender) {
+            pesanKirimPasien = `🧪 *[SIMULASI BLAST ${modeH.toUpperCase()}: DIARAHKAN KE SENDER]*\n` +
+                `_(Target Pasien: ${px.namaPasien} | RM: ${px.noRm} | Rujukan: ${px.statusRujukan} | No. Asli: ${px.originalNoHp || px.noHp})_\n\n` +
+                pesanKirimPasien;
+        }
+
+        try {
             try {
-                await activeSock.sendPresenceUpdate('composing', targetJid);
+                await activeSock.sendPresenceUpdate('composing', targetPatientJid);
                 await new Promise(r => setTimeout(r, 1200));
             } catch (pErr) { }
 
-            await activeSock.sendMessage(targetJid, { text: pesanKirim });
+            await activeSock.sendMessage(targetPatientJid, { text: pesanKirimPasien });
 
             try {
-                await activeSock.sendPresenceUpdate('paused', targetJid);
+                await activeSock.sendPresenceUpdate('paused', targetPatientJid);
             } catch (pErr) { }
 
+            patientSentSuccess = true;
             resultLog.pasienTerkirim++;
-
-            await callSimgosApi("update_status", {
-                row: px.rowNumber,
-                type: "pasien",
-                status: "Terkirim",
-                mode: modeH,
-                no_lid: resolvedLid
-            });
-
-            console.log(`[Blast ${modeH.toUpperCase()} Terkirim (${resultLog.pasienTerkirim}/${listPasien.length})] ${px.namaPasien} (${px.statusRujukan}) -> JID: ${targetJid}`);
+            console.log(`[Blast ${modeH.toUpperCase()} Pasien (${resultLog.pasienTerkirim}/${listPasien.length})] ${px.namaPasien} (${px.statusRujukan}) -> JID: ${targetPatientJid}`);
 
             if (!overrideToSender) {
                 conversationSessions.set(resolvedLid, {
@@ -1296,17 +1345,10 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
                     patientData: px
                 });
             }
-
-            // Jeda Anti-Spam (Default 60 Detik dari Sheet 'SETTING') antar pasien jika masih ada pasien berikutnya
-            if (pxIndex < listPasien.length - 1) {
-                const countdownSec = overrideToSender ? 3 : delaySeconds;
-                console.log(`[Anti-Spam Delay] Menunggu jeda ${countdownSec} detik sebelum pengiriman ke pasien berikutnya...`);
-                await new Promise(r => setTimeout(r, effectiveDelayMs));
-            }
-        } catch (e) {
-            const isConnClosed = e?.output?.statusCode === 428 ||
-                String(e?.message || '').toLowerCase().includes('connection closed') ||
-                String(e?.error || '').toLowerCase().includes('precondition required');
+        } catch (pxErr) {
+            const isConnClosed = pxErr?.output?.statusCode === 428 ||
+                String(pxErr?.message || '').toLowerCase().includes('connection closed') ||
+                String(pxErr?.error || '').toLowerCase().includes('precondition required');
 
             if (isConnClosed) {
                 console.warn(`[Koneksi Terputus (428)] Gagal mengirim ke ${px.namaPasien}. Mencoba pemulihan koneksi WhatsApp...`);
@@ -1314,122 +1356,118 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
                 if (recoveredSock) {
                     activeSock = recoveredSock;
                     try {
-                        await activeSock.sendMessage(targetJid, { text: pesanKirim });
+                        await activeSock.sendMessage(targetPatientJid, { text: pesanKirimPasien });
+                        patientSentSuccess = true;
                         resultLog.pasienTerkirim++;
-                        await callSimgosApi("update_status", {
-                            row: px.rowNumber,
-                            type: "pasien",
-                            status: "Terkirim",
-                            mode: modeH,
-                            no_lid: resolvedLid
-                        });
                         console.log(`[Blast Recovery SUKSES] ${px.namaPasien} berhasil dikirim setelah koneksi pulih!`);
-                        if (pxIndex < listPasien.length - 1) {
-                            const countdownSec = overrideToSender ? 3 : delaySeconds;
-                            console.log(`[Anti-Spam Delay] Menunggu jeda ${countdownSec} detik sebelum pengiriman ke pasien berikutnya...`);
-                            await new Promise(r => setTimeout(r, effectiveDelayMs));
-                        }
-                        continue;
                     } catch (retryErr) {
                         console.error(`[Retry Gagal] Pengiriman ulang ke ${px.namaPasien} tetap gagal:`, retryErr.message);
                     }
                 } else {
-                    console.error(`[CIRCUIT BREAKER AKTIF] Koneksi WhatsApp terputus permanen di Railway. Menghentikan blast agar sisa ${listPasien.length - pxIndex - 1} antrean pasien tidak gagal/hangus.`);
+                    console.error(`[CIRCUIT BREAKER AKTIF] Koneksi WhatsApp terputus permanen di Railway. Menghentikan blast agar sisa ${listPasien.length - pxIndex} antrean pasien tidak hangus.`);
                     resultLog.pasienGagal++;
                     break;
                 }
-            }
-
-            console.error(`[Gagal Kirim Pasien ${modeH.toUpperCase()}] ${px.namaPasien}:`, e);
-            resultLog.pasienGagal++;
-            if (pxIndex < listPasien.length - 1) {
-                await new Promise(r => setTimeout(r, 3000));
+            } else {
+                console.error(`[Gagal Kirim Pasien ${modeH.toUpperCase()}] ${px.namaPasien}:`, pxErr);
+                resultLog.pasienGagal++;
             }
         }
-    }
 
-    const targetDoctors = followupData.doctors && followupData.doctors.length > 0
-        ? followupData.doctors.map(d => sanitizeNumber(d.wa)).filter(Boolean)
-        : DOKTER_JID_LIST;
+        // 4. KIRIM LAPORAN DOKTER UNTUK PASIEN INI (SATU-SATU / REAL-TIME)
+        let docSentSuccess = false;
+        if (patientSentSuccess) {
+            let pesanLaporanDokter = px.pesan_wa_laporan_dokter;
+            if (!pesanLaporanDokter) {
+                const docTplKey = modeH === "h1" ? "WA_LAPORAN_DOKTER_H1" : "WA_LAPORAN_DOKTER";
+                const docTpl = sysConfig.templates?.[docTplKey] || "";
+                pesanLaporanDokter = compileTemplateText(docTpl, px, sysConfig);
+            }
 
-    let activeSockDoc = currentSock || sock;
+            if (overrideToSender) {
+                pesanLaporanDokter = `🧪 *[SIMULASI LAPORAN DPJP: DIARAHKAN KE SENDER]*\n` +
+                    `_(Laporan untuk Pasien: ${px.namaPasien} | RM: ${px.noRm} | Status: Rujukan Aktif)_\n\n` +
+                    pesanLaporanDokter;
+            }
 
-    // Jeda Anti-Spam (Default 60 Detik dari Sheet 'SETTING') sebelum mengirimkan laporan ke Dokter/DPJP
-    if (resultLog.pasienTerkirim > 0 && isSocketAlive(activeSockDoc)) {
-        const docPreDelaySec = overrideToSender ? 3 : delaySeconds;
-        console.log(`[Anti-Spam Delay] Menunggu jeda ${docPreDelaySec} detik sebelum mengirimkan laporan rekap ke DPJP/Dokter...`);
-        await new Promise(r => setTimeout(r, effectiveDelayMs));
-    }
+            for (let dIdx = 0; dIdx < currentDocTargets.length; dIdx++) {
+                const docJid = currentDocTargets[dIdx];
+                try {
+                    try {
+                        await activeSock.sendPresenceUpdate('composing', docJid);
+                        await new Promise(r => setTimeout(r, 800));
+                    } catch (pErr) { }
 
-    if (!isSocketAlive(activeSockDoc)) {
-        activeSockDoc = await waitForActiveSocket(activeSockDoc, 20000);
-    }
+                    await activeSock.sendMessage(docJid, { text: pesanLaporanDokter });
 
-    if (activeSockDoc) {
-        for (let docIdx = 0; docIdx < targetDoctors.length; docIdx++) {
-            const docJid = targetDoctors[docIdx];
-            try {
-                let rekapDokter = `📋 *LAPORAN FOLLOW-UP KONTROL PASIEN (${modeH.toUpperCase()})*\n` +
-                    `🏥 *${sysConfig.instansi}*\n` +
-                    `📅 *Tgl Kontrol:* ${resultLog.targetDate}\n` +
-                    `👨‍⚕️ *DPJP Utama:* ${sysConfig.dpjpUtama}\n` +
-                    `👥 *Total Pasien Terjadwal:* ${resultLog.totalTarget}\n` +
-                    `📲 *Berhasil Dihubungi (Rujukan Aktif):* ${resultLog.pasienTerkirim}\n` +
-                    `🚫 *Dilewati (Rujukan Habis):* ${resultLog.pasienSkipRujukanHabis}\n\n` +
-                    `*Rincian Pasien:*\n`;
+                    try {
+                        await activeSock.sendPresenceUpdate('paused', docJid);
+                    } catch (pErr) { }
 
-                listPasien.forEach((p, idx) => {
-                    const isHabis = String(p.statusRujukan || "").toLowerCase().includes("habis");
-                    const statusKirim = isHabis ? "🚫 _(Rujukan Habis - Dilewati)_" : "✅ _(Terkirim)_";
-                    rekapDokter += `${idx + 1}. *${p.namaPasien}* (RM: ${p.noRm}) - WA: ${p.noHp}\n   ${statusKirim}\n`;
-                });
-
-                if (overrideToSender) {
-                    rekapDokter += `\n_Mode Simulasi: Seluruh pesan dialihkan ke WhatsApp Anda (${senderInfo.id})._ 🙏`;
-                } else {
-                    rekapDokter += `\n_Pesan otomatis telah terkirim hanya kepada pasien dengan status Rujukan Aktif._ 🙏`;
+                    docSentSuccess = true;
+                    console.log(`[Laporan DPJP Terkirim (Satu-Satu)] Pasien #${pxIndex + 1} (${px.namaPasien}) -> Dokter: ${docJid}`);
+                } catch (dErr) {
+                    console.error(`[Gagal Kirim Laporan Dokter] Pasien #${pxIndex + 1} (${px.namaPasien}) ke ${docJid}:`, dErr.message);
                 }
+            }
 
-                // Simulasi Mengetik Manusiawi (Humanized Typing Presence) untuk Dokter
-                try {
-                    await activeSockDoc.sendPresenceUpdate('composing', docJid);
-                    await new Promise(r => setTimeout(r, 1200));
-                } catch (pErr) { }
-
-                await activeSockDoc.sendMessage(docJid, { text: rekapDokter });
-
-                try {
-                    await activeSockDoc.sendPresenceUpdate('paused', docJid);
-                } catch (pErr) { }
-
+            if (docSentSuccess) {
                 resultLog.laporanDokterTerkirim++;
-
-                // Jeda Anti-Spam (Default 60 Detik dari Sheet 'SETTING') antar dokter jika ada lebih dari 1 dokter
-                if (docIdx < targetDoctors.length - 1) {
-                    const docCountdownSec = overrideToSender ? 3 : delaySeconds;
-                    console.log(`[Anti-Spam Delay] Menunggu jeda ${docCountdownSec} detik sebelum mengirim ke dokter berikutnya...`);
-                    await new Promise(r => setTimeout(r, effectiveDelayMs));
-                }
-            } catch (docErr) {
-                console.error(`[Gagal Kirim Dokter ${modeH.toUpperCase()}] ${docJid}:`, docErr);
+            } else {
                 resultLog.laporanDokterGagal++;
             }
         }
-    } else {
-        console.warn(`[Laporan Dokter Ditunda] Koneksi WhatsApp terputus sehingga laporan ke DPJP ditunda.`);
+
+        // 5. ATOMIC STATUS UPDATE KE GOOGLE SPREADSHEET (Pasien & Dokter Serentak)
+        try {
+            await callSimgosApi("update_status", {
+                row: px.rowNumber,
+                type: "both",
+                status: patientSentSuccess ? "Terkirim" : "Gagal",
+                doctor_status: docSentSuccess ? "Terkirim" : (patientSentSuccess ? "Gagal" : "Pending"),
+                mode: modeH,
+                no_lid: resolvedLid
+            });
+        } catch (dbErr) {
+            console.error(`[Update Status Gagal] Baris ${px.rowNumber}:`, dbErr.message);
+        }
+
+        // 6. JEDA ANTI-SPAM (Default 60 Detik dari Sheet 'SETTING') antar pasien jika masih ada pasien berikutnya
+        if (pxIndex < listPasien.length - 1) {
+            const countdownSec = overrideToSender ? 3 : delaySeconds;
+            console.log(`[Anti-Spam Delay] Menunggu jeda ${countdownSec} detik sebelum pengiriman pasien & dokter berikutnya...`);
+            await new Promise(r => setTimeout(r, effectiveDelayMs));
+        }
     }
 
-    for (const px of listPasien) {
-        const isHabis = String(px.statusRujukan || "").toLowerCase().includes("habis");
-        if (!isHabis) {
-            try {
-                await callSimgosApi("update_status", {
-                    row: px.rowNumber,
-                    type: "dokter",
-                    status: "Terkirim",
-                    mode: modeH
-                });
-            } catch (err) { }
+    // 7. RINGKASAN REKAPITULASI TOTAL DI AKHIR KEPADA DOKTER & PENGIRIM
+    if (resultLog.pasienTerkirim > 0 || resultLog.pasienSkipRujukanHabis > 0 || resultLog.pasienWaTidakTerdaftar > 0) {
+        let activeSockDoc = currentSock || sock;
+        if (!isSocketAlive(activeSockDoc)) {
+            activeSockDoc = await waitForActiveSocket(activeSockDoc, 15000);
+        }
+
+        if (activeSockDoc) {
+            let executiveSummary = `📋 *[REKAPITULASI BLAST FOLLOW-UP (${modeH.toUpperCase()}) SELESAI]*\n` +
+                `🏥 *${sysConfig.instansi}*\n` +
+                `📅 *Tanggal Kontrol:* ${resultLog.targetDate}\n` +
+                `👨‍⚕️ *DPJP Utama:* ${sysConfig.dpjpUtama}\n` +
+                `👥 *Total Pasien Terjadwal:* ${resultLog.totalTarget}\n` +
+                `📲 *Pesan Pasien Terkirim (Aktif):* ${resultLog.pasienTerkirim}\n` +
+                `🚫 *Dilewati (Rujukan Habis):* ${resultLog.pasienSkipRujukanHabis}\n` +
+                `⚠️ *Nomor WA Tidak Terdaftar:* ${resultLog.pasienWaTidakTerdaftar}\n` +
+                `👨‍⚕️ *Laporan DPJP Terkirim:* ${resultLog.laporanDokterTerkirim} Laporan (Satu-Satu)\n\n` +
+                `_Status pengiriman Pasien dan Dokter di Google Spreadsheet telah diperbarui ke Terkirim._ 📊`;
+
+            if (overrideToSender) {
+                executiveSummary += `\n🎯 _Catatan: Seluruh pesan pasien dan laporan dokter dialihkan ke WhatsApp pengirim (${senderInfo.id})._ 🙏`;
+            }
+
+            for (const sumJid of currentDocTargets) {
+                try {
+                    await activeSockDoc.sendMessage(sumJid, { text: executiveSummary });
+                } catch (sumErr) { }
+            }
         }
     }
 
@@ -1835,8 +1873,8 @@ export default function setupMessageHandler(sock) {
                         const sysCfgNow = await fetchSystemAIConfig();
                         const delaySecInfo = sysCfgNow.delayChat || 60;
                         const infoNotice = toSender
-                            ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data (${modesToRun.map(m => m.toUpperCase()).join(" & ")})... ⚠️ *Mode Simulasi:* Pesan dialihkan ke WhatsApp Anda (*${senderInfo.id}*).`
-                            : `⚡ *[FOLLOWUP NOW]* Memulai pengiriman instan (${modesToRun.map(m => m.toUpperCase()).join(" & ")}) ke nomor pasien...\n⏳ *Jeda Anti-Spam:* ${delaySecInfo} detik / pasien & dokter (Rujukan Habis otomatis diskip).`;
+                            ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data (${modesToRun.map(m => m.toUpperCase()).join(" & ")})... ⚠️ *Mode Simulasi:* Pesan pasien & laporan DPJP dialihkan *satu per satu* ke WhatsApp Anda (*${senderInfo.id}*).`
+                            : `⚡ *[FOLLOWUP NOW]* Memulai pengiriman (${modesToRun.map(m => m.toUpperCase()).join(" & ")}) secara *Satu-Satu* (Pesan Pasien ➔ Laporan DPJP)...\n⏳ *Jeda Anti-Spam:* ${delaySecInfo} detik / pasien (Rujukan Habis otomatis diskip).`;
 
                         await sock.sendMessage(senderInfo.targetJid, { text: infoNotice }, { quoted: msg });
 
@@ -1854,16 +1892,17 @@ export default function setupMessageHandler(sock) {
                                 let rekapSekarang = `🚀 *[FOLLOWUP NOW ${currentMode.toUpperCase()} SELESAI]*\n\n` +
                                     `📅 *Target Kontrol:* ${blastResult.targetDate}\n` +
                                     `👥 *Total Pasien Terjadwal:* ${blastResult.totalTarget}\n` +
-                                    `📲 *Pesan Terkirim (Aktif):* ${blastResult.pasienTerkirim}\n` +
+                                    `📲 *Pesan Pasien Terkirim (Aktif):* ${blastResult.pasienTerkirim}\n` +
                                     `🚫 *Dilewati (Rujukan Habis):* ${blastResult.pasienSkipRujukanHabis}\n` +
-                                    `⚠️ *Pesan Gagal:* ${blastResult.pasienGagal}\n` +
-                                    `👨‍⚕️ *Laporan Terkirim ke DPJP Utama:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
+                                    `⚠️ *Nomor WA Tidak Terdaftar:* ${blastResult.pasienWaTidakTerdaftar}\n` +
+                                    `⚠️ *Pesan Pasien Gagal:* ${blastResult.pasienGagal}\n` +
+                                    `👨‍⚕️ *Laporan DPJP Terkirim:* ${blastResult.laporanDokterTerkirim} Laporan (Satu-Satu)\n`;
 
                                 if (blastResult.isSenderConverted) {
                                     rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Tersimpan di Kolom 15 & 18)\n`;
                                 }
 
-                                rekapSekarang += `\n_Status di Google Spreadsheet telah diperbarui ke Terkirim._ 📊`;
+                                rekapSekarang += `\n_Status Pasien dan Dokter di Google Spreadsheet telah diperbarui ke Terkirim._ 📊`;
                                 await sock.sendMessage(senderInfo.targetJid, { text: rekapSekarang }, { quoted: msg });
                             }
                         } catch (errNow) {
@@ -1955,7 +1994,7 @@ export default function setupMessageHandler(sock) {
                         const sysCfgGass = await fetchSystemAIConfig();
                         const delaySecGass = sysCfgGass.delayChat || 60;
                         await sock.sendMessage(senderInfo.targetJid, { 
-                            text: `🚀 _Memulai pengiriman pesan WhatsApp massal (${modeHGass.toUpperCase()})..._\n⏳ *Jeda Anti-Spam:* ${delaySecGass} detik / pasien & dokter agar aman dari pemblokiran WA.` 
+                            text: `🚀 _Memulai pengiriman pesan WhatsApp massal (${modeHGass.toUpperCase()}) secara *Satu-Satu* (Pesan Pasien ➔ Laporan DPJP)..._\n⏳ *Jeda Anti-Spam:* ${delaySecGass} detik / pasien agar aman dari pemblokiran WA.` 
                         }, { quoted: msg });
                         try {
                             const blastResult = await executeFollowupBlast(sock, remoteJid, tglKirim, toSenderGass, modeHGass);
@@ -1970,14 +2009,15 @@ export default function setupMessageHandler(sock) {
                                 `👥 *Total Target Pasien:* ${blastResult.totalTarget}\n` +
                                 `📲 *Pasien Berhasil Dikirimi (Aktif):* ${blastResult.pasienTerkirim}\n` +
                                 `🚫 *Dilewati (Rujukan Habis):* ${blastResult.pasienSkipRujukanHabis}\n` +
+                                `⚠️ *Nomor WA Tidak Terdaftar:* ${blastResult.pasienWaTidakTerdaftar}\n` +
                                 `⚠️ *Pasien Gagal:* ${blastResult.pasienGagal}\n` +
-                                `👨‍⚕️ *Laporan DPJP Terkirim:* ${blastResult.laporanDokterTerkirim} Dokter\n`;
+                                `👨‍⚕️ *Laporan DPJP Terkirim:* ${blastResult.laporanDokterTerkirim} Laporan (Satu-Satu)\n`;
 
                             if (blastResult.isSenderConverted) {
                                 rekapAkhir += `🎯 *Catatan:* Pesan dialihkan ke WhatsApp pengirim (${blastResult.convertedToPhone}).\n`;
                             }
 
-                            rekapAkhir += `\n_Seluruh status di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
+                            rekapAkhir += `\n_Seluruh status Pasien dan Dokter di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
                             await sock.sendMessage(senderInfo.targetJid, { text: rekapAkhir }, { quoted: msg });
                         } catch (e) {
                             await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Terjadi Kesalahan saat eksekusi:* ${e.message}` }, { quoted: msg });
