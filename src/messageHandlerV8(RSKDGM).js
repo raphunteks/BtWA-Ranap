@@ -1378,10 +1378,17 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
         // 4. KIRIM LAPORAN DOKTER UNTUK PASIEN INI (SATU-SATU / REAL-TIME)
         let docSentSuccess = false;
         if (patientSentSuccess) {
+            // JEDA PACING 60 DETIK ANTARA PESAN PASIEN DAN LAPORAN DOKTER DPJP
+            const interMessageDelaySec = overrideToSender ? 3 : (delaySeconds || 60);
+            console.log(`[Pacing Delay ${interMessageDelaySec}s] Menunggu jeda ${interMessageDelaySec} detik sebelum mengirimkan laporan dokter (${px.namaPasien})...`);
+            await new Promise(r => setTimeout(r, interMessageDelaySec * 1000));
+
             let pesanLaporanDokter = px.pesan_wa_laporan_dokter;
             if (!pesanLaporanDokter) {
-                const docTplKey = modeH === "h1" ? "WA_LAPORAN_DOKTER_H1" : "WA_LAPORAN_DOKTER";
-                const docTpl = sysConfig.templates?.[docTplKey] || "";
+                const docTplKey = modeH === "h1" 
+                    ? (sysConfig.templates?.["WA_LAPORAN_DOKTER_H1"] ? "WA_LAPORAN_DOKTER_H1" : "WA_LAPORAN_DOKTER")
+                    : (sysConfig.templates?.["WA_LAPORAN_DOKTER_H2"] ? "WA_LAPORAN_DOKTER_H2" : "WA_LAPORAN_DOKTER");
+                const docTpl = sysConfig.templates?.[docTplKey] || sysConfig.templates?.["WA_LAPORAN_DOKTER"] || "";
                 pesanLaporanDokter = compileTemplateText(docTpl, px, sysConfig);
             }
 
@@ -1442,36 +1449,10 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
         }
     }
 
-    // 7. RINGKASAN REKAPITULASI TOTAL DI AKHIR KEPADA DOKTER & PENGIRIM
-    if (resultLog.pasienTerkirim > 0 || resultLog.pasienSkipRujukanHabis > 0 || resultLog.pasienWaTidakTerdaftar > 0) {
-        let activeSockDoc = currentSock || sock;
-        if (!isSocketAlive(activeSockDoc)) {
-            activeSockDoc = await waitForActiveSocket(activeSockDoc, 15000);
-        }
-
-        if (activeSockDoc) {
-            let executiveSummary = `📋 *[REKAPITULASI BLAST FOLLOW-UP (${modeH.toUpperCase()}) SELESAI]*\n` +
-                `🏥 *${sysConfig.instansi}*\n` +
-                `📅 *Tanggal Kontrol:* ${resultLog.targetDate}\n` +
-                `👨‍⚕️ *DPJP Utama:* ${sysConfig.dpjpUtama}\n` +
-                `👥 *Total Pasien Terjadwal:* ${resultLog.totalTarget}\n` +
-                `📲 *Pesan Pasien Terkirim (Aktif):* ${resultLog.pasienTerkirim}\n` +
-                `🚫 *Dilewati (Rujukan Habis):* ${resultLog.pasienSkipRujukanHabis}\n` +
-                `⚠️ *Nomor WA Tidak Terdaftar:* ${resultLog.pasienWaTidakTerdaftar}\n` +
-                `👨‍⚕️ *Laporan DPJP Terkirim:* ${resultLog.laporanDokterTerkirim} Laporan (Satu-Satu)\n\n` +
-                `_Status pengiriman Pasien dan Dokter di Google Spreadsheet telah diperbarui ke Terkirim._ 📊`;
-
-            if (overrideToSender) {
-                executiveSummary += `\n🎯 _Catatan: Seluruh pesan pasien dan laporan dokter dialihkan ke WhatsApp pengirim (${senderInfo.id})._ 🙏`;
-            }
-
-            for (const sumJid of currentDocTargets) {
-                try {
-                    await activeSockDoc.sendMessage(sumJid, { text: executiveSummary });
-                } catch (sumErr) { }
-            }
-        }
-    }
+    // 7. SELESAI BLAST FOLLOW-UP
+    // Rekapitulasi summary TIDAK lagi dikirim ke dokter DPJP (dokter hanya menerima laporan pasien dari CUSTOM_FORMAT).
+    // Rekapitulasi dikembalikan lewat resultLog untuk dilaporkan kepada pengirim perintah (petugas/admin).
+    console.log(`[Blast ${modeH.toUpperCase()} Selesai] Total: ${resultLog.totalTarget} | Pasien Terkirim: ${resultLog.pasienTerkirim} | Laporan DPJP: ${resultLog.laporanDokterTerkirim} | Skip Rujukan Habis: ${resultLog.pasienSkipRujukanHabis}`);
 
     return resultLog;
 }
