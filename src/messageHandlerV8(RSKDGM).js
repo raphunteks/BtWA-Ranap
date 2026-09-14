@@ -30,6 +30,21 @@ const GROQ_ALLOWED_MODELS = [
   "groq/compound-mini"
 ];
 
+// Normalisasi URL Endpoint 9Router VPS
+function normalize9RouterUrl(rawUrl) {
+  let url = (rawUrl || '').trim();
+  if (!url) return "http://43.134.43.146:20128/v1/chat/completions";
+  url = url.replace(/\/+$/, '');
+  if (!url.endsWith('/chat/completions')) {
+    if (url.endsWith('/v1')) {
+      url += '/chat/completions';
+    } else {
+      url += '/v1/chat/completions';
+    }
+  }
+  return url;
+}
+
 // =========================================================================
 // SMART BIDIRECTIONAL RESOLVER & TEMPORARY CACHE (TTL REAL-TIME 30 DETIK)
 // =========================================================================
@@ -236,7 +251,7 @@ let cachedSystemConfig = {
   geminiModel: 'gemini-3.5-flash',
   groqApiKey: '',
   groqModel: 'openai/gpt-oss-120b',
-  nineRouterUrl: process.env.NINEROUTER_URL || 'http://127.0.0.1:20128/v1/chat/completions',
+  nineRouterUrl: normalize9RouterUrl(process.env.NINEROUTER_URL),
   nineRouterApiKey: process.env.NINEROUTER_API_KEY || '9router',
   nineRouterModel: process.env.NINEROUTER_MODEL || 'auto',
   doctors: [],
@@ -454,9 +469,9 @@ async function fetchSystemAIConfig() {
         geminiModel: res.aiConfig?.geminiModel || "gemini-3.5-flash",
         groqApiKey: res.aiConfig?.groqApiKey || cachedSystemConfig.groqApiKey,
         groqModel: res.aiConfig?.groqModel || "openai/gpt-oss-120b",
-        nineRouterUrl: res.aiConfig?.nineRouterUrl || cachedSystemConfig.nineRouterUrl,
-        nineRouterApiKey: res.aiConfig?.nineRouterApiKey || cachedSystemConfig.nineRouterApiKey,
-        nineRouterModel: res.aiConfig?.nineRouterModel || cachedSystemConfig.nineRouterModel,
+        nineRouterUrl: normalize9RouterUrl(process.env.NINEROUTER_URL || res.aiConfig?.nineRouterUrl || cachedSystemConfig.nineRouterUrl),
+        nineRouterApiKey: process.env.NINEROUTER_API_KEY || res.aiConfig?.nineRouterApiKey || cachedSystemConfig.nineRouterApiKey || '9router',
+        nineRouterModel: process.env.NINEROUTER_MODEL || res.aiConfig?.nineRouterModel || cachedSystemConfig.nineRouterModel || 'auto',
         doctors: res.config?.doctors || [],
         timestamp: now
       };
@@ -827,10 +842,11 @@ async function fetchPatientsByRujukanStatus(statusType) {
 
 // =========================================================================
 // ENGINE 1 (UTAMA): 9ROUTER AI GATEWAY (OPENAI-COMPATIBLE ENDPOINT)
-// Menghubungkan ke 60+ Provider AI (Claude 3.7, GPT-4o, DeepSeek, Gemini, dll)
+// VPS: 43.134.43.146:20128 -> Menghubungkan ke Berbagai Provider AI
 // =========================================================================
 async function ask9RouterClinic(conversationHistory, systemPromptText, aiConfig) {
-  const endpoint = aiConfig.nineRouterUrl || process.env.NINEROUTER_URL || "http://127.0.0.1:20128/v1/chat/completions";
+  const rawUrl = aiConfig.nineRouterUrl || process.env.NINEROUTER_URL || "http://43.134.43.146:20128/v1/chat/completions";
+  const endpoint = normalize9RouterUrl(rawUrl);
   const apiKey = aiConfig.nineRouterApiKey || process.env.NINEROUTER_API_KEY || "9router";
   const model = aiConfig.nineRouterModel || process.env.NINEROUTER_MODEL || "auto";
 
@@ -847,14 +863,15 @@ async function ask9RouterClinic(conversationHistory, systemPromptText, aiConfig)
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 20000);
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
 
   try {
     const res = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Accept": "application/json"
       },
       body: JSON.stringify({
         model: model,
@@ -869,12 +886,12 @@ async function ask9RouterClinic(conversationHistory, systemPromptText, aiConfig)
 
     if (!res.ok) {
       const errBody = await res.text();
-      throw new Error(`9Router (${res.status}): ${errBody}`);
+      throw new Error(`9Router (${res.status} at ${endpoint}): ${errBody}`);
     }
 
     const data = await res.json();
     const reply = data.choices?.[0]?.message?.content;
-    if (!reply || !reply.trim()) throw new Error("Respon dari 9Router kosong.");
+    if (!reply || !reply.trim()) throw new Error("Respon dari 9Router VPS kosong.");
     return reply.trim();
   } catch (err) {
     clearTimeout(timeoutId);
@@ -883,7 +900,7 @@ async function ask9RouterClinic(conversationHistory, systemPromptText, aiConfig)
 }
 
 // =========================================================================
-// ENGINE 2 (CADANGAN 1): GOOGLE AI STUDIO (GEMINI 3.5 FLASH DIRECT)
+// ENGINE 2 (CADANGAN 1): GOOGLE AI STUDIO (GEMINI DIRECT)
 // =========================================================================
 async function askGeminiClinic(conversationHistory, systemPromptText, aiConfig) {
   const apiKey = aiConfig.geminiApiKey ? aiConfig.geminiApiKey.trim() : "";
@@ -1010,6 +1027,7 @@ async function askGroqClinic(conversationHistory, systemPromptText, aiConfig) {
 // =========================================================================
 async function askAIClinicUnified(conversationHistory, patientContext = null, senderPushName = "Pasien", senderInfo = null) {
   const aiConfig = await fetchSystemAIConfig();
+  const sysConfig = aiConfig;
   let systemPromptText = aiConfig.prompt;
 
   systemPromptText = systemPromptText.replace(/RSKDGM Care|RSKD Care/gi, "RSKD Gigi dan Mulut Prov. Sulsel");
@@ -1071,7 +1089,7 @@ PETUNJUK: Berikan salam formal birokratis dan persilakan pengirim menginformasik
 
   let finalReply = "";
 
-  // 1. Prioritas Utama: 9Router Gateway
+  // 1. Prioritas Utama: 9Router AI Gateway VPS
   try {
     finalReply = await ask9RouterClinic(conversationHistory, systemPromptText, aiConfig);
   } catch (nineRouterErr) {
@@ -1173,7 +1191,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
       await callSimgosApi("update_status", { 
         row: px.rowNumber, 
         type: "pasien", 
-        status: "Terkirim",
+        status: "Terkirim", 
         mode: modeH,
         no_lid: resolvedLid
       });
@@ -1243,8 +1261,8 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
         await callSimgosApi("update_status", { 
           row: px.rowNumber, 
           type: "dokter", 
-          status: "Terkirim",
-          mode: modeH
+          status: "Terkirim", 
+          mode: modeH 
         });
       } catch (err) {}
     }
@@ -1384,8 +1402,9 @@ export default function setupMessageHandler(sock) {
                              `* !autofollowup on/off* - Pengaturan status blast harian otomatis\n` +
                              `* !setjamfollowup* <HH:mm> - Ubah jam blast harian\n\n` +
 
-                             `*🧠 KREDENSIAL AI (DARI SHEET 'SETTING'):*\n` +
-                             `* !getprompt* - Cek System Prompt AI aktif & status API Key\n` +
+                             `*🧠 KREDENSIAL AI & 9ROUTER GATEWAY:*\n` +
+                             `* !test9router* - 🧪 Uji koneksi langsung ke 9Router VPS & latensi respon\n` +
+                             `* !getprompt* - Cek status 9Router VPS, Prompt aktif & API Key\n` +
                              `* !clearpromptcache* - Refresh cache prompt, template & API Key terbaru\n\n` +
 
                              `*⚙️ UTILITAS:* \n` +
@@ -1395,6 +1414,33 @@ export default function setupMessageHandler(sock) {
 
                              `_💬 Rumah Sakit Resmi: *RSKD Gigi dan Mulut Prov. Sulsel*._`;
             await sock.sendMessage(senderInfo.targetJid, { text: menuText }, { quoted: msg });
+            return;
+
+          case 'test9router':
+          case 'ping9router':
+          case 'cek9router':
+            await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Menghubungkan dan menguji respon 9Router VPS (43.134.43.146:20128)..._" }, { quoted: msg });
+            try {
+              const cfgNow = await fetchSystemAIConfig();
+              const startT = Date.now();
+              const testReply = await ask9RouterClinic(
+                [{ role: 'user', parts: [{ text: 'Tes koneksi 9router vps rskdgm. Jawab singkat padat 1 kalimat.' }] }],
+                'Anda adalah asisten AI RSKD Gigi dan Mulut Prov. Sulsel.',
+                cfgNow
+              );
+              const latensi = Date.now() - startT;
+              await sock.sendMessage(senderInfo.targetJid, {
+                text: `✅ *KONEKSI 9ROUTER VPS SUKSES!*\n\n` +
+                      `🌐 *Endpoint:* \`${cfgNow.nineRouterUrl}\`\n` +
+                      `🤖 *Model:* \`${cfgNow.nineRouterModel}\`\n` +
+                      `⚡ *Latensi Respon:* ${latensi} ms\n\n` +
+                      `💬 *Balasan Model:*\n"${testReply}"`
+              }, { quoted: msg });
+            } catch (err9Test) {
+              await sock.sendMessage(senderInfo.targetJid, {
+                text: `❌ *Koneksi 9Router Gagal:*\n${err9Test.message}\n\n_Pastikan PM2 9router online di VPS dan port 20128 aktif di UFW._`
+              }, { quoted: msg });
+            }
             return;
 
           case 'converstalltolid':
@@ -1902,12 +1948,14 @@ export default function setupMessageHandler(sock) {
             const groqMasked = activeCfg.groqApiKey ? `${activeCfg.groqApiKey.substring(0, 8)}...${activeCfg.groqApiKey.slice(-4)}` : "TIDAK TERPASANG";
 
             await sock.sendMessage(senderInfo.targetJid, { 
-              text: `📋 *SYSTEM PROMPT AKTIF DARI SHEET 'CUSTOM_PROMPT':*\n\n"${activeCfg.prompt}"\n\n` +
-                    `🤖 *KREDENSIAL AI AKTIF (DARI SHEET 'SETTING'):*\n` +
-                    `• Model Gemini Utama: *${activeCfg.geminiModel}* (${geminiMasked})\n` +
-                    `• Model Fallback Groq: *${activeCfg.groqModel}* (${groqMasked})\n` +
+              text: `📋 *SYSTEM PROMPT AKTIF (RSKD GIGI DAN MULUT PROV. SULSEL):*\n\n"${activeCfg.prompt}"\n\n` +
+                    `🤖 *KREDENSIAL AI & GATEWAY MULTI-TIER:*\n` +
+                    `• Engine Utama (VPS 9Router): *${activeCfg.nineRouterUrl}*\n` +
+                    `• Model 9Router: *${activeCfg.nineRouterModel}* (Auth: ${activeCfg.nineRouterApiKey})\n` +
+                    `• Cadangan 1 (Gemini Direct): *${activeCfg.geminiModel}* (${geminiMasked})\n` +
+                    `• Cadangan 2 (Groq AI): *${activeCfg.groqModel}* (${groqMasked})\n` +
                     `• Total Template Tersinkron: *${Object.keys(activeCfg.templates).length} Template*\n\n` +
-                    `_Ketik *!clearpromptcache* jika Anda baru saja mengubah setting di Spreadsheet._`
+                    `_Ketik *!test9router* untuk memeriksa koneksi ke VPS atau *!clearpromptcache* untuk merefresh data._`
             }, { quoted: msg });
             return;
 
@@ -1924,7 +1972,7 @@ export default function setupMessageHandler(sock) {
               geminiModel: 'gemini-3.5-flash',
               groqApiKey: '',
               groqModel: 'openai/gpt-oss-120b',
-              nineRouterUrl: process.env.NINEROUTER_URL || 'http://127.0.0.1:20128/v1/chat/completions',
+              nineRouterUrl: normalize9RouterUrl(process.env.NINEROUTER_URL),
               nineRouterApiKey: process.env.NINEROUTER_API_KEY || '9router',
               nineRouterModel: process.env.NINEROUTER_MODEL || 'auto',
               doctors: [],
@@ -1939,7 +1987,7 @@ export default function setupMessageHandler(sock) {
             }
             await prewarmDoctorAndOwnerLids(sock);
             await convertAllPatientsToLid(sock, true);
-            await sock.sendMessage(senderInfo.targetJid, { text: "🔄 Seluruh Cache Prompt, Template, Data Pasien & Sesi Obrolan berhasil disegarkan!" }, { quoted: msg });
+            await sock.sendMessage(senderInfo.targetJid, { text: "🔄 Seluruh Cache Prompt, Template, Data Pasien & Konfigurasi 9Router VPS berhasil disegarkan!" }, { quoted: msg });
             return;
 
           case 'ping':
@@ -2160,7 +2208,7 @@ export default function setupMessageHandler(sock) {
         return;
       }
 
-      // JALUR 3: PERCAKAPAN UMUM, TANYA NOMOR RM & KONSULTASI GIGI DENGAN AI SUPER SMART
+      // JALUR 3: PERCAKAPAN UMUM, TANYA NOMOR RM & KONSULTASI GIGI DENGAN AI
       const sessionKey = senderInfo.id || senderInfo.targetJid;
       let userSession = conversationSessions.get(sessionKey);
       if (!userSession) {
@@ -2186,7 +2234,7 @@ export default function setupMessageHandler(sock) {
       try {
         rawAiResponse = await askAIClinicUnified(userSession.history, patientData, pushName, senderInfo);
       } catch (aiErr) {
-        console.error("[Dual AI Fatal Error]", aiErr.message);
+        console.error("[Multi-Gateway AI Fatal Error]", aiErr.message);
         const witaTime = getWitaTimeGreeting();
         if (patientData && patientData.noRm) {
           let hasResched = (patientData.tglReschedule && patientData.tglReschedule !== "-");
