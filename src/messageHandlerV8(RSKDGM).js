@@ -268,7 +268,7 @@ let cachedSystemConfig = {
     nineRouterModel: sanitize9RouterModel(process.env.NINEROUTER_MODEL || 'gemini-3.8-flash'),
     nineRouterFallbackModel: sanitize9RouterModel(process.env.NINEROUTER_FALLBACK_MODEL || 'ag/gemini-3.8-flash-high'),
     doctors: [],
-    delayChat: 30,
+    delayChat: 60,
     timestamp: 0
 };
 const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -488,7 +488,7 @@ async function fetchSystemAIConfig() {
                 nineRouterModel: sanitize9RouterModel(process.env.NINEROUTER_MODEL || res.aiConfig?.nineRouterModel || cachedSystemConfig.nineRouterModel || 'gemini-3.8-flash'),
                 nineRouterFallbackModel: sanitize9RouterModel(process.env.NINEROUTER_FALLBACK_MODEL || res.aiConfig?.nineRouterFallbackModel || cachedSystemConfig.nineRouterFallbackModel || 'ag/gemini-3.8-flash-high'),
                 doctors: res.config?.doctors || [],
-                delayChat: parseInt(res.config?.delayChat || res.delay_chat || cachedSystemConfig.delayChat || 30, 10),
+                delayChat: parseInt(res.config?.delayChat || res.delay_chat || cachedSystemConfig.delayChat || 60, 10),
                 timestamp: now
             };
             return cachedSystemConfig;
@@ -1176,7 +1176,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
     if (listPasien.length === 0) return resultLog;
 
     const sysConfig = await fetchSystemAIConfig();
-    const delaySeconds = parseInt(followupData?.delay_chat || sysConfig?.delayChat, 10) || 30;
+    const delaySeconds = parseInt(followupData?.delay_chat || sysConfig?.delayChat, 10) || 60;
     const effectiveDelayMs = overrideToSender ? 3000 : (delaySeconds * 1000);
 
     for (let pxIndex = 0; pxIndex < listPasien.length; pxIndex++) {
@@ -1254,7 +1254,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
                 });
             }
 
-            // Jeda Anti-Spam (Default 30 Detik dari Sheet 'SETTING') antar pasien jika masih ada pasien berikutnya
+            // Jeda Anti-Spam (Default 60 Detik dari Sheet 'SETTING') antar pasien jika masih ada pasien berikutnya
             if (pxIndex < listPasien.length - 1) {
                 const countdownSec = overrideToSender ? 3 : delaySeconds;
                 console.log(`[Anti-Spam Delay] Menunggu jeda ${countdownSec} detik sebelum pengiriman ke pasien berikutnya...`);
@@ -1273,7 +1273,15 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
         ? followupData.doctors.map(d => sanitizeNumber(d.wa)).filter(Boolean)
         : DOKTER_JID_LIST;
 
-    for (const docJid of targetDoctors) {
+    // Jeda Anti-Spam (Default 60 Detik dari Sheet 'SETTING') sebelum mengirimkan laporan ke Dokter/DPJP
+    if (resultLog.pasienTerkirim > 0) {
+        const docPreDelaySec = overrideToSender ? 3 : delaySeconds;
+        console.log(`[Anti-Spam Delay] Menunggu jeda ${docPreDelaySec} detik sebelum mengirimkan laporan rekap ke DPJP/Dokter...`);
+        await new Promise(r => setTimeout(r, effectiveDelayMs));
+    }
+
+    for (let docIdx = 0; docIdx < targetDoctors.length; docIdx++) {
+        const docJid = targetDoctors[docIdx];
         try {
             let rekapDokter = `📋 *LAPORAN FOLLOW-UP KONTROL PASIEN (${modeH.toUpperCase()})*\n` +
                 `🏥 *${sysConfig.instansi}*\n` +
@@ -1296,9 +1304,26 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
                 rekapDokter += `\n_Pesan otomatis telah terkirim hanya kepada pasien dengan status Rujukan Aktif._ 🙏`;
             }
 
+            // Simulasi Mengetik Manusiawi (Humanized Typing Presence) untuk Dokter
+            try {
+                await sock.sendPresenceUpdate('composing', docJid);
+                await new Promise(r => setTimeout(r, 1200));
+            } catch (pErr) { }
+
             await sock.sendMessage(docJid, { text: rekapDokter });
+
+            try {
+                await sock.sendPresenceUpdate('paused', docJid);
+            } catch (pErr) { }
+
             resultLog.laporanDokterTerkirim++;
-            await new Promise(r => setTimeout(r, 1000));
+
+            // Jeda Anti-Spam (Default 60 Detik dari Sheet 'SETTING') antar dokter jika ada lebih dari 1 dokter
+            if (docIdx < targetDoctors.length - 1) {
+                const docCountdownSec = overrideToSender ? 3 : delaySeconds;
+                console.log(`[Anti-Spam Delay] Menunggu jeda ${docCountdownSec} detik sebelum mengirim ke dokter berikutnya...`);
+                await new Promise(r => setTimeout(r, effectiveDelayMs));
+            }
         } catch (docErr) {
             console.error(`[Gagal Kirim Dokter ${modeH.toUpperCase()}] ${docJid}:`, docErr);
             resultLog.laporanDokterGagal++;
@@ -1452,7 +1477,7 @@ export default function setupMessageHandler(sock) {
                             `* !templatesimgos* - Cek template format pesan WhatsApp\n` +
                             `* !autofollowup on/off* - Pengaturan status blast harian otomatis\n` +
                             `* !setjamfollowup* <HH:mm> - Ubah jam blast harian\n` +
-                            `* !setdelaychat* <detik> - ⏳ Ubah jeda anti-spam blast (default 30 detik)\n\n` +
+                            `* !setdelaychat* <detik> - ⏳ Ubah jeda anti-spam blast (default 60 detik / pasien & dokter)\n\n` +
 
                             `*🧠 KREDENSIAL AI & 9ROUTER MULTI-GATEWAY:*\n` +
                             `* !test9router* [model/ag] - 🧪 Uji respon AI (ketik '!test9router ag' untuk tes Antigravity)\n` +
@@ -1722,10 +1747,10 @@ export default function setupMessageHandler(sock) {
 
                         const modesToRun = isAllModes ? ["h2", "h1"] : [modeHNow];
                         const sysCfgNow = await fetchSystemAIConfig();
-                        const delaySecInfo = sysCfgNow.delayChat || 30;
+                        const delaySecInfo = sysCfgNow.delayChat || 60;
                         const infoNotice = toSender
                             ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data (${modesToRun.map(m => m.toUpperCase()).join(" & ")})... ⚠️ *Mode Simulasi:* Pesan dialihkan ke WhatsApp Anda (*${senderInfo.id}*).`
-                            : `⚡ *[FOLLOWUP NOW]* Memulai pengiriman instan (${modesToRun.map(m => m.toUpperCase()).join(" & ")}) ke nomor pasien...\n⏳ *Jeda Anti-Spam:* ${delaySecInfo} detik/pasien (Rujukan Habis otomatis diskip).`;
+                            : `⚡ *[FOLLOWUP NOW]* Memulai pengiriman instan (${modesToRun.map(m => m.toUpperCase()).join(" & ")}) ke nomor pasien...\n⏳ *Jeda Anti-Spam:* ${delaySecInfo} detik / pasien & dokter (Rujukan Habis otomatis diskip).`;
 
                         await sock.sendMessage(senderInfo.targetJid, { text: infoNotice }, { quoted: msg });
 
@@ -1842,9 +1867,9 @@ export default function setupMessageHandler(sock) {
                         }
 
                         const sysCfgGass = await fetchSystemAIConfig();
-                        const delaySecGass = sysCfgGass.delayChat || 30;
+                        const delaySecGass = sysCfgGass.delayChat || 60;
                         await sock.sendMessage(senderInfo.targetJid, { 
-                            text: `🚀 _Memulai pengiriman pesan WhatsApp massal (${modeHGass.toUpperCase()})..._\n⏳ *Jeda Anti-Spam:* ${delaySecGass} detik/pasien agar aman dari pemblokiran WA.` 
+                            text: `🚀 _Memulai pengiriman pesan WhatsApp massal (${modeHGass.toUpperCase()})..._\n⏳ *Jeda Anti-Spam:* ${delaySecGass} detik / pasien & dokter agar aman dari pemblokiran WA.` 
                         }, { quoted: msg });
                         try {
                             const blastResult = await executeFollowupBlast(sock, remoteJid, tglKirim, toSenderGass, modeHGass);
@@ -1975,7 +2000,7 @@ export default function setupMessageHandler(sock) {
                                 let txtCfg = `⚙️ *KONFIGURASI SISTEM SIMGOS KONTROL*\n\n` +
                                     `🕒 Jam Auto Blast: *${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA*\n` +
                                     `🔄 Status Auto Follow-up: *${botSettings.autoFollowupSimgos ? 'AKTIF (ON)' : 'NONAKTIF (OFF)'}*\n` +
-                                    `⏳ Jeda Anti-Spam Blast: *${c.delayChat || 30} Detik / Pasien*\n` +
+                                    `⏳ Jeda Anti-Spam Blast: *${c.delayChat || 60} Detik / Pasien & Dokter*\n` +
                                     `🏥 Instansi: ${c.instansi}\n` +
                                     `🦷 Poli: ${c.poli}\n\n` +
                                     `*Dokter DPJP Terdaftar:*\n`;
@@ -2021,7 +2046,7 @@ export default function setupMessageHandler(sock) {
                     case 'delaychat':
                         if (args.length === 0 || isNaN(parseInt(args[0], 10))) {
                             await sock.sendMessage(senderInfo.targetJid, {
-                                text: `⚠️ Format salah!\nGunakan format: *!setdelaychat <detik>*\nContoh: *!setdelaychat 30* (Disarankan 25-45 detik agar aman dari spam WA).`
+                                text: `⚠️ Format salah!\nGunakan format: *!setdelaychat <detik>*\nContoh: *!setdelaychat 60* (Disarankan 45-60 detik agar aman dari spam WA).`
                             }, { quoted: msg });
                             break;
                         }
@@ -2030,7 +2055,7 @@ export default function setupMessageHandler(sock) {
                             await callSimgosApi("update_setting", { param: "DELAY_CHAT", value: String(newDelaySec) });
                             cachedSystemConfig.delayChat = newDelaySec;
                             await sock.sendMessage(senderInfo.targetJid, {
-                                text: `✅ *JEDA ANTI-SPAM CHAT BLAST BERHASIL DIUPDATE!*\n\n⏳ *Delay Baru:* *${newDelaySec} detik* antar pasien.\n💾 *Penyimpanan:* Tersimpan di Sheet 'SETTING' (Parameter: DELAY_CHAT).`
+                                text: `✅ *JEDA ANTI-SPAM CHAT BLAST BERHASIL DIUPDATE!*\n\n⏳ *Delay Baru:* *${newDelaySec} detik* / pasien & dokter.\n💾 *Penyimpanan:* Tersimpan di Sheet 'SETTING' (Parameter: DELAY_CHAT).`
                             }, { quoted: msg });
                         } catch (errDelay) {
                             await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal memperbarui delay di Sheet:* ${errDelay.message}` }, { quoted: msg });
@@ -2073,7 +2098,7 @@ export default function setupMessageHandler(sock) {
                             nineRouterModel: sanitize9RouterModel(process.env.NINEROUTER_MODEL || 'gemini-3.8-flash'),
                             nineRouterFallbackModel: sanitize9RouterModel(process.env.NINEROUTER_FALLBACK_MODEL || 'ag/gemini-3.8-flash-high'),
                             doctors: [],
-                            delayChat: 30,
+                            delayChat: 60,
                             timestamp: 0
                         };
                         lidToPhoneMap.clear();
