@@ -45,6 +45,18 @@ function normalize9RouterUrl(rawUrl) {
   return url;
 }
 
+// Sanitizer Cerdas Nama Model (Membersihkan string kurung yang merusak URL Google)
+function sanitize9RouterModel(rawModel) {
+  let model = String(rawModel || 'auto').trim();
+  // Hilangkan tanda kurung beserta isinya seperti (high), (low), (preview)
+  model = model.replace(/\s*\([^)]*\)/g, '').trim();
+  // Hilangkan awalan berulang jika ada
+  if (model.startsWith('gemini/gemini/')) {
+    model = model.replace('gemini/gemini/', 'gemini/');
+  }
+  return model || 'auto';
+}
+
 // =========================================================================
 // SMART BIDIRECTIONAL RESOLVER & TEMPORARY CACHE (TTL REAL-TIME 30 DETIK)
 // =========================================================================
@@ -252,8 +264,9 @@ let cachedSystemConfig = {
   groqApiKey: '',
   groqModel: 'openai/gpt-oss-120b',
   nineRouterUrl: normalize9RouterUrl(process.env.NINEROUTER_URL),
-  nineRouterApiKey: process.env.NINEROUTER_API_KEY || '9router',
-  nineRouterModel: process.env.NINEROUTER_MODEL || 'auto',
+  nineRouterApiKey: (process.env.NINEROUTER_API_KEY || '9router').trim().replace(/^["']|["']$/g, ''),
+  nineRouterModel: sanitize9RouterModel(process.env.NINEROUTER_MODEL || 'gemini-3.8-flash'),
+  nineRouterFallbackModel: sanitize9RouterModel(process.env.NINEROUTER_FALLBACK_MODEL || 'ag/gemini-3.8-flash-high'),
   doctors: [],
   timestamp: 0
 };
@@ -470,8 +483,9 @@ async function fetchSystemAIConfig() {
         groqApiKey: res.aiConfig?.groqApiKey || cachedSystemConfig.groqApiKey,
         groqModel: res.aiConfig?.groqModel || "openai/gpt-oss-120b",
         nineRouterUrl: normalize9RouterUrl(process.env.NINEROUTER_URL || res.aiConfig?.nineRouterUrl || cachedSystemConfig.nineRouterUrl),
-        nineRouterApiKey: process.env.NINEROUTER_API_KEY || res.aiConfig?.nineRouterApiKey || cachedSystemConfig.nineRouterApiKey || '9router',
-        nineRouterModel: process.env.NINEROUTER_MODEL || res.aiConfig?.nineRouterModel || cachedSystemConfig.nineRouterModel || 'auto',
+        nineRouterApiKey: (process.env.NINEROUTER_API_KEY || res.aiConfig?.nineRouterApiKey || cachedSystemConfig.nineRouterApiKey || '9router').trim().replace(/^["']|["']$/g, ''),
+        nineRouterModel: sanitize9RouterModel(process.env.NINEROUTER_MODEL || res.aiConfig?.nineRouterModel || cachedSystemConfig.nineRouterModel || 'gemini-3.8-flash'),
+        nineRouterFallbackModel: sanitize9RouterModel(process.env.NINEROUTER_FALLBACK_MODEL || res.aiConfig?.nineRouterFallbackModel || cachedSystemConfig.nineRouterFallbackModel || 'ag/gemini-3.8-flash-high'),
         doctors: res.config?.doctors || [],
         timestamp: now
       };
@@ -841,14 +855,18 @@ async function fetchPatientsByRujukanStatus(statusType) {
 }
 
 // =========================================================================
-// ENGINE 1 (UTAMA): 9ROUTER AI GATEWAY (OPENAI-COMPATIBLE ENDPOINT)
-// VPS: 43.134.43.146:20128 -> Menghubungkan ke Berbagai Provider AI
+// ENGINE 1 (UTAMA): 9ROUTER MULTI-TIER GATEWAY (GEMINI DIRECT -> ANTIGRAVITY -> AUTO)
 // =========================================================================
-async function ask9RouterClinic(conversationHistory, systemPromptText, aiConfig) {
+async function ask9RouterClinic(conversationHistory, systemPromptText, aiConfig, customModelOverride = null) {
   const rawUrl = aiConfig.nineRouterUrl || process.env.NINEROUTER_URL || "http://43.134.43.146:20128/v1/chat/completions";
   const endpoint = normalize9RouterUrl(rawUrl);
-  const apiKey = aiConfig.nineRouterApiKey || process.env.NINEROUTER_API_KEY || "9router";
-  const model = aiConfig.nineRouterModel || process.env.NINEROUTER_MODEL || "auto";
+  const apiKey = (aiConfig.nineRouterApiKey || process.env.NINEROUTER_API_KEY || "9router").trim().replace(/^["']|["']$/g, '');
+  
+  // Model Cascading Pipeline
+  const primaryModel = sanitize9RouterModel(customModelOverride || aiConfig.nineRouterModel || process.env.NINEROUTER_MODEL || 'gemini-3.8-flash');
+  const antigravityFallback = sanitize9RouterModel(aiConfig.nineRouterFallbackModel || process.env.NINEROUTER_FALLBACK_MODEL || 'ag/gemini-3.8-flash-high');
+
+  const modelsPipeline = [primaryModel, antigravityFallback, 'auto'].filter((v, i, a) => v && a.indexOf(v) === i);
 
   const openAiMessages = [
     { role: "system", content: systemPromptText }
@@ -862,41 +880,49 @@ async function ask9RouterClinic(conversationHistory, systemPromptText, aiConfig)
     }
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  let last9RouterErr = null;
 
-  try {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: openAiMessages,
-        temperature: 0.2,
-        max_tokens: 2048
-      }),
-      signal: controller.signal
-    });
+  for (const targetModel of modelsPipeline) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 35000);
 
-    clearTimeout(timeoutId);
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify({
+          model: targetModel,
+          messages: openAiMessages,
+          temperature: 0.2,
+          max_tokens: 2048
+        }),
+        signal: controller.signal
+      });
 
-    if (!res.ok) {
-      const errBody = await res.text();
-      throw new Error(`9Router (${res.status} at ${endpoint}): ${errBody}`);
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        const errBody = await res.text();
+        throw new Error(`[${targetModel}] ${res.status}: ${errBody}`);
+      }
+
+      const data = await res.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (!reply || !reply.trim()) throw new Error(`[${targetModel}] Respon kosong`);
+      
+      return { reply: reply.trim(), resolvedModel: targetModel };
+    } catch (err) {
+      clearTimeout(timeoutId);
+      last9RouterErr = err;
+      console.warn(`[9Router Multi-Cascade Failover] Model ${targetModel} gagal: ${err.message}. Mencoba model berikutnya...`);
     }
-
-    const data = await res.json();
-    const reply = data.choices?.[0]?.message?.content;
-    if (!reply || !reply.trim()) throw new Error("Respon dari 9Router VPS kosong.");
-    return reply.trim();
-  } catch (err) {
-    clearTimeout(timeoutId);
-    throw err;
   }
+
+  throw last9RouterErr || new Error("Semua rute model 9Router (Gemini & Antigravity) gagal.");
 }
 
 // =========================================================================
@@ -1023,7 +1049,7 @@ async function askGroqClinic(conversationHistory, systemPromptText, aiConfig) {
 }
 
 // =========================================================================
-// UNIFIED INTELLIGENT AI WITH 3-TIER MULTI-GATEWAY (9ROUTER -> GEMINI -> GROQ)
+// UNIFIED INTELLIGENT AI (9ROUTER CASCADE -> GEMINI DIRECT -> GROQ AI)
 // =========================================================================
 async function askAIClinicUnified(conversationHistory, patientContext = null, senderPushName = "Pasien", senderInfo = null) {
   const aiConfig = await fetchSystemAIConfig();
@@ -1089,17 +1115,18 @@ PETUNJUK: Berikan salam formal birokratis dan persilakan pengirim menginformasik
 
   let finalReply = "";
 
-  // 1. Prioritas Utama: 9Router AI Gateway VPS
+  // 1. Prioritas Utama: 9Router Gateway (Gemini Direct -> Antigravity OAuth -> Auto)
   try {
-    finalReply = await ask9RouterClinic(conversationHistory, systemPromptText, aiConfig);
+    const result = await ask9RouterClinic(conversationHistory, systemPromptText, aiConfig);
+    finalReply = result.reply;
   } catch (nineRouterErr) {
-    console.warn(`[9Router Failover -> Beralih ke Gemini Direct]`, nineRouterErr.message);
+    console.warn(`[9Router Failover -> Beralih ke Gemini Direct Google AI Studio]`, nineRouterErr.message);
     // 2. Cadangan 1: Google AI Studio Gemini Direct
     try {
       finalReply = await askGeminiClinic(conversationHistory, systemPromptText, aiConfig);
     } catch (geminiErr) {
-      console.warn(`[Gemini Failover -> Beralih ke Groq AI]`, geminiErr.message);
-      // 3. Cadangan 2: Groq AI
+      console.warn(`[Gemini Direct Failover -> Beralih ke Groq AI]`, geminiErr.message);
+      // 3. Cadangan 2: Groq AI Multi-model
       finalReply = await askGroqClinic(conversationHistory, systemPromptText, aiConfig);
     }
   }
@@ -1402,9 +1429,9 @@ export default function setupMessageHandler(sock) {
                              `* !autofollowup on/off* - Pengaturan status blast harian otomatis\n` +
                              `* !setjamfollowup* <HH:mm> - Ubah jam blast harian\n\n` +
 
-                             `*🧠 KREDENSIAL AI & 9ROUTER GATEWAY:*\n` +
-                             `* !test9router* - 🧪 Uji koneksi langsung ke 9Router VPS & latensi respon\n` +
-                             `* !getprompt* - Cek status 9Router VPS, Prompt aktif & API Key\n` +
+                             `*🧠 KREDENSIAL AI & 9ROUTER MULTI-GATEWAY:*\n` +
+                             `* !test9router* [model/ag] - 🧪 Uji respon AI (ketik '!test9router ag' untuk tes Antigravity)\n` +
+                             `* !getprompt* - Cek status 9Router VPS, Antigravity, Prompt & API Key\n` +
                              `* !clearpromptcache* - Refresh cache prompt, template & API Key terbaru\n\n` +
 
                              `*⚙️ UTILITAS:* \n` +
@@ -1419,26 +1446,41 @@ export default function setupMessageHandler(sock) {
           case 'test9router':
           case 'ping9router':
           case 'cek9router':
-            await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Menghubungkan dan menguji respon 9Router VPS (43.134.43.146:20128)..._" }, { quoted: msg });
+            let overrideModelTest = null;
+            if (args[0]) {
+              const argModel = args[0].toLowerCase();
+              if (argModel === 'ag' || argModel === 'antigravity') {
+                overrideModelTest = 'ag/gemini-3.8-flash-high';
+              } else if (argModel === 'gemini') {
+                overrideModelTest = 'gemini-3.8-flash';
+              } else if (argModel === 'auto') {
+                overrideModelTest = 'auto';
+              } else {
+                overrideModelTest = args[0];
+              }
+            }
+
+            await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Menghubungkan ke 9Router VPS (Model: ${overrideModelTest || 'Auto Cascade'})..._` }, { quoted: msg });
             try {
               const cfgNow = await fetchSystemAIConfig();
               const startT = Date.now();
-              const testReply = await ask9RouterClinic(
+              const testResult = await ask9RouterClinic(
                 [{ role: 'user', parts: [{ text: 'Tes koneksi 9router vps rskdgm. Jawab singkat padat 1 kalimat.' }] }],
                 'Anda adalah asisten AI RSKD Gigi dan Mulut Prov. Sulsel.',
-                cfgNow
+                cfgNow,
+                overrideModelTest
               );
               const latensi = Date.now() - startT;
               await sock.sendMessage(senderInfo.targetJid, {
                 text: `✅ *KONEKSI 9ROUTER VPS SUKSES!*\n\n` +
                       `🌐 *Endpoint:* \`${cfgNow.nineRouterUrl}\`\n` +
-                      `🤖 *Model:* \`${cfgNow.nineRouterModel}\`\n` +
+                      `🤖 *Model Terjawab:* \`${testResult.resolvedModel}\`\n` +
                       `⚡ *Latensi Respon:* ${latensi} ms\n\n` +
-                      `💬 *Balasan Model:*\n"${testReply}"`
+                      `💬 *Balasan Model:*\n"${testResult.reply}"`
               }, { quoted: msg });
             } catch (err9Test) {
               await sock.sendMessage(senderInfo.targetJid, {
-                text: `❌ *Koneksi 9Router Gagal:*\n${err9Test.message}\n\n_Pastikan PM2 9router online di VPS dan port 20128 aktif di UFW._`
+                text: `❌ *Koneksi 9Router Gagal:*\n${err9Test.message}\n\n💡 *Tips:* Ketik *!test9router ag* untuk menguji jalur Antigravity OAuth secara langsung.`
               }, { quoted: msg });
             }
             return;
@@ -1949,13 +1991,14 @@ export default function setupMessageHandler(sock) {
 
             await sock.sendMessage(senderInfo.targetJid, { 
               text: `📋 *SYSTEM PROMPT AKTIF (RSKD GIGI DAN MULUT PROV. SULSEL):*\n\n"${activeCfg.prompt}"\n\n` +
-                    `🤖 *KREDENSIAL AI & GATEWAY MULTI-TIER:*\n` +
+                    `🤖 *KREDENSIAL AI & MULTI-CASCADE PIPELINE:*\n` +
                     `• Engine Utama (VPS 9Router): *${activeCfg.nineRouterUrl}*\n` +
-                    `• Model 9Router: *${activeCfg.nineRouterModel}* (Auth: ${activeCfg.nineRouterApiKey})\n` +
+                    `• Model Utama: *${activeCfg.nineRouterModel}*\n` +
+                    `• Model Fallback Antigravity: *${activeCfg.nineRouterFallbackModel}*\n` +
                     `• Cadangan 1 (Gemini Direct): *${activeCfg.geminiModel}* (${geminiMasked})\n` +
                     `• Cadangan 2 (Groq AI): *${activeCfg.groqModel}* (${groqMasked})\n` +
-                    `• Total Template Tersinkron: *${Object.keys(activeCfg.templates).length} Template*\n\n` +
-                    `_Ketik *!test9router* untuk memeriksa koneksi ke VPS atau *!clearpromptcache* untuk merefresh data._`
+                    `• Total Template: *${Object.keys(activeCfg.templates).length} Template*\n\n` +
+                    `_Ketik *!test9router* untuk memeriksa koneksi atau *!test9router ag* untuk menguji Antigravity._`
             }, { quoted: msg });
             return;
 
@@ -1973,8 +2016,9 @@ export default function setupMessageHandler(sock) {
               groqApiKey: '',
               groqModel: 'openai/gpt-oss-120b',
               nineRouterUrl: normalize9RouterUrl(process.env.NINEROUTER_URL),
-              nineRouterApiKey: process.env.NINEROUTER_API_KEY || '9router',
-              nineRouterModel: process.env.NINEROUTER_MODEL || 'auto',
+              nineRouterApiKey: (process.env.NINEROUTER_API_KEY || '9router').trim().replace(/^["']|["']$/g, ''),
+              nineRouterModel: sanitize9RouterModel(process.env.NINEROUTER_MODEL || 'gemini-3.8-flash'),
+              nineRouterFallbackModel: sanitize9RouterModel(process.env.NINEROUTER_FALLBACK_MODEL || 'ag/gemini-3.8-flash-high'),
               doctors: [],
               timestamp: 0
             };
@@ -1987,7 +2031,7 @@ export default function setupMessageHandler(sock) {
             }
             await prewarmDoctorAndOwnerLids(sock);
             await convertAllPatientsToLid(sock, true);
-            await sock.sendMessage(senderInfo.targetJid, { text: "🔄 Seluruh Cache Prompt, Template, Data Pasien & Konfigurasi 9Router VPS berhasil disegarkan!" }, { quoted: msg });
+            await sock.sendMessage(senderInfo.targetJid, { text: "🔄 Seluruh Cache Prompt, Template, Data Pasien & Konfigurasi 9Router VPS (Gemini & Antigravity) berhasil disegarkan!" }, { quoted: msg });
             return;
 
           case 'ping':
