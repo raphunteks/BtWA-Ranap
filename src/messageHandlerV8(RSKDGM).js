@@ -3,7 +3,7 @@ import process from 'process';
 import os from 'os';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 
-// Handler perintah eksternal pendukung
+// Handler perintah eksternal pendukun
 import handleStickerCommand from './commands/sticker.js';
 
 // =========================================================================
