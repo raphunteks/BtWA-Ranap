@@ -12,7 +12,7 @@ import handleStickerCommand from './commands/sticker.js';
 const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 
 // URL REST API Google Apps Script (GAS) SIMGOS RSKDGM
-const GAS_URL_SIMGOS = process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbzCOj9YFKEqXRfMEKBugnEhqzuC7MoJfIyc5PihST3bxmJaseaKKX9YifotK2qpT38/exec";
+const GAS_URL_SIMGOS = process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbxyhqtMxKBxrXScl39RkAoxXM2IQRYpv0Nnsgdib3eeU_sqZdPznQaaUp42aaUVPM8/exec";
 
 // Kontak WhatsApp Dokter Cadangan jika Setting Belum Terisi
 const DOKTER_JID_LIST = [
@@ -699,7 +699,7 @@ async function convertAllPatientsToLid(sock, forceAll = false) {
                 if (resolvedLid) {
                     registerIdentityMapping(resolvedLid, phoneFull);
                     p.noLid = resolvedLid;
-                    p.noSender = resolvedLid;
+                    p.noSender = phoneFull;
                     cachePatientObject(resolvedLid, p);
                     cachePatientObject(phoneFull, p);
                     cachePatientObject(p.noRm, p);
@@ -1283,6 +1283,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
                     status: "Bukan Nomor WA",
                     doctor_status: "Bukan Nomor WA",
                     mode: modeH,
+                    noSender: cleanPhone,
                     no_lid: resolvedLid
                 });
             } catch (uErr) { }
@@ -1426,6 +1427,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
                 status: patientSentSuccess ? "Terkirim" : "Gagal",
                 doctor_status: docSentSuccess ? "Terkirim" : (patientSentSuccess ? "Gagal" : "Pending"),
                 mode: modeH,
+                noSender: cleanPhone,
                 no_lid: resolvedLid
             });
         } catch (dbErr) {
@@ -1485,6 +1487,15 @@ export default function setupMessageHandler(sock) {
     setTimeout(() => {
         convertAllPatientsToLid(sock, false);
     }, 3000);
+
+    setTimeout(async () => {
+        try {
+            const fixRes = await callSimgosApi("fix_sender_columns");
+            if (fixRes && fixRes.fixedCount > 0) {
+                console.log(`[Auto-Sync Kolom O] Sukses menstandarisasi ${fixRes.fixedCount} baris Kolom O menjadi No WA Asli (628xxx)!`);
+            }
+        } catch (e) { }
+    }, 5000);
 
     if (!isIntervalStarted) {
         // 1. Scheduler Auto Blast Jam 08:30 WITA
@@ -1601,7 +1612,8 @@ export default function setupMessageHandler(sock) {
                             `* !templatesimgos* - Cek template format pesan WhatsApp\n` +
                             `* !autofollowup on/off* - Pengaturan status blast harian otomatis\n` +
                             `* !setjamfollowup* <HH:mm> - Ubah jam blast harian\n` +
-                            `* !setdelaychat* <detik> - ⏳ Ubah jeda anti-spam blast (default 60 detik / pasien & dokter)\n\n` +
+                            `* !setdelaychat* <detik> - ⏳ Ubah jeda anti-spam blast (default 60 detik / pasien & dokter)\n` +
+                            `* !fixsender* - 🛠️ Standarisasi Kolom O (No Sender) ke No WA Asli (628xxx)\n\n` +
 
                             `*🧠 KREDENSIAL AI & 9ROUTER MULTI-GATEWAY:*\n` +
                             `* !test9router* [model/ag] - 🧪 Uji respon AI (ketik '!test9router ag' untuk tes Antigravity)\n` +
@@ -2185,6 +2197,22 @@ export default function setupMessageHandler(sock) {
                             }, { quoted: msg });
                         } catch (errDelay) {
                             await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal memperbarui delay di Sheet:* ${errDelay.message}` }, { quoted: msg });
+                        }
+                    case 'fixsender':
+                    case 'syncsender':
+                        await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Menyinkronkan Kolom O (No Sender) di Google Spreadsheet ke format No WA Asli (628xxx)..._" }, { quoted: msg });
+                        try {
+                            const fixRes = await callSimgosApi("fix_sender_columns");
+                            if (fixRes && fixRes.status === "success") {
+                                await sock.sendMessage(senderInfo.targetJid, {
+                                    text: `✅ *STANDARISASI KOLOM O (NO SENDER) BERHASIL!*\n\n` +
+                                        `📊 *Total Baris Pasien Dirapikan:* ${fixRes.fixedCount} baris\n` +
+                                        `📱 *Kolom O (15):* Resmi menyimpan No WA Asli (*628xxxxxxxxxx*)\n` +
+                                        `🆔 *Kolom R (18):* Tetap aman menyimpan No LID WhatsApp (*1106...*) 📊`
+                                }, { quoted: msg });
+                            } else throw new Error(fixRes?.message || "Gagal sinkronisasi");
+                        } catch (e) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal menyinkronkan Kolom O:* ${e.message}` }, { quoted: msg });
                         }
                         return;
 
