@@ -2493,10 +2493,8 @@ export default function setupMessageHandler(sock) {
             }
 
             // JALUR 3: PERCAKAPAN UMUM, TANYA NOMOR RM & KONSULTASI GIGI DENGAN AI
-            const sessionKey = senderInfo.id || senderInfo.targetJid;
-            let userSession = conversationSessions.get(sessionKey);
             if (!userSession) {
-                userSession = { history: [], lastSeen: Date.now() };
+                userSession = conversationSessions.get(sessionKey) || { history: [], lastSeen: Date.now() };
                 conversationSessions.set(sessionKey, userSession);
             }
             userSession.lastSeen = Date.now();
