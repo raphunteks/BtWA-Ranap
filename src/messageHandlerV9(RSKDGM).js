@@ -11,8 +11,10 @@ import handleStickerCommand from './commands/sticker.js';
 // =========================================================================
 const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 
-// URL REST API SIMGOS RSKDGM (Utama: Vercel Ultra-Fast Engine, Fallback: Google Apps Script)
-const SIMGOS_API_URL = process.env.SIMGOS_API_URL || process.env.GAS_URL_SIMGOS || "https://rskdgmsimgosdb.vercel.app/api";
+// URL REST API SIMGOS RSKDGM (Utama: Vercel Ultra-Fast Engine)
+const SIMGOS_API_URL = process.env.SIMGOS_API_URL || "https://rskdgmsimgosdb.vercel.app/api";
+// URL REST API Google Apps Script (GAS) SIMGOS RSKDGM (Layer 2 Secondary / Fallback Storage)
+const GAS_URL_SIMGOS_FALLBACK = process.env.GAS_WEBAPP_URL || process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbxyhqtMxKBxrXScl39RkAoxXM2IQRYpv0Nnsgdib3eeU_sqZdPznQaaUp42aaUVPM8/exec";
 const GAS_URL_SIMGOS = SIMGOS_API_URL;
 
 // Kontak WhatsApp Dokter Cadangan jika Setting Belum Terisi
@@ -347,7 +349,8 @@ const BOT_COMMAND_SET = new Set([
     'setdelaychat', 'setdelay', 'delaychat',
     'fixsender', 'syncsender',
     'getprompt',
-    'clearpromptcache',
+    'testapirskdgm', 'testapivercel', 'testrskdgm', 'pingrskdgm',
+    'testapigas', 'testgas', 'pinggas',
     'ping',
     'runtime',
     'sticker', 's'
@@ -1750,7 +1753,9 @@ export default function setupMessageHandler(sock) {
                             `* !getprompt* - Cek status 9Router VPS, Antigravity, Prompt & API Key\n` +
                             `* !clearpromptcache* - Refresh cache prompt, template & API Key terbaru\n\n` +
 
-                            `*⚙️ UTILITAS:* \n` +
+                            `*⚙️ UTILITAS & SPEED TEST:* \n` +
+                            `* !testapirskdgm* - ⚡ Uji kecepatan & latensi REST API RSKDGM Vercel (ms)\n` +
+                            `* !testapigas* - ☁️ Uji kecepatan & latensi REST API Google Apps Script (ms)\n` +
                             `* !ping* - Cek kecepatan respon bot\n` +
                             `* !runtime* - Cek waktu aktif bot & server\n` +
                             `* !sticker* / *!s* - Konversi gambar ke stiker\n\n` +
@@ -2402,6 +2407,108 @@ export default function setupMessageHandler(sock) {
                         await prewarmDoctorAndOwnerLids(sock);
                         await convertAllPatientsToLid(sock, true);
                         await sock.sendMessage(senderInfo.targetJid, { text: "🔄 Seluruh Cache Prompt, Template, Data Pasien & Konfigurasi 9Router VPS (Gemini & Antigravity) berhasil disegarkan!" }, { quoted: msg });
+                        return;
+
+                    case 'testapirskdgm':
+                    case 'testapivercel':
+                    case 'testrskdgm':
+                    case 'pingrskdgm':
+                        await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Menguji kecepatan respon REST API RSKDGM Vercel..._` }, { quoted: msg });
+                        try {
+                            const startT = Date.now();
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+                            const pingUrl = `${SIMGOS_API_URL}?action=ping&_t=${Date.now()}`;
+                            const res = await fetch(pingUrl, {
+                                method: 'GET',
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'User-Agent': 'RSKDGM-WhatsApp-Bot-V8'
+                                },
+                                signal: controller.signal
+                            });
+                            clearTimeout(timeoutId);
+
+                            const latensi = Date.now() - startT;
+                            const textData = await res.text();
+                            let data = {};
+                            try { data = JSON.parse(textData); } catch (e) { }
+
+                            let speedCategory = "⚡⚡⚡ [ULTRA SUPER FAST]";
+                            if (latensi > 300) speedCategory = "⏳ [CLOUD LATENCY / COLD START]";
+                            else if (latensi > 100) speedCategory = "⚡ [SUPER FAST]";
+
+                            const reportMsg =
+                                `⚡ *HASIL TEST KECEPATAN REST API RSKDGM (VERCEL)* ⚡\n\n` +
+                                `⏱️ *Kecepatan Respon:* *${latensi} ms* ${speedCategory}\n` +
+                                `📶 *HTTP Status:* *${res.status} ${res.statusText || 'OK'}*\n` +
+                                `🌐 *Endpoint:* \`${SIMGOS_API_URL}\`\n\n` +
+                                `📋 *Informasi Server Portal:*\n` +
+                                `🏥 *Instansi:* ${data.instansi || 'RSKD Gigi dan Mulut Prov. Sulsel'}\n` +
+                                `🦷 *Unit:* ${data.unit || 'Poli Konservasi dan Endodonsi'}\n` +
+                                `💾 *Layer 1 (Upstash Redis):* ${data.layer1_redis || 'Active'}\n` +
+                                `☁️ *Layer 2 (Google Sheets):* ${data.layer2_gas || 'Configured'}\n` +
+                                `👥 *Total Pasien Terindeks:* *${data.totalPatients || 0} Pasien*\n` +
+                                `⚡ *Server Time:* ${data.server_time || getWitaTimeGreeting().fullWitaStr}\n\n` +
+                                `_Koneksi database RSKDGM Vercel berjalan sangat gesit dan stabil!_ 🚀`;
+
+                            await sock.sendMessage(senderInfo.targetJid, { text: reportMsg }, { quoted: msg });
+                        } catch (errApi) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `❌ *Gagal Menguji REST API RSKDGM Vercel:*\n${errApi.message}\n\n🌐 *URL:* \`${SIMGOS_API_URL}\``
+                            }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'testapigas':
+                    case 'testgas':
+                    case 'pinggas':
+                        await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Menguji kecepatan respon REST API Google Apps Script (GAS)..._` }, { quoted: msg });
+                        try {
+                            const startTGas = Date.now();
+                            const controllerGas = new AbortController();
+                            const timeoutIdGas = setTimeout(() => controllerGas.abort(), 35000);
+
+                            const gasPingUrl = `${GAS_URL_SIMGOS_FALLBACK}${GAS_URL_SIMGOS_FALLBACK.includes('?') ? '&' : '?'}action=ping&_t=${Date.now()}`;
+                            const resGas = await fetch(gasPingUrl, {
+                                method: 'GET',
+                                redirect: 'follow',
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'User-Agent': 'RSKDGM-WhatsApp-Bot-V8'
+                                },
+                                signal: controllerGas.signal
+                            });
+                            clearTimeout(timeoutIdGas);
+
+                            const latensiGas = Date.now() - startTGas;
+                            const textDataGas = await resGas.text();
+                            let dataGas = {};
+                            try { dataGas = JSON.parse(textDataGas); } catch (e) { }
+
+                            let speedCategoryGas = "⚡ [NORMAL GAS]";
+                            if (latensiGas > 3000) speedCategoryGas = "⏳ [GAS COLD START]";
+                            else if (latensiGas < 1000) speedCategoryGas = "⚡⚡ [FAST GAS]";
+
+                            const reportGasMsg =
+                                `☁️ *HASIL TEST KECEPATAN REST API GOOGLE APPS SCRIPT (GAS)* ☁️\n\n` +
+                                `⏱️ *Kecepatan Respon:* *${latensiGas} ms* ${speedCategoryGas}\n` +
+                                `📶 *HTTP Status:* *${resGas.status} ${resGas.statusText || 'OK'}*\n` +
+                                `🌐 *Endpoint:* \`${GAS_URL_SIMGOS_FALLBACK.substring(0, 60)}...\`\n\n` +
+                                `📋 *Informasi Google Spreadsheet:*\n` +
+                                `🏥 *Instansi:* ${dataGas.instansi || 'RSKD Gigi dan Mulut Prov. Sulsel'}\n` +
+                                `💾 *Penyimpanan:* Google Spreadsheet (Layer 2)\n` +
+                                `📊 *Status Service:* ${dataGas.service || 'Online'}\n` +
+                                `⚡ *Waktu Server:* ${dataGas.server_time || getWitaTimeGreeting().fullWitaStr}\n\n` +
+                                `_Gunakan REST API Vercel (!testapirskdgm) untuk performa hingga 10x lebih cepat!_ 💡`;
+
+                            await sock.sendMessage(senderInfo.targetJid, { text: reportGasMsg }, { quoted: msg });
+                        } catch (errGas) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `❌ *Gagal Menguji REST API GAS:*\n${errGas.message}\n\n🌐 *URL:* \`${GAS_URL_SIMGOS_FALLBACK}\``
+                            }, { quoted: msg });
+                        }
                         return;
 
                     case 'ping':
