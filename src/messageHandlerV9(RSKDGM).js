@@ -2484,6 +2484,11 @@ export default function setupMessageHandler(sock) {
 
                             const latensiGas = Date.now() - startTGas;
                             const textDataGas = await resGas.text();
+
+                            if (!textDataGas || textDataGas.trim().startsWith("<")) {
+                                throw new Error(`Google Apps Script mengembalikan halaman HTML. Pastikan Web App GAS di-deploy dengan akses 'Anyone' (Siapa Saja).`);
+                            }
+
                             let dataGas = {};
                             try { dataGas = JSON.parse(textDataGas); } catch (e) { }
 
