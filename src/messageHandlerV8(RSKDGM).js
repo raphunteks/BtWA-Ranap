@@ -279,7 +279,7 @@ const SESSION_TTL_MS = 45 * 60 * 1000;
 const settingsFile = `${sessionPath}/settings.json`;
 
 let botSettings = {
-    autoFollowupSimgos: true,
+    autoFollowupSimgos: false,
     autoFollowupHour: "08",
     autoFollowupMinute: "30",
     lastAutoFollowupDate: ""
@@ -294,6 +294,34 @@ if (fs.existsSync(settingsFile)) {
 function saveSettings() {
     fs.writeFileSync(settingsFile, JSON.stringify(botSettings, null, 2));
 }
+
+// DAFTAR PERINTAH RESMI BOT RSKDGM (GUARDED SET AGAR TIDAK DIJAWAB OLEH AI)
+const BOT_COMMAND_SET = new Set([
+    'menu', 'help',
+    'test9router', 'ping9router', 'cek9router',
+    'converstalltolid', 'convertalltolid', 'syncalllid', 'syncalldb', 'synclids', 'syncpasien',
+    'reschedulepx', 'rescheduleterbatalkan',
+    'cekrujukanaktif', 'rujukanaktif',
+    'cekrujukanhabis', 'rujukanhabis',
+    'bindpasien', 'linkpasien',
+    'followupnow', 'follownow',
+    'setjamfollowup',
+    'followup', 'cekfollowup',
+    'gassfollowup', 'kirimfollowup', 'gass',
+    'caripasien',
+    'reschedule',
+    'statskontrol', 'statssimgos',
+    'settingssimgos',
+    'templatesimgos',
+    'autofollowup',
+    'setdelaychat', 'setdelay', 'delaychat',
+    'fixsender', 'syncsender',
+    'getprompt',
+    'clearpromptcache',
+    'ping',
+    'runtime',
+    'sticker', 's'
+]);
 
 function cleanExpiredSessions() {
     const now = Date.now();
@@ -1129,13 +1157,15 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
 
         const hasResched = !!finalReschedDate;
         const isJknCanceled = String(patientContext.statusReschedule || "").toLowerCase().includes("terbatalkan");
+        const statusRaw = `${patientContext.statusWa || ''} ${patientContext.statusWaH2 || ''} ${patientContext.statusWaH1 || ''} ${patientContext.statusReschedule || ''}`.toLowerCase();
+        const isConfirmedHadir = statusRaw.includes("hadir") || statusRaw.includes("terkonfirmasi");
 
         systemPromptText += `\n\n[DATA RESMI REKAM MEDIS PASIEN (SIMGOS RSKDGM)]:
 - Nama Lengkap Resmi Pasien: ${patientContext.namaPasien}
 - Nomor Rekam Medis (No. RM): ${patientContext.noRm}
 - Jadwal Kontrol Semula (Awal): ${patientContext.tglKontrol}
 - Jadwal Reschedule Baru (Kolom 19): ${hasResched ? finalReschedDate : "-"}
-- Status Database: ${patientContext.statusReschedule || "-"}
+- Status Konfirmasi Kehadiran: ${isConfirmedHadir ? "HADIR (TERKONFIRMASI)" : (patientContext.statusReschedule || patientContext.statusWa || "-")}
 - Status Rujukan BPJS: ${patientContext.statusRujukan || "Rujukan Aktif"}
 - Dokter DPJP Utama: ${sysConfig.dpjpUtama}
 - Unit Kerja Pelayanan: Poli Konservasi dan Endodonsi RSKD Gigi dan Mulut Prov. Sulsel
@@ -1143,22 +1173,30 @@ async function askAIClinicUnified(conversationHistory, patientContext = null, se
 PEDOMAN TATA BAHASA & ATURAN MEDIS BIROKRATIS (MUTLAK):
 1. PENYEBUTAN NAMA LENGKAP:
    Wajib menyapa dan menyebut identitas pasien dengan sebutan kehormatan "Bapak/Ibu/Sdr(i) ${patientContext.namaPasien}" sesuai data resmi database rekam medis. Dilarang mengubah, memotong, atau menggunakan nama samaran lain.
-2. JAWABAN JADWAL KONTROL & NOMOR RM:
+2. JAWABAN JADWAL KONTROL & STATUS KONFIRMASI:
 ${hasResched ? `
    • STATUS: PASIEN TELAH MEMILIKI TANGGAL RESCHEDULE RESMI YAITU: *${finalReschedDate}*!
    • PERNYATAAN BIROKRATIS WAJIB:
      Jelaskan secara formal dan tegas bahwa jadwal kontrol semula pada tanggal ${patientContext.tglKontrol} telah resmi dialihkan/dijadwalkan ulang ke tanggal *${finalReschedDate}* bersama DPJP Utama (${sysConfig.dpjpUtama}). Nomor Rekam Medis (RM) pasien adalah ${patientContext.noRm}.
    • LARANGAN KERAS: DILARANG KERAS mengatakan "jadwal kontrol tetap dan tidak ada perubahan pada tanggal ${patientContext.tglKontrol}" karena jadwal tersebut telah resmi diperbarui di sistem SIMGOS!` :
-                isJknCanceled ? `
+isJknCanceled ? `
    • STATUS: PASIEN TERBATALKAN OTOMATIS OLEH SISTEM APLIKASI MOBILE JKN!
    • PERNYATAAN BIROKRATIS WAJIB:
-     Sampaikan bahwa jadwal kontrol semula pada tanggal ${patientContext.tglKontrol} telah tercatat terbatalkan oleh sistem aplikasi Mobile JKN. Laporan tersebut telah diteruskan secara kedinasan kepada DPJP Utama (${sysConfig.dpjpUtama}) untuk penerbitan jadwal kontrol pengganti. Pasien dimohon menunggu konfirmasi jadwal baru melalui saluran komunikasi ini.` : `
-   • STATUS: JADWAL KONTROL AKTIF BERJALAN SESUAI RENCANA.
-     Jadwal kontrol tetap terjadwal pada tanggal *${patientContext.tglKontrol}* bersama ${sysConfig.dpjpUtama} (No. RM: ${patientContext.noRm}).`}
-3. KOMPETENSI KLINIS KEDOKTERAN GIGI:
-   Jawab pertanyaan klinis seputar kesehatan gigi secara ilmiah, komprehensif, dan berbasis bukti medis (spesialisasi Konservasi Gigi/Endodonsi, Bedah Mulut, Ortodonsia, Periodonsia, Prostodonsia, Pedodonsia, Penyakit Mulut, dan Radiologi Dental). Selalu sertakan edukasi bahwa tindakan medis definitif dilakukan langsung oleh DPJP di Dental Chair.
-4. REGISTER BAHASA:
-   Gunakan gaya bahasa birokratis rumah sakit formal, santun, lugas, mengayomi, dan tertata rapi.`;
+     Sampaikan bahwa jadwal kontrol semula pada tanggal ${patientContext.tglKontrol} telah tercatat terbatalkan oleh sistem aplikasi Mobile JKN. Laporan tersebut telah diteruskan secara kedinasan kepada DPJP Utama (${sysConfig.dpjpUtama}) untuk penerbitan jadwal kontrol pengganti. Pasien dimohon menunggu konfirmasi jadwal baru melalui saluran komunikasi ini.` :
+isConfirmedHadir ? `
+   • STATUS KONFIRMASI: PASIEN TELAH RESMI MENGONFIRMASI *HADIR (TERKONFIRMASI)* DI SISTEM RSKDGM!
+   • LARANGAN MUTLAK (SANGAT PENTING): DILARANG KERAS menyuruh, meminta, atau mengulang perintah "Balas hadir konfirmasi kedatangan" kepada pasien ini! Pasien SUDAH mengonfirmasi hadir!
+   • PANDUAN RESPON: Akui dengan hangat bahwa jadwal kehadiran kontrol pada tanggal *${patientContext.tglKontrol}* bersama ${sysConfig.dpjpUtama} (No. RM: ${patientContext.noRm}) telah tercatat rapi di Poli Konservasi. Jawab langsung, fokus, cerdas, dan tuntas apa yang ditanyakan atau dikonsultasikan oleh pasien.` : `
+   • STATUS: JADWAL KONTROL AKTIF TERJADWAL PADA TANGGAL *${patientContext.tglKontrol}* BERSAMA ${sysConfig.dpjpUtama} (No. RM: ${patientContext.noRm}).
+     Jika pasien bertanya persiapan kontrol, ingatkan membawa KTP/BPJS dan kartu kontrol. Jika pasien menanyakan masalah klinis gigi, prioritaskan menjawab keluhan klinisnya terlebih dahulu secara tuntas.`}
+3. KOMPETENSI KLINIS KEDOKTERAN GIGI (SOUL OF RSKDGM DENTAL SPECIALIST):
+   Berperanlah sebagai Asisten AI Klinis Rumah Sakit Khusus Daerah Gigi dan Mulut yang cerdas, berwawasan medis spesialisasi tinggi, empatik, dan menenangkan.
+   - Pahami dengan cermat patofisiologi kedokteran gigi: Pulpitis ireversibel/reversibel, nekrosis pulpa, abses periapikal, periodontitis, gingivitis, impaksi gigi bungsu, karies profunda, tahapan Perawatan Saluran Akar (PSA / Endodonsi: ekstirpasi pulpa, preparasi biomekanis, medikamen intrakanal, obturasi gutta-percha), tambal resin komposit estetik, mahkota jaket/crown, dan perawatan gigi tiruan.
+   - Respon dengan empati mendalam bagi pasien yang merasakan nyeri gigi berdenyut, berikan saran pertolongan pertama sementara yang aman, dan tegaskan bahwa perawatan medis kuratif definitif dilakukan oleh DPJP di Dental Chair.
+4. INTEGRITAS KONTEKS & RELEVANSI INTERAKSI:
+   Jawablah secara spesifik dan terfokus pada pesan terakhir yang ditanyakan pasien. Jangan mengulang-ulang informasi yang tidak relevan dengan pertanyaan pasien.
+5. REGISTER BAHASA:
+   Gunakan bahasa Indonesia birokratis rumah sakit formal, santun, lugas, mengayomi, dan tertata rapi.`;
     } else {
         systemPromptText += `\n\n[DATA PENGIRIM CHAT]:
 - Nama Profil: ${senderPushName}
@@ -1572,7 +1610,7 @@ export default function setupMessageHandler(sock) {
                             `* !converstalltolid* - 🔄 Konversi satu-satu No WA ke Kolom 18 (No LID)\n` +
                             `* !reschedulepx terbatalkan <No.RM/Nama> <YYYY-MM-DD>* - 🔁 Jadwal ulang tgl baru & simpan Kolom 19\n` +
                             `* !followupnow* [h1/h2/all] [tgl/auto] [me] - 🚀 Kirim instan ('all' = H-2 & H-1, 'me' = kirim ke Anda)\n` +
-                            `* !followup* [h1/h2] [tgl/auto] - Cek antrean kontrol H-2 atau H-1\n` +
+                            `* !followup* [h1/h2/h3/dst] [tgl/auto] - 📋 Cek antrean pasien kontrol (mendukung H-1, H-2, H-3, dst.)\n` +
                             `* !gassfollowup* [h1/h2] [me] - Kirim WA massal ke Pasien & DPJP Utama\n` +
                             `* !cekrujukanaktif* - 📋 Lihat pasien dengan Rujukan Aktif\n` +
                             `* !cekrujukanhabis* - ⚠️ Lihat pasien dengan Rujukan Habis\n` +
@@ -1926,9 +1964,12 @@ export default function setupMessageHandler(sock) {
 
                         for (const a of args) {
                             const lowerA = a.toLowerCase();
-                            if (lowerA === 'h1') modeHFU = "h1";
-                            else if (lowerA === 'h2') modeHFU = "h2";
-                            else if (lowerA !== 'auto') tglArg = a;
+                            const hMatch = lowerA.match(/^h(\d+)$/);
+                            if (hMatch) {
+                                modeHFU = lowerA;
+                            } else if (lowerA !== 'auto') {
+                                tglArg = a;
+                            }
                         }
 
                         await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Mengambil data pasien kontrol siap follow-up (${modeHFU.toUpperCase()}) dari Google Spreadsheet..._` }, { quoted: msg });
@@ -1942,7 +1983,7 @@ export default function setupMessageHandler(sock) {
                                 break;
                             }
 
-                            let textHasil = `📋 *DAFTAR PASIEN SIAP FOLLOW-UP (${modeHFU.toUpperCase()})*\n` +
+                            let textHasil = `📋 *DAFTAR PASIEN KONTROL (${modeHFU.toUpperCase()})*\n` +
                                 `📅 *Target Kontrol:* ${resFollowup.target_control_date}\n` +
                                 `👥 *Total Pasien:* ${resFollowup.total} orang\n\n`;
 
@@ -1954,7 +1995,11 @@ export default function setupMessageHandler(sock) {
                                     `   🏥 Status WA: ${px.statusWa} | Dokter: ${px.statusDokter}\n\n`;
                             });
 
-                            textHasil += `👉 _Ketik *!followupnow ${modeHFU} me* untuk test ke Anda, atau *!followupnow ${modeHFU}* untuk blast._`;
+                            if (modeHFU === "h1" || modeHFU === "h2") {
+                                textHasil += `👉 _Ketik *!followupnow ${modeHFU} me* untuk test ke Anda, atau *!followupnow ${modeHFU}* untuk blast._`;
+                            } else {
+                                textHasil += `👉 _Catatan: Pengecekan antrean kontrol ${modeHFU.toUpperCase()}. Blast WhatsApp otomatis dikhususkan untuk H-2 dan H-1 (!followupnow h2 / !followupnow h1)._`;
+                            }
                             await sock.sendMessage(senderInfo.targetJid, { text: textHasil }, { quoted: msg });
                         } catch (e) {
                             await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal mengambil data:* ${e.message}` }, { quoted: msg });
@@ -2257,6 +2302,37 @@ export default function setupMessageHandler(sock) {
                             await handleStickerCommand(sock, msg);
                         }
                         return;
+
+                    default:
+                        await sock.sendMessage(senderInfo.targetJid, {
+                            text: `❓ *Perintah Tidak Dikenali: \`!${command}\`*\n\nKetik *!menu* atau *!help* untuk melihat daftar seluruh perintah resmi bot RSKDGM.`
+                        }, { quoted: msg });
+                        return;
+                }
+            }
+
+            // Command Guarding: Jika pesan tidak diawali '!', periksa apakah kata pertamanya adalah command di menu !help
+            // Mencegah perintah bot dijawab oleh AI secara keliru!
+            const cleanRawText = text.trim();
+            const firstWord = cleanRawText.split(/[\s\n]+/)[0]?.toLowerCase().replace(/^[!./]/, '');
+            if (firstWord && BOT_COMMAND_SET.has(firstWord)) {
+                if (firstWord === 'menu' || firstWord === 'help') {
+                    const helpHint = `*🤖 BOT KONTROL RSKDGM (H-2 & H-1 SIMGOS) 🤖*\n\n` +
+                        `*Gunakan tanda seru (!)* di awal perintah untuk menjalankan command sistem, contoh:\n` +
+                        `* !menu / !help* - Menampilkan daftar perintah\n` +
+                        `* !followup h1 / h2 / h3* - Cek antrean pasien kontrol\n` +
+                        `* !followupnow h1 / h2* - Eksekusi blast kontrol H-1 / H-2\n` +
+                        `* !statskontrol* - Cek ringkasan statistik kontrol\n` +
+                        `* !settingssimgos* - Cek status konfigurasi & DPJP\n` +
+                        `* !caripasien <Nama/RM>* - Pencarian data pasien\n\n` +
+                        `Ketik *!menu* untuk melihat panduan perintah lengkap.`;
+                    await sock.sendMessage(senderInfo.targetJid, { text: helpHint }, { quoted: msg });
+                    return;
+                } else {
+                    await sock.sendMessage(senderInfo.targetJid, {
+                        text: `⚠️ *Format Perintah Terdeteksi*\n\nAnda mengetik perintah *${firstWord}*. Untuk mengeksekusi perintah bot sistem, mohon awali dengan tanda seru (*!*):\n👉 Contoh: *!${cleanRawText}*\n\nKetik *!menu* untuk melihat daftar perintah resmi.`
+                    }, { quoted: msg });
+                    return;
                 }
             }
 
