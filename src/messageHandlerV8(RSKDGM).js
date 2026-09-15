@@ -58,10 +58,11 @@ function sanitize9RouterModel(rawModel) {
 }
 
 // =========================================================================
-// SMART BIDIRECTIONAL RESOLVER & TEMPORARY CACHE (TTL REAL-TIME 30 DETIK)
+// SMART BIDIRECTIONAL RESOLVER & PERSISTENT CACHE (TTL 24 JAM)
 // =========================================================================
 const sessionPath = './session';
 const lidCacheFile = `${sessionPath}/lid_mappings.json`;
+const patientCacheFile = `${sessionPath}/patient_cache.json`;
 
 if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
 
@@ -69,7 +70,7 @@ const lidToPhoneMap = new Map();     // Kunci: LID Digits -> Nilai: Phone Digits
 const phoneToLidMap = new Map();     // Kunci: Phone Digits (628xxx) -> Nilai: LID Digits
 const patientCacheMap = new Map();   // Kunci: Phone Digits / LID Digits / No. RM -> { data, cachedAt }
 
-const PATIENT_CACHE_TTL_MS = 30 * 1000;
+const PATIENT_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 Jam penuh untuk siklus kontrol pasien
 
 function formatToInternational(raw) {
     if (!raw && raw !== 0) return '';
@@ -92,6 +93,18 @@ if (fs.existsSync(lidCacheFile)) {
     } catch (e) { }
 }
 
+if (fs.existsSync(patientCacheFile)) {
+    try {
+        const savedPatients = JSON.parse(fs.readFileSync(patientCacheFile, 'utf-8'));
+        const now = Date.now();
+        for (const [k, v] of Object.entries(savedPatients)) {
+            if (v && v.cachedAt && (now - v.cachedAt < PATIENT_CACHE_TTL_MS)) {
+                patientCacheMap.set(k, v);
+            }
+        }
+    } catch (e) { }
+}
+
 function persistLidMappings() {
     try {
         const data = {
@@ -100,6 +113,17 @@ function persistLidMappings() {
         };
         fs.writeFileSync(lidCacheFile, JSON.stringify(data, null, 2));
     } catch (e) { }
+}
+
+let persistPatientTimer = null;
+function persistPatientCache() {
+    if (persistPatientTimer) clearTimeout(persistPatientTimer);
+    persistPatientTimer = setTimeout(() => {
+        try {
+            const obj = Object.fromEntries(patientCacheMap);
+            fs.writeFileSync(patientCacheFile, JSON.stringify(obj, null, 2));
+        } catch (e) { }
+    }, 1000);
 }
 
 function registerIdentityMapping(lidDigits, phoneDigits) {
@@ -116,17 +140,22 @@ function registerIdentityMapping(lidDigits, phoneDigits) {
 
 function cachePatientObject(key, patientObj) {
     if (!key || !patientObj) return;
-    patientCacheMap.set(key, {
+    const cleanKey = String(key).replace(/\D/g, '') || String(key).trim();
+    patientCacheMap.set(cleanKey, {
         data: patientObj,
         cachedAt: Date.now()
     });
+    persistPatientCache();
 }
 
 function getCachedPatientObject(key) {
-    if (!key || !patientCacheMap.has(key)) return null;
-    const item = patientCacheMap.get(key);
+    if (!key) return null;
+    const cleanKey = String(key).replace(/\D/g, '') || String(key).trim();
+    if (!patientCacheMap.has(cleanKey)) return null;
+    const item = patientCacheMap.get(cleanKey);
     if (Date.now() - item.cachedAt > PATIENT_CACHE_TTL_MS) {
-        patientCacheMap.delete(key);
+        patientCacheMap.delete(cleanKey);
+        persistPatientCache();
         return null;
     }
     return item.data;
@@ -604,11 +633,31 @@ async function resolveLidFromWhatsAppServer(sock, rawPhone) {
     return null;
 }
 
-// REVERSE RESOLVER
+// REVERSE RESOLVER (LID -> PHONE NUMBER)
 async function resolvePhoneFromLid(sock, rawLid) {
     const cleanLid = String(rawLid).replace(/\D/g, '');
     if (!cleanLid) return null;
 
+    // 1. Cek memory map terlebih dahulu (0ms)
+    if (lidToPhoneMap.has(cleanLid)) {
+        return lidToPhoneMap.get(cleanLid);
+    }
+
+    // 2. Cek Signal Repository dari Baileys jika tersedia
+    try {
+        if (sock?.signalRepository?.lidToJid) {
+            const jidResult = await sock.signalRepository.lidToJid(`${cleanLid}@lid`);
+            if (jidResult) {
+                const p = formatToInternational(jidResult);
+                if (p && p.length >= 8) {
+                    registerIdentityMapping(cleanLid, p);
+                    return p;
+                }
+            }
+        }
+    } catch (e) { }
+
+    // 3. Query USYNC ke server WhatsApp
     try {
         const usyncNode = {
             tag: 'iq',
@@ -632,7 +681,8 @@ async function resolvePhoneFromLid(sock, rawLid) {
                             tag: 'query',
                             attrs: {},
                             content: [
-                                { tag: 'contact', attrs: {} }
+                                { tag: 'contact', attrs: {} },
+                                { tag: 'phone', attrs: {} }
                             ]
                         },
                         {
@@ -654,9 +704,10 @@ async function resolvePhoneFromLid(sock, rawLid) {
         if (res && res.content) {
             const extractPhone = (node) => {
                 if (!node) return null;
-                if (node.tag === 'contact' && node.attrs && (node.attrs.phone || node.attrs.jid)) {
+                if (node.attrs && (node.attrs.phone || node.attrs.jid)) {
                     const raw = node.attrs.phone || node.attrs.jid;
-                    return formatToInternational(raw);
+                    const p = formatToInternational(raw);
+                    if (p && p.length >= 8 && p.length <= 15) return p;
                 }
                 if (Array.isArray(node.content)) {
                     for (const c of node.content) {
@@ -668,7 +719,10 @@ async function resolvePhoneFromLid(sock, rawLid) {
             };
 
             const foundPhone = extractPhone(res);
-            if (foundPhone) return foundPhone;
+            if (foundPhone) {
+                registerIdentityMapping(cleanLid, foundPhone);
+                return foundPhone;
+            }
         }
     } catch (e) { }
 
@@ -805,6 +859,9 @@ async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") 
     if (!matchedPatient && senderInfo.resolvedPhone) {
         matchedPatient = getCachedPatientObject(senderInfo.resolvedPhone);
     }
+    if (!matchedPatient && senderInfo.targetJid) {
+        matchedPatient = getCachedPatientObject(senderInfo.targetJid);
+    }
 
     if (matchedPatient && matchedPatient.namaPasien && matchedPatient.noRm && matchedPatient.noRm !== "-") {
         if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
@@ -828,16 +885,25 @@ async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") 
         } catch (e) { }
     }
 
-    // 3. Pencarian via Phone atau LID pengirim
+    // 3. Pencarian via Phone atau LID pengirim di Google Sheets
     if (!matchedPatient) {
-        const lookupPhone = senderInfo.resolvedPhone || (senderInfo.isLid ? lidToPhoneMap.get(senderInfo.id) : senderInfo.id);
+        let lookupPhone = senderInfo.resolvedPhone;
+        if (!lookupPhone && senderInfo.isLid && lidToPhoneMap.has(senderInfo.id)) {
+            lookupPhone = lidToPhoneMap.get(senderInfo.id);
+        } else if (!lookupPhone && !senderInfo.isLid) {
+            lookupPhone = senderInfo.id;
+        }
+
+        const cleanLookupPhone = (lookupPhone && lookupPhone.length >= 8 && lookupPhone.length <= 15)
+            ? formatToInternational(lookupPhone)
+            : "";
         const lookupLid = senderInfo.isLid ? senderInfo.id : (phoneToLidMap.get(senderInfo.id) || "");
 
         try {
             const searchRes = await callSimgosApi("search_patient", {
-                phone: lookupPhone ? formatToInternational(lookupPhone) : "",
+                phone: cleanLookupPhone,
                 lid: lookupLid || senderInfo.id,
-                query: lookupPhone || lookupLid || senderInfo.id
+                query: cleanLookupPhone || lookupLid || senderInfo.id
             });
 
             if (searchRes.status === "success" && Array.isArray(searchRes.data) && searchRes.data.length > 0) {
@@ -859,6 +925,35 @@ async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") 
                 });
                 if (searchRev.status === "success" && Array.isArray(searchRev.data) && searchRev.data.length > 0) {
                     matchedPatient = selectBestPatientCandidate(searchRev.data);
+                }
+            }
+        } catch (e) { }
+    }
+
+    // 4b. Dynamic Fallback: Jika pengirim adalah LID belum terpetakan, cek antrean kontrol aktif hari ini & H-1
+    if (senderInfo.isLid && !matchedPatient) {
+        try {
+            const [h1Res, h2Res] = await Promise.all([
+                callSimgosApi("get_followup", { mode: "h1", tgl: "auto" }).catch(() => null),
+                callSimgosApi("get_followup", { mode: "h2", tgl: "auto" }).catch(() => null)
+            ]);
+            const candidatePatients = [];
+            if (h1Res?.status === "success" && Array.isArray(h1Res.data)) candidatePatients.push(...h1Res.data);
+            if (h2Res?.status === "success" && Array.isArray(h2Res.data)) candidatePatients.push(...h2Res.data);
+
+            for (const cp of candidatePatients) {
+                const phoneCandidate = formatToInternational(cp.noHp);
+                if (!phoneCandidate || phoneCandidate.length < 8) continue;
+
+                let cLid = phoneToLidMap.get(phoneCandidate) || (cp.noLid && cp.noLid !== "-" && cp.noLid.length > 10 ? cp.noLid : null);
+                if (!cLid) {
+                    cLid = await resolveLidFromWhatsAppServer(sock, phoneCandidate);
+                }
+                if (cLid && String(cLid).replace(/\D/g, '') === String(senderInfo.id).replace(/\D/g, '')) {
+                    console.log(`[Dynamic LID Match] Pengirim ${senderInfo.id} teridentifikasi sebagai ${cp.namaPasien} (RM: ${cp.noRm}, No: ${phoneCandidate})`);
+                    matchedPatient = cp;
+                    registerIdentityMapping(senderInfo.id, phoneCandidate);
+                    break;
                 }
             }
         } catch (e) { }
@@ -1301,16 +1396,20 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
             resolvedLid = senderInfo.id;
             targetPatientJid = senderInfo.targetJid;
         } else {
+            // 1. Cek apakah LID sudah tersimpan di memory map atau di px.noLid dari sheet
+            if (phoneToLidMap.has(cleanPhone)) {
+                resolvedLid = phoneToLidMap.get(cleanPhone);
+            } else if (px.noLid && px.noLid !== "-" && px.noLid !== cleanPhone && px.noLid.length > 10) {
+                resolvedLid = String(px.noLid).replace(/\D/g, '');
+                registerIdentityMapping(resolvedLid, cleanPhone);
+            }
+
             try {
                 const waCheck = await activeSock.onWhatsApp(cleanPhone);
                 if (waCheck && waCheck.length > 0 && waCheck[0]?.exists) {
                     targetPatientJid = waCheck[0].jid || sanitizeNumber(cleanPhone);
                     if (waCheck[0].lid) {
                         resolvedLid = String(waCheck[0].lid).replace(/\D/g, '');
-                        registerIdentityMapping(resolvedLid, cleanPhone);
-                        px.noLid = resolvedLid;
-                        cachePatientObject(resolvedLid, px);
-                        cachePatientObject(cleanPhone, px);
                     }
                 } else {
                     isWaRegistered = false;
@@ -1319,7 +1418,25 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
                 targetPatientJid = sanitizeNumber(cleanPhone);
             }
 
-            if (!resolvedLid) resolvedLid = cleanPhone;
+            // 2. JIKA BELUM ADA LID RIIL, RESOLVE LANGSUNG DENGAN USYNC QUERY DARI SERVER WHATSAPP!
+            if (isWaRegistered && (!resolvedLid || resolvedLid === cleanPhone)) {
+                try {
+                    const serverLid = await resolveLidFromWhatsAppServer(activeSock, cleanPhone);
+                    if (serverLid) {
+                        resolvedLid = serverLid;
+                    }
+                } catch (e) { }
+            }
+
+            if (resolvedLid && resolvedLid !== cleanPhone) {
+                registerIdentityMapping(resolvedLid, cleanPhone);
+                px.noLid = resolvedLid;
+            }
+
+            // 3. CACHE DATA PASIEN SECARA PERSISTEN (24 JAM) DI SEMUA KUNCI (LID, PHONE, NO. RM)
+            if (resolvedLid && resolvedLid !== cleanPhone) cachePatientObject(resolvedLid, px);
+            cachePatientObject(cleanPhone, px);
+            if (px.noRm && px.noRm !== "-") cachePatientObject(px.noRm, px);
         }
 
         // 2. JIKA NOMOR PASIEN TIDAK TERDAFTAR DI WHATSAPP
@@ -1336,7 +1453,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
                     doctor_status: "Bukan Nomor WA",
                     mode: modeH,
                     noSender: cleanPhone,
-                    no_lid: resolvedLid
+                    no_lid: (resolvedLid && resolvedLid !== cleanPhone) ? resolvedLid : "-"
                 });
             } catch (uErr) { }
 
@@ -1387,11 +1504,13 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
             console.log(`[Blast ${modeH.toUpperCase()} Pasien (${resultLog.pasienTerkirim}/${listPasien.length})] ${px.namaPasien} (${px.statusRujukan}) -> JID: ${targetPatientJid}`);
 
             if (!overrideToSender) {
-                conversationSessions.set(resolvedLid, {
-                    history: [],
-                    lastSeen: Date.now(),
-                    patientData: px
-                });
+                if (resolvedLid && resolvedLid !== cleanPhone) {
+                    conversationSessions.set(resolvedLid, {
+                        history: [],
+                        lastSeen: Date.now(),
+                        patientData: px
+                    });
+                }
                 conversationSessions.set(cleanPhone, {
                     history: [],
                     lastSeen: Date.now(),
@@ -1464,7 +1583,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
                 doctor_status: docSentSuccess ? "Terkirim" : (patientSentSuccess ? "Gagal" : "Pending"),
                 mode: modeH,
                 noSender: cleanPhone,
-                no_lid: resolvedLid
+                no_lid: (resolvedLid && resolvedLid !== cleanPhone) ? resolvedLid : (px.noLid && px.noLid !== cleanPhone ? px.noLid : "-")
             });
         } catch (dbErr) {
             console.error(`[Update Status Gagal] Baris ${px.rowNumber}:`, dbErr.message);
@@ -2420,8 +2539,10 @@ export default function setupMessageHandler(sock) {
                             status: "Terbatalkan Mobile JKN",
                             no_lid: senderInfo.id
                         });
-                        patientCacheMap.delete(patientData.noRm);
-                        patientCacheMap.delete(senderInfo.id);
+                        patientData.statusReschedule = "Terbatalkan Mobile JKN";
+                        if (patientData.noRm) cachePatientObject(patientData.noRm, patientData);
+                        if (senderInfo.id) cachePatientObject(senderInfo.id, patientData);
+                        if (patientData.noHp) cachePatientObject(formatToInternational(patientData.noHp), patientData);
                     } catch (e) { }
                 }
 
@@ -2480,8 +2601,12 @@ export default function setupMessageHandler(sock) {
                             mode: "h1",
                             no_lid: senderInfo.id
                         });
-                        patientCacheMap.delete(patientData.noRm);
-                        patientCacheMap.delete(senderInfo.id);
+                        patientData.statusWaH2 = "Hadir (Terkonfirmasi)";
+                        patientData.statusWaH1 = "Hadir (Terkonfirmasi)";
+                        patientData.statusWa = "Hadir (Terkonfirmasi)";
+                        if (patientData.noRm) cachePatientObject(patientData.noRm, patientData);
+                        if (senderInfo.id) cachePatientObject(senderInfo.id, patientData);
+                        if (patientData.noHp) cachePatientObject(formatToInternational(patientData.noHp), patientData);
                     } catch (e) { }
                 }
 
@@ -2514,8 +2639,11 @@ export default function setupMessageHandler(sock) {
                                 newDate: newDate,
                                 no_lid: senderInfo.id
                             });
-                            patientCacheMap.delete(patientData.noRm);
-                            patientCacheMap.delete(senderInfo.id);
+                            patientData.tglReschedule = newDate;
+                            patientData.statusReschedule = `Reschedule (${newDate})`;
+                            if (patientData.noRm) cachePatientObject(patientData.noRm, patientData);
+                            if (senderInfo.id) cachePatientObject(senderInfo.id, patientData);
+                            if (patientData.noHp) cachePatientObject(formatToInternational(patientData.noHp), patientData);
                         } catch (e) { }
                     }
 
@@ -2553,8 +2681,10 @@ export default function setupMessageHandler(sock) {
                             status: "Reschedule Diajukan",
                             no_lid: senderInfo.id
                         });
-                        patientCacheMap.delete(patientData.noRm);
-                        patientCacheMap.delete(senderInfo.id);
+                        patientData.statusReschedule = "Reschedule Diajukan";
+                        if (patientData.noRm) cachePatientObject(patientData.noRm, patientData);
+                        if (senderInfo.id) cachePatientObject(senderInfo.id, patientData);
+                        if (patientData.noHp) cachePatientObject(formatToInternational(patientData.noHp), patientData);
                     } catch (e) { }
                 }
 
