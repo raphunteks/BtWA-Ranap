@@ -735,10 +735,42 @@ async function convertAllPatientsToLid(sock, forceAll = false) {
     }
 }
 
-// SMART VERIFIED RESOLVER: Verifikasi Instan Identitas Pasien (Anti-Stale Cache)
-async function smartVerifyPatient(sock, senderInfo, pushName) {
+// Helper: Mengekstrak Nomor RM dari teks pesan pasien (Contoh: 'RM 123456', 'No. RM 12-34-56', atau 5-8 digit angka)
+function extractRmFromText(text) {
+    if (!text || typeof text !== 'string') return null;
+    const rmMatch = text.match(/(?:no\.?\s*rm|nomor\s*rm|rekam\s*medis|rm)\s*[:#.-]?\s*(\d{2}[-.]?\d{2}[-.]?\d{2}|\d{5,8})/i);
+    if (rmMatch) {
+        return rmMatch[1].replace(/[-.]/g, '');
+    }
+    const standAloneDigitMatch = text.trim().match(/^(\d{2}[-.]?\d{2}[-.]?\d{2}|\d{5,8})$/);
+    if (standAloneDigitMatch) {
+        return standAloneDigitMatch[1].replace(/[-.]/g, '');
+    }
+    return null;
+}
+
+// Helper: Memilih kandidat pasien terbaik jika query menghasilkan lebih dari 1 data kontrol
+function selectBestPatientCandidate(candidates) {
+    if (!Array.isArray(candidates) || candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0];
+
+    // 1. Prioritaskan yang status kontrolnya masih 'Pending'
+    const pending = candidates.find(c => {
+        const sH2 = String(c.statusWaH2 || c.statusWa || "").toLowerCase();
+        const sH1 = String(c.statusWaH1 || "").toLowerCase();
+        return sH2 === "pending" || sH2 === "" || sH1 === "pending" || sH1 === "";
+    });
+    if (pending) return pending;
+
+    // 2. Ambil kandidat paling baru (indeks terakhir)
+    return candidates[candidates.length - 1];
+}
+
+// SMART VERIFIED RESOLVER: Verifikasi Instan Identitas Pasien (LID, Phone, RM di Chat, Nama Lengkap & Auto-Bind LID)
+async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") {
     let matchedPatient = null;
 
+    // 1. Cek Cache Memori (Instant 0ms)
     if (senderInfo.id) {
         matchedPatient = getCachedPatientObject(senderInfo.id);
     }
@@ -746,7 +778,7 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
         matchedPatient = getCachedPatientObject(senderInfo.resolvedPhone);
     }
 
-    if (matchedPatient && matchedPatient.namaPasien && matchedPatient.noRm) {
+    if (matchedPatient && matchedPatient.namaPasien && matchedPatient.noRm && matchedPatient.noRm !== "-") {
         if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
             const match = matchedPatient.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
             if (match) matchedPatient.tglReschedule = match[1];
@@ -754,34 +786,39 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
         return matchedPatient;
     }
 
-    const lookupPhone = senderInfo.resolvedPhone || (senderInfo.isLid ? lidToPhoneMap.get(senderInfo.id) : senderInfo.id);
-    const lookupLid = senderInfo.isLid ? senderInfo.id : (phoneToLidMap.get(senderInfo.id) || "");
-
-    try {
-        const searchRes = await callSimgosApi("search_patient", {
-            phone: lookupPhone ? formatToInternational(lookupPhone) : "",
-            lid: lookupLid || senderInfo.id,
-            query: lookupPhone || lookupLid || senderInfo.id
-        });
-
-        if (searchRes.status === "success" && Array.isArray(searchRes.data) && searchRes.data.length > 0) {
-            matchedPatient = searchRes.data[0];
-
-            if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
-                const match = matchedPatient.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-                if (match) matchedPatient.tglReschedule = match[1];
+    // 2. Cek apakah ada Nomor RM yang diketikkan di dalam teks pesan pasien
+    const extractedRm = extractRmFromText(messageText);
+    if (extractedRm) {
+        try {
+            const rmRes = await callSimgosApi("search_patient", {
+                query: extractedRm,
+                lid: senderInfo.id
+            });
+            if (rmRes.status === "success" && Array.isArray(rmRes.data) && rmRes.data.length > 0) {
+                matchedPatient = selectBestPatientCandidate(rmRes.data);
             }
+        } catch (e) { }
+    }
 
-            if (matchedPatient.noHp) {
-                registerIdentityMapping(senderInfo.id, matchedPatient.noHp);
-                cachePatientObject(senderInfo.id, matchedPatient);
-                cachePatientObject(formatToInternational(matchedPatient.noHp), matchedPatient);
-                cachePatientObject(matchedPatient.noRm, matchedPatient);
+    // 3. Pencarian via Phone atau LID pengirim
+    if (!matchedPatient) {
+        const lookupPhone = senderInfo.resolvedPhone || (senderInfo.isLid ? lidToPhoneMap.get(senderInfo.id) : senderInfo.id);
+        const lookupLid = senderInfo.isLid ? senderInfo.id : (phoneToLidMap.get(senderInfo.id) || "");
+
+        try {
+            const searchRes = await callSimgosApi("search_patient", {
+                phone: lookupPhone ? formatToInternational(lookupPhone) : "",
+                lid: lookupLid || senderInfo.id,
+                query: lookupPhone || lookupLid || senderInfo.id
+            });
+
+            if (searchRes.status === "success" && Array.isArray(searchRes.data) && searchRes.data.length > 0) {
+                matchedPatient = selectBestPatientCandidate(searchRes.data);
             }
-            return matchedPatient;
-        }
-    } catch (e) { }
+        } catch (e) { }
+    }
 
+    // 4. Reverse Resolve Phone dari WhatsApp Server jika pengirim adalah LID
     if (senderInfo.isLid && !matchedPatient) {
         try {
             const resolvedPhone = await resolvePhoneFromLid(sock, senderInfo.id);
@@ -793,35 +830,49 @@ async function smartVerifyPatient(sock, senderInfo, pushName) {
                     query: resolvedPhone
                 });
                 if (searchRev.status === "success" && Array.isArray(searchRev.data) && searchRev.data.length > 0) {
-                    matchedPatient = searchRev.data[0];
-                    if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
-                        const match = matchedPatient.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-                        if (match) matchedPatient.tglReschedule = match[1];
-                    }
-                    cachePatientObject(senderInfo.id, matchedPatient);
-                    cachePatientObject(resolvedPhone, matchedPatient);
-                    cachePatientObject(matchedPatient.noRm, matchedPatient);
-                    return matchedPatient;
+                    matchedPatient = selectBestPatientCandidate(searchRev.data);
                 }
             }
         } catch (e) { }
     }
 
+    // 5. Pencarian Cerdas via Nama Lengkap (PushName atau Teks Pesan)
     if (!matchedPatient && pushName && pushName.length >= 3 && pushName !== "Pasien") {
         try {
-            const nameCheck = await callSimgosApi("search_patient", { query: pushName, lid: senderInfo.id });
-            if (nameCheck.status === "success" && Array.isArray(nameCheck.data) && nameCheck.data.length === 1) {
-                matchedPatient = nameCheck.data[0];
-                if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
-                    const match = matchedPatient.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-                    if (match) matchedPatient.tglReschedule = match[1];
-                }
-                if (matchedPatient.noHp) {
-                    registerIdentityMapping(senderInfo.id, matchedPatient.noHp);
-                    cachePatientObject(senderInfo.id, matchedPatient);
-                }
+            const cleanName = pushName.replace(/[^a-zA-Z0-9\s.,]/g, '').trim();
+            const nameCheck = await callSimgosApi("search_patient", { query: cleanName, lid: senderInfo.id });
+            if (nameCheck.status === "success" && Array.isArray(nameCheck.data) && nameCheck.data.length > 0) {
+                matchedPatient = selectBestPatientCandidate(nameCheck.data);
             }
         } catch (e) { }
+    }
+
+    // 6. Post-Process: Normalisasi & Auto-Binding LID ke Database Spreadsheet
+    if (matchedPatient) {
+        if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
+            const match = matchedPatient.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+            if (match) matchedPatient.tglReschedule = match[1];
+        }
+
+        if (senderInfo.id) {
+            registerIdentityMapping(senderInfo.id, matchedPatient.noHp || senderInfo.id);
+            cachePatientObject(senderInfo.id, matchedPatient);
+        }
+        if (matchedPatient.noHp) {
+            cachePatientObject(formatToInternational(matchedPatient.noHp), matchedPatient);
+        }
+        if (matchedPatient.noRm) {
+            cachePatientObject(matchedPatient.noRm, matchedPatient);
+        }
+
+        // Auto-bind LID pengirim ke spreadsheet kolom 18 secara background agar permanen
+        if (senderInfo.isLid && matchedPatient.rowNumber) {
+            callSimgosApi("update_status", {
+                row: matchedPatient.rowNumber,
+                type: "lid_only",
+                no_lid: senderInfo.id
+            }).catch(() => {});
+        }
     }
 
     return matchedPatient;
@@ -1143,35 +1194,6 @@ PETUNJUK: Berikan salam formal birokratis dan persilakan pengirim menginformasik
 let currentSock = null;
 let isIntervalStarted = false;
 
-// Helper: Memeriksa apakah WebSocket Baileys sedang aktif (OPEN)
-function isSocketAlive(s) {
-    if (!s) return false;
-    if (s.ws && typeof s.ws.readyState === 'number') {
-        return s.ws.readyState === 1; // 1 = WebSocket.OPEN
-    }
-    return true;
-}
-
-// Helper: Menunggu pemulihan koneksi secara anggun (polling per 2 detik hingga 30 detik)
-async function waitForActiveSocket(fallbackSock, maxWaitMs = 30000) {
-    let active = currentSock || fallbackSock;
-    if (isSocketAlive(active)) return active;
-
-    console.warn(`[Koneksi Drop] WebSocket WhatsApp terputus. Menunggu pemulihan koneksi (maksimal ${Math.round(maxWaitMs / 1000)}s)...`);
-    const startT = Date.now();
-
-    while (Date.now() - startT < maxWaitMs) {
-        await new Promise(r => setTimeout(r, 2000));
-        active = currentSock || fallbackSock;
-        if (isSocketAlive(active)) {
-            console.log(`[Koneksi Pulih] WhatsApp WebSocket berhasil tersambung kembali. Melanjutkan proses pengiriman...`);
-            return active;
-        }
-    }
-
-    return null;
-}
-
 async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "auto", overrideToSender = false, modeH = "h2") {
     const resultLog = {
         mode: modeH,
@@ -1229,16 +1251,8 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
             continue;
         }
 
-        // 1. CIRCUIT BREAKER PRE-CHECK: Pastikan koneksi WebSocket WhatsApp aktif
-        let activeSock = currentSock || sock;
-        if (!isSocketAlive(activeSock)) {
-            console.warn(`[Circuit Breaker Pre-Check] Koneksi terputus sebelum memproses pasien #${pxIndex + 1} (${px.namaPasien}). Menunggu pemulihan koneksi...`);
-            activeSock = await waitForActiveSocket(activeSock, 30000);
-            if (!activeSock) {
-                console.error(`[CIRCUIT BREAKER AKTIF] Koneksi WhatsApp gagal pulih setelah 30 detik. Menghentikan blast pada pasien #${pxIndex + 1} agar sisa ${listPasien.length - pxIndex} antrean pasien tetap aman di database.`);
-                break;
-            }
-        }
+        // 1. SOCKET AKTIF: Gunakan socket WhatsApp aktif
+        const activeSock = currentSock || sock;
 
         const cleanPhone = formatToInternational(px.noHp);
         let resolvedLid = "";
@@ -1347,32 +1361,9 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
                 });
             }
         } catch (pxErr) {
-            const isConnClosed = pxErr?.output?.statusCode === 428 ||
-                String(pxErr?.message || '').toLowerCase().includes('connection closed') ||
-                String(pxErr?.error || '').toLowerCase().includes('precondition required');
-
-            if (isConnClosed) {
-                console.warn(`[Koneksi Terputus (428)] Gagal mengirim ke ${px.namaPasien}. Mencoba pemulihan koneksi WhatsApp...`);
-                const recoveredSock = await waitForActiveSocket(activeSock, 30000);
-                if (recoveredSock) {
-                    activeSock = recoveredSock;
-                    try {
-                        await activeSock.sendMessage(targetPatientJid, { text: pesanKirimPasien });
-                        patientSentSuccess = true;
-                        resultLog.pasienTerkirim++;
-                        console.log(`[Blast Recovery SUKSES] ${px.namaPasien} berhasil dikirim setelah koneksi pulih!`);
-                    } catch (retryErr) {
-                        console.error(`[Retry Gagal] Pengiriman ulang ke ${px.namaPasien} tetap gagal:`, retryErr.message);
-                    }
-                } else {
-                    console.error(`[CIRCUIT BREAKER AKTIF] Koneksi WhatsApp terputus permanen di Railway. Menghentikan blast agar sisa ${listPasien.length - pxIndex} antrean pasien tidak hangus.`);
-                    resultLog.pasienGagal++;
-                    break;
-                }
-            } else {
-                console.error(`[Gagal Kirim Pasien ${modeH.toUpperCase()}] ${px.namaPasien}:`, pxErr);
-                resultLog.pasienGagal++;
-            }
+            console.error(`[Gagal Kirim Pasien ${modeH.toUpperCase()}] ${px.namaPasien}:`, pxErr?.message || pxErr);
+            resultLog.pasienGagal++;
+            patientSentSuccess = false;
         }
 
         // 4. KIRIM LAPORAN DOKTER UNTUK PASIEN INI (SATU-SATU / REAL-TIME)
@@ -2278,10 +2269,10 @@ export default function setupMessageHandler(sock) {
             const targetDpjpUtamaWa = sysConfig.doctors?.[0]?.wa || sysConfig.dpjpUtamaWa || "6282291675363";
             const targetDpjpUtamaJid = sanitizeNumber(targetDpjpUtamaWa);
 
-            // VERIFIKASI IDENTITAS PASIEN SECARA CERDAS LINTAS LID <-> HP DATABASE (REAL-TIME)
-            const patientData = await smartVerifyPatient(sock, senderInfo, pushName);
-            if (patientData) {
-                console.log(`[Pasien Terverifikasi] Nama: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl Kontrol: ${patientData.tglKontrol} | Reschedule Baru: ${patientData.tglReschedule || '-'}`);
+            // VERIFIKASI IDENTITAS PASIEN SECARA CERDAS LINTAS LID <-> HP <-> NAMA <-> RM (REAL-TIME)
+            const patientData = await smartVerifyPatient(sock, senderInfo, pushName, text);
+            if (patientData && patientData.noRm && patientData.noRm !== "-") {
+                console.log(`[Pasien Terverifikasi] Nama Resmi: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl Kontrol: ${patientData.tglKontrol} | Reschedule Baru: ${patientData.tglReschedule || '-'}`);
             } else {
                 console.log(`[Pengirim Belum Terdaftar] Sender ID: ${senderInfo.id} | PushName: ${pushName}`);
             }
@@ -2290,7 +2281,9 @@ export default function setupMessageHandler(sock) {
                 ? patientData.namaPasien
                 : pushName;
 
-            const pObj = patientData || {
+            const isPatientVerified = !!(patientData && patientData.noRm && patientData.noRm !== "-" && patientData.tglKontrol && patientData.tglKontrol !== "Terjadwal");
+
+            const pObj = isPatientVerified ? patientData : {
                 namaPasien: officialPatientName,
                 noRm: "-",
                 tglKontrol: "Terjadwal",
@@ -2306,7 +2299,40 @@ export default function setupMessageHandler(sock) {
                 tglReschedule: "-"
             };
 
-            const intent = detectPatientIntent(text);
+            let intent = detectPatientIntent(text);
+
+            // Cek apakah ada konfirmasi yang tertunda dari chat sebelumnya
+            const sessionKey = senderInfo.id || senderInfo.targetJid;
+            let userSession = conversationSessions.get(sessionKey);
+            if (isPatientVerified && userSession && userSession.pendingIntent && intent.type === 'OTHER') {
+                intent = userSession.pendingIntent;
+                delete userSession.pendingIntent;
+                console.log(`[Auto-Resume Intent] Melanjutkan konfirmasi tertunda: ${intent.type} untuk pasien ${patientData.namaPasien} (RM: ${patientData.noRm})`);
+            }
+
+            // PROTEKSI MUTLAK: JIKA PASIEN MENCOBA KONFIRMASI (HADIR, RESCHEDULE, JKN) NAMUN BELUM TERVERIFIKASI
+            if ((intent.type === 'HADIR' || intent.type === 'RESCHEDULE' || intent.type === 'TERBATALKAN_JKN') && !isPatientVerified) {
+                if (!userSession) {
+                    userSession = { history: [], lastSeen: Date.now() };
+                    conversationSessions.set(sessionKey, userSession);
+                }
+                userSession.pendingIntent = intent;
+                userSession.lastSeen = Date.now();
+
+                const wita = getWitaTimeGreeting();
+                const intentLabel = intent.type === 'HADIR' ? 'KEHADIRAN' : (intent.type === 'RESCHEDULE' ? 'JADWAL ULANG (RESCHEDULE)' : 'MOBILE JKN');
+                const askVerificationMsg = `${wita.greeting}, Bapak/Ibu *${pushName || 'Pasien'}*. 🙏\n\n` +
+                    `Terima kasih atas konfirmasi Anda. Mohon maaf, nomor WhatsApp Anda belum terhubung otomatis dengan data jadwal kontrol di *RSKD Gigi dan Mulut Prov. Sulsel*.\n\n` +
+                    `Agar konfirmasi *${intentLabel}* Anda dapat kami catat dengan benar di sistem, mohon balas pesan ini dengan mengetikkan:\n` +
+                    `📌 *Nomor Rekam Medis (No. RM)* Anda (Contoh: *123456*)\n` +
+                    `atau\n` +
+                    `📌 *Nama Lengkap Pasien* sesuai kartu berobat/pendaftaran.\n\n` +
+                    `Tim poli kami akan segera mencocokkan jadwal kontrol Anda bersama Dokter Penanggung Jawab (*${sysConfig.dpjpUtama}*). Terima kasih banyak. 🙏🦷`;
+
+                await sock.sendMessage(senderInfo.targetJid, { text: askVerificationMsg });
+                await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+                return;
+            }
 
             // JALUR KHUSUS: PASIEN MENYATAKAN "TERBATALKAN DI APLIKASI MOBILE JKN"
             if (intent.type === 'TERBATALKAN_JKN') {
