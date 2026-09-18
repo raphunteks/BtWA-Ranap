@@ -11,7 +11,7 @@ const bossConfigFile = path.join(sessionPath, 'boss_config.json');
 // Konfigurasi Default Boss / Chief
 let bossConfig = {
     bossNumber: "6282299588447@s.whatsapp.net",
-    bossLid: "" // Akan terisi otomatis saat Anda ketik "!mylid set"
+    bossLid: "165837881213080" // Akan terisi otomatis saat Anda ketik "!mylid set"
 };
 
 // URL Gambar Selamat Datang
