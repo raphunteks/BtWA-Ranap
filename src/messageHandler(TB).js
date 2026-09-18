@@ -8,10 +8,10 @@ const sessionPath = './session';
 const repliedContactsFile = path.join(sessionPath, 'replied_contacts.json');
 const bossConfigFile = path.join(sessionPath, 'boss_config.json');
 
-// Konfigurasi Default Boss / Chief
+// Konfigurasi Baku Boss / Chief (LID Default Terpasang)
 let bossConfig = {
     bossNumber: "6282299588447@s.whatsapp.net",
-    bossLid: "165837881213080" // Akan terisi otomatis saat Anda ketik "!mylid set"
+    bossLid: "165837881213080" // LID Boss Resmi
 };
 
 // URL Gambar Selamat Datang
@@ -31,7 +31,7 @@ if (!fs.existsSync(sessionPath)) {
     fs.mkdirSync(sessionPath, { recursive: true });
 }
 
-// Load Konfigurasi Boss LID dari file JSON jika ada
+// Muat konfigurasi Boss jika ada perubahan tersimpan
 if (fs.existsSync(bossConfigFile)) {
     try {
         const rawBossData = fs.readFileSync(bossConfigFile, 'utf-8');
@@ -52,7 +52,7 @@ function saveBossConfig() {
 // Map memori: Kunci = ID/Nomor -> Nilai = { name, jid, date }
 const repliedContactsMap = new Map();
 
-// Load data kontak dan nama dari file JSON saat startup
+// Muat data riwayat kontak dari file JSON
 if (fs.existsSync(repliedContactsFile)) {
     try {
         const rawData = fs.readFileSync(repliedContactsFile, 'utf-8');
@@ -76,7 +76,7 @@ if (fs.existsSync(repliedContactsFile)) {
     }
 }
 
-// Simpan data kontak ke file JSON secara berkala
+// Simpan data kontak secara berkala
 let saveTimer = null;
 function persistRepliedContacts() {
     if (saveTimer) clearTimeout(saveTimer);
@@ -95,7 +95,6 @@ function persistRepliedContacts() {
     }, 1000);
 }
 
-// Format waktu lokal Indonesia
 function getFormattedDateTime() {
     return new Intl.DateTimeFormat('id-ID', {
         dateStyle: 'medium',
@@ -105,7 +104,7 @@ function getFormattedDateTime() {
 }
 
 // =========================================================================
-// HELPER PARSER SENDER & NORMALISASI NOMOR
+// HELPER PARSER SENDER & NORMALISASI NOMOR / LID
 // =========================================================================
 function formatToInternational(raw) {
     if (!raw && raw !== 0) return '';
@@ -156,7 +155,7 @@ export default function setupMessageHandler(sock) {
 
             const senderInfo = parseSenderInfo(remoteJid);
 
-            // Filter: Abaikan pesan grup dan status WhatsApp
+            // Abaikan grup dan status WhatsApp
             if (senderInfo.isGroup || senderInfo.isBroadcast || remoteJid === 'status@broadcast') {
                 return;
             }
@@ -173,14 +172,17 @@ export default function setupMessageHandler(sock) {
             const pushName = msg.pushName || 'Klien';
             const cleanText = incomingText.trim();
 
-            // Verifikasi Otoritas Boss: Mendukung Nomor Standar maupun Akun WhatsApp LID
+            // Verifikasi Otoritas Boss: Validasi Nomor Telepon & LID 165837881213080
             const isBoss = (
                 senderInfo.targetJid === bossConfig.bossNumber ||
                 senderInfo.id === "6282299588447" ||
-                (bossConfig.bossLid && (senderInfo.id === bossConfig.bossLid || senderInfo.targetJid === `${bossConfig.bossLid}@lid`))
+                senderInfo.id === bossConfig.bossLid ||
+                senderInfo.id === "165837881213080" ||
+                senderInfo.targetJid === `${bossConfig.bossLid}@lid` ||
+                senderInfo.targetJid === "165837881213080@lid"
             );
 
-            // Target notifikasi Boss (diarahkan ke LID aktif jika sudah disetel, atau ke bossNumber)
+            // Rute tujuan notifikasi ke Boss (prioritas ke LID aktif Boss)
             const targetBossNotification = bossConfig.bossLid 
                 ? `${bossConfig.bossLid}@lid` 
                 : bossConfig.bossNumber;
@@ -197,13 +199,14 @@ export default function setupMessageHandler(sock) {
                     case 'hellp':
                         const menuText = `*🤖 PANEL KONTROL BOT UMI DIEN 🤖*\n\n` +
                             `Berikut daftar perintah yang tersedia:\n\n` +
-                            `* !mylid* - 🔍 Cek JID & LID akun WhatsApp Anda saat ini\n` +
-                            `* !mylid set* - 👑 Daftarkan LID Anda saat ini sebagai Boss resmi\n` +
-                            `* !balas <nomor/JID> <pesan>* - 💬 Teruskan balasan dari Boss ke klien via bot\n` +
-                            `  _Contoh: !balas 6285256739684 Halo kak, keluhannya apa ya?_\n` +
-                            `* !checkclient* - 📋 Cek daftar nama & nomor WA klien yang tersimpan\n` +
-                            `* !clearclient* - 🗑️ Hapus seluruh riwayat memori/JSON klien\n` +
-                            `* !help* / *!hellp* - ℹ️ Menampilkan panduan menu ini`;
+                            `* !mylid* - 🔍 Cek ID & status LID WhatsApp Anda saat ini\n` +
+                            `* !mylid set* - 👑 Daftarkan LID pengirim sebagai Boss\n` +
+                            `* !balas <LID/No WA> <pesan>* - 💬 Kirim balasan ke klien via bot\n` +
+                            `  _Contoh: !balas 247922893566044@lid Halo kak ready ya_\n` +
+                            `  _Atau: !balas 247922893566044 Halo kak ready ya_\n` +
+                            `* !checkclient* - 📋 Cek daftar klien yang tersimpan\n` +
+                            `* !clearclient* - 🗑️ Reset seluruh riwayat kontak bot\n` +
+                            `* !help* - ℹ️ Tampilkan panduan ini`;
 
                         await sock.sendMessage(senderInfo.targetJid, { text: menuText }, { quoted: msg });
                         return;
@@ -211,34 +214,27 @@ export default function setupMessageHandler(sock) {
                     case 'mylid':
                         const subCmd = args[0] ? args[0].toLowerCase() : '';
 
-                        // Perintah: !mylid set / !mylid boss (Menyimpan LID pengirim saat ini sebagai Boss)
-                        if (subCmd === 'set' || subCmd === 'boss' || subCmd === 'bind') {
+                        if (subCmd === 'set' || subCmd === 'boss') {
                             bossConfig.bossLid = senderInfo.id;
                             saveBossConfig();
 
-                            const successBindText = `👑 *AUTORISASI BOSS BERHASIL DISIMPAN!* 👑\n\n` +
-                                `ID LID Anda telah resmi terdaftar sebagai Boss / Chief Pengendali Bot:\n` +
-                                `🆔 *Boss LID Aktif:* \`${senderInfo.id}\`\n` +
-                                `📱 *Format Target JID:* \`${senderInfo.targetJid}\`\n` +
-                                `💾 *Penyimpanan:* Tersimpan permanen di \`./session/boss_config.json\`\n\n` +
-                                `_Sekarang Anda bebas menggunakan perintah *!balas*, *!checkclient*, dan perintah admin lainnya tanpa terblokir akses!_ 🚀`;
+                            const successBindText = `👑 *LID BOSS BERHASIL DIPERBARUI!* 👑\n\n` +
+                                `Akun WhatsApp Anda kini terkunci sebagai Boss resmi:\n` +
+                                `🆔 *Boss LID:* \`${senderInfo.id}\`\n` +
+                                `📡 *Target JID:* \`${senderInfo.targetJid}\`\n` +
+                                `💾 *Penyimpanan:* \`./session/boss_config.json\``;
 
                             await sock.sendMessage(senderInfo.targetJid, { text: successBindText }, { quoted: msg });
                             return;
                         }
 
-                        // Menampilkan informasi LID pengirim saat ini
-                        const infoLidText = `🔍 *INFORMASI IDENTITAS WHATSAPP ANDA*\n\n` +
-                            `👤 *Nama Profil:* ${pushName}\n` +
-                            `🆔 *ID / Digits:* \`${senderInfo.id}\`\n` +
+                        const infoLidText = `🔍 *INFORMASI IDENTITAS PENGIRIM*\n\n` +
+                            `👤 *Nama:* ${pushName}\n` +
+                            `🆔 *ID:* \`${senderInfo.id}\`\n` +
                             `📡 *Target JID:* \`${senderInfo.targetJid}\`\n` +
-                            `🏷️ *Tipe Akun:* ${senderInfo.isLid ? 'WhatsApp LID Enkripsi (@lid)' : 'Nomor Standar (@s.whatsapp.net)'}\n` +
-                            `🛡️ *Status Otoritas:* ${isBoss ? '✅ *Terdaftar sebagai Boss*' : '❌ *Bukan Boss*'}\n` +
-                            `📌 *LID Boss Terdaftar Saat Ini:* \`${bossConfig.bossLid || '(Belum disetel)'}\`\n\n` +
-                            `-----------------------------------------\n` +
-                            `👉 *Cara Menjadikan Akun Ini Sebagai Boss:*\n` +
-                            `Ketik perintah:\n` +
-                            `*!mylid set*`;
+                            `🛡️ *Status Otoritas:* ${isBoss ? '✅ *Boss Terverifikasi*' : '❌ *Bukan Boss*'}\n` +
+                            `📌 *LID Boss Terdaftar:* \`${bossConfig.bossLid}\`\n\n` +
+                            `_Ketik *!mylid set* jika ingin mengubah LID Boss ke nomor ini._`;
 
                         await sock.sendMessage(senderInfo.targetJid, { text: infoLidText }, { quoted: msg });
                         return;
@@ -246,43 +242,57 @@ export default function setupMessageHandler(sock) {
                     case 'balas':
                         if (!isBoss) {
                             await sock.sendMessage(senderInfo.targetJid, {
-                                text: `❌ Akses ditolak. Perintah ini hanya dapat digunakan oleh Chief/Boss.\n\n💡 *Tips:* Ketik *!mylid set* terlebih dahulu dari akun WhatsApp Anda untuk mendaftarkan akun ini sebagai Boss.`
+                                text: `❌ Akses ditolak. Akun Anda (\`${senderInfo.id}\`) belum terdaftar sebagai Boss.`
                             }, { quoted: msg });
                             return;
                         }
 
                         if (args.length < 2) {
                             await sock.sendMessage(senderInfo.targetJid, {
-                                text: `⚠️ *Format salah!*\n\nGunakan format:\n*!balas <nomor target> <isi pesan>*\n\nContoh:\n*!balas 6285256739684 Boleh kak, produk ready stock ya*`
+                                text: `⚠️ *Format salah!*\n\nGunakan:\n*!balas <ID/LID/No WA> <isi pesan>*\n\nContoh:\n*!balas 247922893566044@lid Boleh kak*\natau\n*!balas 247922893566044 Boleh kak*`
                             }, { quoted: msg });
                             return;
                         }
 
-                        const rawTarget = args.shift();
+                        const rawTarget = args.shift().trim();
                         const replyContent = args.join(' ').trim();
+                        const cleanDigits = rawTarget.replace(/\D/g, '');
 
-                        // Normalisasi format JID tujuan
+                        // =========================================================
+                        // RESOLVER TARGET JID (MENCEGAH ERROR PREFIX 62 PADA LID)
+                        // =========================================================
                         let targetClientJid = '';
+
                         if (rawTarget.toLowerCase().endsWith('@lid')) {
-                            targetClientJid = rawTarget.toLowerCase();
+                            // 1. Jika Boss menyertakan akhiran @lid secara eksplisit
+                            targetClientJid = `${cleanDigits}@lid`;
+                        } else if (rawTarget.toLowerCase().endsWith('@s.whatsapp.net')) {
+                            // 2. Jika Boss menyertakan akhiran @s.whatsapp.net
+                            targetClientJid = `${formatToInternational(cleanDigits)}@s.whatsapp.net`;
+                        } else if (repliedContactsMap.has(cleanDigits)) {
+                            // 3. Cocokkan langsung dengan data memori klien yang tersimpan saat chat masuk
+                            targetClientJid = repliedContactsMap.get(cleanDigits).jid;
+                        } else if (cleanDigits.length >= 14) {
+                            // 4. Deteksi otomatis: Panjang digit LID WhatsApp selalu 14 digit ke atas
+                            targetClientJid = `${cleanDigits}@lid`;
                         } else {
-                            const cleanTargetNumber = formatToInternational(rawTarget);
-                            targetClientJid = `${cleanTargetNumber}@s.whatsapp.net`;
+                            // 5. Nomor telepon seluler standar (10-13 digit)
+                            targetClientJid = `${formatToInternational(cleanDigits)}@s.whatsapp.net`;
                         }
 
                         try {
                             await sock.sendPresenceUpdate('composing', targetClientJid);
-                            await new Promise(res => setTimeout(res, 1000));
+                            await new Promise(res => setTimeout(res, 800));
 
-                            // Kirim pesan dari bot ke customer
+                            // Kirimkan pesan langsung ke target JID yang tepat
                             await sock.sendMessage(targetClientJid, { text: replyContent });
 
                             await sock.sendPresenceUpdate('paused', targetClientJid);
 
-                            // Laporan konfirmasi kembali ke Boss
+                            // Kirim laporan status sukses ke Boss
                             await sock.sendMessage(senderInfo.targetJid, {
                                 text: `✅ *PESAN TERKIRIM KE KLIEN*\n\n` +
-                                    `🎯 *Tujuan:* ${rawTarget}\n` +
+                                    `🎯 *Tujuan:* \`${targetClientJid}\`\n` +
                                     `💬 *Isi Pesan:* "${replyContent}"\n` +
                                     `🕒 *Waktu:* ${getFormattedDateTime()}`
                             }, { quoted: msg });
@@ -290,7 +300,7 @@ export default function setupMessageHandler(sock) {
                             console.log(`[BALAS SUKSES] Pesan Boss terkirim ke ${targetClientJid}`);
                         } catch (errBalas) {
                             await sock.sendMessage(senderInfo.targetJid, {
-                                text: `❌ *Gagal Mengirim Pesan:* ${errBalas.message}`
+                                text: `❌ *Gagal Mengirim ke \`${targetClientJid}\`:*\n${errBalas.message}`
                             }, { quoted: msg });
                         }
                         return;
@@ -298,7 +308,7 @@ export default function setupMessageHandler(sock) {
                     case 'checkclient':
                         if (repliedContactsMap.size === 0) {
                             await sock.sendMessage(senderInfo.targetJid, {
-                                text: `ℹ️ *Belum ada data kontak klien.* Belum ada nomor yang tersimpan di sistem.`
+                                text: `ℹ️ *Belum ada data kontak klien tersimpan.*`
                             }, { quoted: msg });
                             return;
                         }
@@ -308,7 +318,7 @@ export default function setupMessageHandler(sock) {
 
                         for (const [id, data] of repliedContactsMap.entries()) {
                             clientListText += `${index++}. *${data.name}*\n` +
-                                `   📱 ID/No: ${id}\n` +
+                                `   📡 JID: \`${data.jid}\`\n` +
                                 `   🕒 Masuk: ${data.date}\n\n`;
                         }
 
@@ -329,9 +339,7 @@ export default function setupMessageHandler(sock) {
                         }
 
                         await sock.sendMessage(senderInfo.targetJid, {
-                            text: `✅ *BERHASIL DIRESET!*\n\n` +
-                                `Sebanyak *${totalCleared} data klien* berhasil dihapus.\n` +
-                                `Semua chat baru yang masuk akan kembali mendapatkan gambar & pesan pembuka.`
+                            text: `✅ *BERHASIL DIRESET!*\n\nSebanyak *${totalCleared} data klien* berhasil dibersihkan.`
                         }, { quoted: msg });
                         return;
 
@@ -340,17 +348,18 @@ export default function setupMessageHandler(sock) {
                 }
             }
 
-            // Jika Boss mengirim chat biasa tanpa awalan '!', abaikan agar tidak meneruskan chat Boss ke dirinya sendiri
+            // Abaikan chat biasa dari Boss agar tidak meneruskan chat diri sendiri
             if (isBoss) return;
 
             const trackingKey = senderInfo.id;
             const incomingTime = getFormattedDateTime();
-            const clientPhone = formatToInternational(senderInfo.id);
-            const waDirectLink = `https://wa.me/${clientPhone}`;
-            const previewMessage = incomingText.trim() ? incomingText.trim() : `_(Klien mengirim Media / Gambar / Dokumen)_`;
+            const previewMessage = incomingText.trim() ? incomingText.trim() : `_(Klien mengirim Media/Lampiran)_`;
+            
+            // Siapkan template perintah balas yang sesuai dengan identitas klien
+            const cmdBalasTarget = senderInfo.isLid ? `${senderInfo.id}@lid` : formatToInternational(senderInfo.id);
 
             // =====================================================================
-            // 2. KLIEN LAMA: JIKA KLIEN MEMBALAS / MENGIRIM CHAT LANJUTAN
+            // 2. KLIEN LAMA: TERUSKAN BALASAN KLIEN KE BOSS
             // =====================================================================
             if (repliedContactsMap.has(trackingKey)) {
                 const existingData = repliedContactsMap.get(trackingKey);
@@ -359,21 +368,20 @@ export default function setupMessageHandler(sock) {
                     persistRepliedContacts();
                 }
 
-                console.log(`[FORWARD CHAT] Menerima balasan dari klien lama: ${pushName} (${clientPhone})`);
+                console.log(`[FORWARD CHAT] Balasan dari klien: ${pushName} (${senderInfo.targetJid})`);
 
                 try {
                     const forwardToBossText = `💬 *BALASAN DARI KLIEN* 💬\n\n` +
                         `👤 *Nama Klien:* ${pushName}\n` +
-                        `📱 *Nomor HP:* ${clientPhone}\n` +
-                        `🔗 *Link Langsung:* ${waDirectLink}\n` +
+                        `🆔 *Identitas JID:* \`${senderInfo.targetJid}\`\n` +
                         `🕒 *Waktu:* ${incomingTime}\n` +
                         `💬 *Isi Pesan:*\n"${previewMessage}"\n\n` +
                         `-----------------------------------------\n` +
-                        `👉 *Balas via Bot:* ketik:\n` +
-                        `*!balas ${clientPhone} <isi pesan>*`;
+                        `👉 *Balas Cepat (Salin & Tempel):*\n` +
+                        `*!balas ${cmdBalasTarget} <isi pesan>*`;
 
                     await sock.sendMessage(targetBossNotification, { text: forwardToBossText });
-                    console.log(`[FORWARD SUKSES] Pesan dari ${pushName} diteruskan ke Boss.`);
+                    console.log(`[FORWARD SUKSES] Pesan ${pushName} diteruskan ke Boss (${targetBossNotification})`);
                 } catch (errFwd) {
                     console.error('[Gagal Forward ke Boss]:', errFwd.message);
                 }
@@ -381,11 +389,11 @@ export default function setupMessageHandler(sock) {
             }
 
             // =====================================================================
-            // 3. KLIEN BARU: BALAS PERDANA DENGAN GAMBAR & LAPORKAN KE BOSS
+            // 3. KLIEN BARU: BALAS GAMBAR & LAPORKAN KE BOSS
             // =====================================================================
             console.log(`[KLIEN BARU] Chat perdana dari ${pushName} (${senderInfo.targetJid})`);
 
-            // 1. Simpan ke daftar memori & file JSON
+            // 1. Simpan targetJid asli klien ke map memori
             repliedContactsMap.set(trackingKey, {
                 name: pushName,
                 jid: senderInfo.targetJid,
@@ -393,7 +401,7 @@ export default function setupMessageHandler(sock) {
             });
             persistRepliedContacts();
 
-            // 2. Kirim gambar + caption pembuka ke klien
+            // 2. Kirim gambar sambutan beserta caption
             try {
                 await sock.sendPresenceUpdate('composing', senderInfo.targetJid);
                 await new Promise(res => setTimeout(res, 1200));
@@ -408,23 +416,22 @@ export default function setupMessageHandler(sock) {
                 await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
             } catch (e) {}
 
-            console.log(`[SUKSES] Pesan selamat datang & gambar terkirim ke ${pushName}`);
+            console.log(`[SUKSES] Pesan selamat datang terkirim ke ${pushName}`);
 
-            // 3. Kirim notifikasi klien baru ke Boss beserta instruksi balasannya
+            // 3. Notifikasi ke WhatsApp Boss
             try {
                 const notifBossText = `🔔 *NOTIFIKASI KLIEN BARU MASUK* 🔔\n\n` +
                     `👤 *Nama Klien:* ${pushName}\n` +
-                    `📱 *Nomor HP:* ${clientPhone}\n` +
-                    `🔗 *Link Langsung:* ${waDirectLink}\n` +
+                    `🆔 *Identitas JID:* \`${senderInfo.targetJid}\`\n` +
                     `🕒 *Waktu Chat:* ${incomingTime}\n` +
                     `💬 *Pesan Pertama:* "${previewMessage}"\n\n` +
                     `_Pesan sambutan Umi Dien telah dikirimkan ke kontak tersebut._ ✅\n\n` +
                     `-----------------------------------------\n` +
-                    `👉 *Balas via Bot:* ketik:\n` +
-                    `*!balas ${clientPhone} <isi pesan>*`;
+                    `👉 *Balas Cepat (Salin & Tempel):*\n` +
+                    `*!balas ${cmdBalasTarget} <isi pesan>*`;
 
                 await sock.sendMessage(targetBossNotification, { text: notifBossText });
-                console.log(`[NOTIFIKASI BOSS] Laporan klien baru (${pushName}) terkirim ke Boss.`);
+                console.log(`[NOTIFIKASI BOSS] Laporan klien baru (${pushName}) terkirim ke Boss (${targetBossNotification})`);
             } catch (errBoss) {
                 console.error('[Gagal Kirim Notif ke Boss]:', errBoss.message);
             }
