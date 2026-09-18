@@ -9,7 +9,6 @@ const repliedContactsFile = path.join(sessionPath, 'replied_contacts.json');
 
 // Nomor WhatsApp Boss / Chief Penerima Notifikasi & Pengendali Bot
 const BOSS_NUMBER = "6282299588447@s.whatsapp.net";
-const BOSS_CLEAN_ID = "6282299588447";
 
 // URL Gambar Selamat Datang
 const WELCOME_IMAGE_URL = "https://i.ibb.co.com/HLSNLbzf/Whats-App-Image-2026-09-18-at-16-53-40.jpg";
@@ -151,7 +150,7 @@ export default function setupMessageHandler(sock) {
 
             const pushName = msg.pushName || 'Klien';
             const cleanText = incomingText.trim();
-            const isBoss = (senderInfo.id === BOSS_CLEAN_ID || senderInfo.targetJid === BOSS_NUMBER);
+            const isBoss = (senderInfo.targetJid === BOSS_NUMBER);
 
             // =====================================================================
             // 1. MENU PERINTAH ADMIN & BOSS (!help, !balas, !checkclient, !clearclient)
@@ -175,7 +174,6 @@ export default function setupMessageHandler(sock) {
                         return;
 
                     case 'balas':
-                        // Fitur proteksi: Hanya Boss yang dapat menjalankan perintah !balas
                         if (!isBoss) {
                             await sock.sendMessage(senderInfo.targetJid, {
                                 text: `❌ Akses ditolak. Perintah ini hanya dapat digunakan oleh Chief/Boss.`
@@ -213,7 +211,6 @@ export default function setupMessageHandler(sock) {
                             await sock.sendPresenceUpdate('paused', targetClientJid);
 
                             // Laporan konfirmasi kembali ke Boss
-                            const clientDisplay = rawTarget.replace(/\D/g, '');
                             await sock.sendMessage(BOSS_NUMBER, {
                                 text: `✅ *PESAN TERKIRIM KE KLIEN*\n\n` +
                                     `🎯 *Tujuan:* ${rawTarget}\n` +
@@ -274,7 +271,7 @@ export default function setupMessageHandler(sock) {
                 }
             }
 
-            // Jika Boss mengirim chat biasa tanpa awalan '!', abaikan agar tidak meneruskan chat Boss ke dirinya sendiri
+            // Jika Boss mengirim chat biasa tanpa awalan '!', lewati agar tidak meneruskan chat Boss ke dirinya sendiri
             if (isBoss) return;
 
             const trackingKey = senderInfo.id;
@@ -287,7 +284,6 @@ export default function setupMessageHandler(sock) {
             // 2. KLIEN LAMA: JIKA KLIEN MEMBALAS / MENGIRIM CHAT LANJUTAN
             // =====================================================================
             if (repliedContactsMap.has(trackingKey)) {
-                // Update nama profil terbaru jika sebelumnya tanpa nama
                 const existingData = repliedContactsMap.get(trackingKey);
                 if (pushName && pushName !== 'Klien' && existingData.name !== pushName) {
                     existingData.name = pushName;
@@ -296,7 +292,6 @@ export default function setupMessageHandler(sock) {
 
                 console.log(`[FORWARD CHAT] Menerima balasan dari klien lama: ${pushName} (${clientPhone})`);
 
-                // Otomatis teruskan pesan balasan klien ke WhatsApp Boss
                 try {
                     const forwardToBossText = `💬 *BALASAN DARI KLIEN* 💬\n\n` +
                         `👤 *Nama Klien:* ${pushName}\n` +
