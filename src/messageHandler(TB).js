@@ -7,8 +7,9 @@ import path from 'path';
 const sessionPath = './session';
 const repliedContactsFile = path.join(sessionPath, 'replied_contacts.json');
 
-// Nomor WhatsApp Boss / Chief Penerima Notifikasi
+// Nomor WhatsApp Boss / Chief Penerima Notifikasi & Pengendali Bot
 const BOSS_NUMBER = "6282299588447@s.whatsapp.net";
+const BOSS_CLEAN_ID = "6282299588447";
 
 // URL Gambar Selamat Datang
 const WELCOME_IMAGE_URL = "https://i.ibb.co.com/HLSNLbzf/Whats-App-Image-2026-09-18-at-16-53-40.jpg";
@@ -148,11 +149,12 @@ export default function setupMessageHandler(sock) {
 
             if (!incomingText.trim() && !isMedia) return;
 
-            const pushName = msg.pushName || 'Klien Baru';
+            const pushName = msg.pushName || 'Klien';
             const cleanText = incomingText.trim();
+            const isBoss = (senderInfo.id === BOSS_CLEAN_ID || senderInfo.targetJid === BOSS_NUMBER);
 
             // =====================================================================
-            // MENU PERINTAH ADMIN (!help, !hellp, !checkclient, !clearclient)
+            // 1. MENU PERINTAH ADMIN & BOSS (!help, !balas, !checkclient, !clearclient)
             // =====================================================================
             if (cleanText.startsWith('!')) {
                 const args = cleanText.slice(1).trim().split(/ +/);
@@ -162,12 +164,69 @@ export default function setupMessageHandler(sock) {
                     case 'help':
                     case 'hellp':
                         const menuText = `*🤖 PANEL KONTROL BOT UMI DIEN 🤖*\n\n` +
-                            `Berikut daftar perintah pengelolaan data kontak:\n\n` +
+                            `Berikut daftar perintah yang tersedia:\n\n` +
+                            `* !balas <nomor/JID> <pesan>* - 💬 Teruskan balasan dari Boss ke klien via bot\n` +
+                            `  _Contoh: !balas 6285256739684 Halo kak, keluhannya apa ya?_\n` +
                             `* !checkclient* - 📋 Cek daftar nama & nomor WA klien yang tersimpan\n` +
-                            `* !clearclient* - 🗑️ Hapus seluruh riwayat nomor (klien lama akan dianggap baru lagi)\n` +
+                            `* !clearclient* - 🗑️ Hapus seluruh riwayat memori/JSON klien\n` +
                             `* !help* / *!hellp* - ℹ️ Menampilkan panduan menu ini`;
 
                         await sock.sendMessage(senderInfo.targetJid, { text: menuText }, { quoted: msg });
+                        return;
+
+                    case 'balas':
+                        // Fitur proteksi: Hanya Boss yang dapat menjalankan perintah !balas
+                        if (!isBoss) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `❌ Akses ditolak. Perintah ini hanya dapat digunakan oleh Chief/Boss.`
+                            }, { quoted: msg });
+                            return;
+                        }
+
+                        if (args.length < 2) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `⚠️ *Format salah!*\n\nGunakan format:\n*!balas <nomor target> <isi pesan>*\n\nContoh:\n*!balas 6285256739684 Boleh kak, produk ready stock ya*`
+                            }, { quoted: msg });
+                            return;
+                        }
+
+                        const rawTarget = args.shift();
+                        const replyContent = args.join(' ').trim();
+
+                        // Normalisasi format JID tujuan
+                        let targetClientJid = '';
+                        if (rawTarget.toLowerCase().endsWith('@lid')) {
+                            targetClientJid = rawTarget.toLowerCase();
+                        } else {
+                            const cleanTargetNumber = formatToInternational(rawTarget);
+                            targetClientJid = `${cleanTargetNumber}@s.whatsapp.net`;
+                        }
+
+                        try {
+                            // Efek mengetik ke nomor customer sebelum mengirim
+                            await sock.sendPresenceUpdate('composing', targetClientJid);
+                            await new Promise(res => setTimeout(res, 1000));
+
+                            // Kirim pesan dari bot ke customer
+                            await sock.sendMessage(targetClientJid, { text: replyContent });
+
+                            await sock.sendPresenceUpdate('paused', targetClientJid);
+
+                            // Laporan konfirmasi kembali ke Boss
+                            const clientDisplay = rawTarget.replace(/\D/g, '');
+                            await sock.sendMessage(BOSS_NUMBER, {
+                                text: `✅ *PESAN TERKIRIM KE KLIEN*\n\n` +
+                                    `🎯 *Tujuan:* ${rawTarget}\n` +
+                                    `💬 *Isi Pesan:* "${replyContent}"\n` +
+                                    `🕒 *Waktu:* ${getFormattedDateTime()}`
+                            }, { quoted: msg });
+
+                            console.log(`[BALAS SUKSES] Pesan Boss terkirim ke ${targetClientJid}`);
+                        } catch (errBalas) {
+                            await sock.sendMessage(BOSS_NUMBER, {
+                                text: `❌ *Gagal Mengirim Pesan:* ${errBalas.message}`
+                            }, { quoted: msg });
+                        }
                         return;
 
                     case 'checkclient':
@@ -215,25 +274,54 @@ export default function setupMessageHandler(sock) {
                 }
             }
 
-            // =====================================================================
-            // LOGIKA FILTER NOMOR BARU & NOTIFIKASI KE BOSS
-            // =====================================================================
+            // Jika Boss mengirim chat biasa tanpa awalan '!', abaikan agar tidak meneruskan chat Boss ke dirinya sendiri
+            if (isBoss) return;
+
             const trackingKey = senderInfo.id;
-
-            // Jika nomor Boss sendiri yang chat biasa, lewati auto-reply
-            if (senderInfo.targetJid === BOSS_NUMBER || trackingKey === "6282299588447") {
-                return;
-            }
-
-            // Jika nomor sudah terdata di memori, lewati (bukan nomor baru)
-            if (repliedContactsMap.has(trackingKey)) {
-                return;
-            }
-
             const incomingTime = getFormattedDateTime();
-            console.log(`[PENGGUNA BARU] Menerima chat perdana dari ${pushName} (${senderInfo.targetJid})`);
+            const clientPhone = formatToInternational(senderInfo.id);
+            const waDirectLink = `https://wa.me/${clientPhone}`;
+            const previewMessage = incomingText.trim() ? incomingText.trim() : `_(Klien mengirim Media / Gambar / Dokumen)_`;
 
-            // 1. Simpan ke database lokal
+            // =====================================================================
+            // 2. KLIEN LAMA: JIKA KLIEN MEMBALAS / MENGIRIM CHAT LANJUTAN
+            // =====================================================================
+            if (repliedContactsMap.has(trackingKey)) {
+                // Update nama profil terbaru jika sebelumnya tanpa nama
+                const existingData = repliedContactsMap.get(trackingKey);
+                if (pushName && pushName !== 'Klien' && existingData.name !== pushName) {
+                    existingData.name = pushName;
+                    persistRepliedContacts();
+                }
+
+                console.log(`[FORWARD CHAT] Menerima balasan dari klien lama: ${pushName} (${clientPhone})`);
+
+                // Otomatis teruskan pesan balasan klien ke WhatsApp Boss
+                try {
+                    const forwardToBossText = `💬 *BALASAN DARI KLIEN* 💬\n\n` +
+                        `👤 *Nama Klien:* ${pushName}\n` +
+                        `📱 *Nomor HP:* ${clientPhone}\n` +
+                        `🔗 *Link Langsung:* ${waDirectLink}\n` +
+                        `🕒 *Waktu:* ${incomingTime}\n` +
+                        `💬 *Isi Pesan:*\n"${previewMessage}"\n\n` +
+                        `-----------------------------------------\n` +
+                        `👉 *Balas via Bot:* ketik:\n` +
+                        `*!balas ${clientPhone} <isi pesan>*`;
+
+                    await sock.sendMessage(BOSS_NUMBER, { text: forwardToBossText });
+                    console.log(`[FORWARD SUKSES] Pesan dari ${pushName} diteruskan ke Boss.`);
+                } catch (errFwd) {
+                    console.error('[Gagal Forward ke Boss]:', errFwd.message);
+                }
+                return;
+            }
+
+            // =====================================================================
+            // 3. KLIEN BARU: BALAS PERDANA DENGAN GAMBAR & LAPORKAN KE BOSS
+            // =====================================================================
+            console.log(`[KLIEN BARU] Chat perdana dari ${pushName} (${senderInfo.targetJid})`);
+
+            // 1. Simpan ke daftar memori & file JSON
             repliedContactsMap.set(trackingKey, {
                 name: pushName,
                 jid: senderInfo.targetJid,
@@ -241,7 +329,7 @@ export default function setupMessageHandler(sock) {
             });
             persistRepliedContacts();
 
-            // 2. Kirim pesan gambar & pembuka ke klien
+            // 2. Kirim gambar + caption pembuka ke klien
             try {
                 await sock.sendPresenceUpdate('composing', senderInfo.targetJid);
                 await new Promise(res => setTimeout(res, 1200));
@@ -258,19 +346,18 @@ export default function setupMessageHandler(sock) {
 
             console.log(`[SUKSES] Pesan selamat datang & gambar terkirim ke ${pushName}`);
 
-            // 3. Kirim Notifikasi Real-Time ke WhatsApp Boss
+            // 3. Kirim notifikasi klien baru ke Boss beserta instruksi balasannya
             try {
-                const clientPhone = formatToInternational(senderInfo.id);
-                const waDirectLink = `https://wa.me/${clientPhone}`;
-                const previewMessage = incomingText.trim() ? `"${incomingText.trim()}"` : `_(Mengirim Media/Lampiran)_`;
-
                 const notifBossText = `🔔 *NOTIFIKASI KLIEN BARU MASUK* 🔔\n\n` +
                     `👤 *Nama Klien:* ${pushName}\n` +
                     `📱 *Nomor HP:* ${clientPhone}\n` +
                     `🔗 *Link Langsung:* ${waDirectLink}\n` +
                     `🕒 *Waktu Chat:* ${incomingTime}\n` +
-                    `💬 *Pesan Pertama:* ${previewMessage}\n\n` +
-                    `_Pesan sambutan dan katalog Umi Dien telah otomatis dikirimkan ke kontak tersebut._ ✅`;
+                    `💬 *Pesan Pertama:* "${previewMessage}"\n\n` +
+                    `_Pesan sambutan Umi Dien telah dikirimkan ke kontak tersebut._ ✅\n\n` +
+                    `-----------------------------------------\n` +
+                    `👉 *Balas via Bot:* ketik:\n` +
+                    `*!balas ${clientPhone} <isi pesan>*`;
 
                 await sock.sendMessage(BOSS_NUMBER, { text: notifBossText });
                 console.log(`[NOTIFIKASI BOSS] Laporan klien baru (${pushName}) terkirim ke Boss.`);
@@ -279,7 +366,7 @@ export default function setupMessageHandler(sock) {
             }
 
         } catch (error) {
-            console.error('[Error Handler Chat Baru]:', error);
+            console.error('[Error Handler Chat]:', error);
         }
     });
 }
