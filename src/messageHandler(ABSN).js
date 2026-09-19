@@ -1184,10 +1184,6 @@ async function refreshMemoryCacheFromRedis(forceReload = false) {
 
         if (Array.isArray(sessions) && sessions.length > 0) {
             const newHash = JSON.stringify(sessions);
-            if (!forceReload && lastKnownSessionsHash && lastKnownSessionsHash !== newHash && currentSock) {
-                console.log("⏰ [Auto-Scheduler] 🔄 Terdeteksi perubahan jadwal sesi praktikum dari Admin! Menyiarkan Skenario 8...");
-                broadcastScheduleChange(currentSock, sessions).catch(() => {});
-            }
             lastKnownSessionsHash = newHash;
             cachedSessions = sessions;
         }
@@ -1394,8 +1390,8 @@ async function autonomousWitaSchedulerTick(sock) {
         const isSessionRunningNow = (currentTotalMin >= startMin && currentTotalMin <= closeMin);
 
         // 1. EVENT: PEMBUKAAN SESI PRESENSI (Skenario 1 - Tepat jam sesi dibuka)
-        // Terpicu jika sesi sedang AKTIF/DIBUKA hari ini dan Skenario 1 belum pernah disiarkan hari ini
-        const openEventKey = `open_${todayDateStr}_${sessionId}`;
+        // Terpicu jika sesi sedang AKTIF/DIBUKA hari ini dan Skenario 1 belum pernah disiarkan hari ini untuk jam mulai ini
+        const openEventKey = `open_${todayDateStr}_${sessionId}_${startStr}`;
         if (isSessionRunningNow) {
             if (!sentEventsToday.has(openEventKey)) {
                 sentEventsToday.add(openEventKey);
@@ -1410,7 +1406,7 @@ async function autonomousWitaSchedulerTick(sock) {
         }
 
         // 2. EVENT: PERINGATAN SISA WAKTU TOLERANSI 15 MENIT (Skenario 22 / Skenario 2)
-        const warnEventKey = `warn_${todayDateStr}_${sessionId}`;
+        const warnEventKey = `warn_${todayDateStr}_${sessionId}_${startStr}`;
         if (isSessionRunningNow && remainingMinutes <= 15 && remainingMinutes > 0) {
             if (!sentEventsToday.has(warnEventKey)) {
                 sentEventsToday.add(warnEventKey);
@@ -1420,7 +1416,7 @@ async function autonomousWitaSchedulerTick(sock) {
         }
 
         // 3. EVENT: PENUTUPAN SESI RESMI (Skenario 4 - Tepat saat batas toleransi berakhir)
-        const closeEventKey = `close_${todayDateStr}_${sessionId}`;
+        const closeEventKey = `close_${todayDateStr}_${sessionId}_${closeStr}`;
         if (currentTotalMin >= closeMin) {
             if (!sentEventsToday.has(closeEventKey)) {
                 sentEventsToday.add(closeEventKey);
