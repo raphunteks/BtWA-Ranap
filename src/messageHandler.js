@@ -750,10 +750,21 @@ export default function setupMessageHandler(sock) {
             const isGroup = rawSender ? rawSender.endsWith('@g.us') : false;
             
             // JID target balasan (chat id bersih)
-            const sender = cleanJid(rawSender);
+            let sender = cleanJid(rawSender);
             // JID pembuat pesan asli (participant jika di grup)
-            const participant = isGroup ? cleanJid(msg.key.participant || msg.participant) : sender;
-            const pureSender = participant || sender;
+            let participant = isGroup ? cleanJid(msg.key.participant || msg.participant) : sender;
+            let pureSender = participant || sender;
+
+            // Resolusi otomatis LID ke Nomor HP (jika chat pribadi via akun LID)
+            if (!isGroup && sender.endsWith('@lid')) {
+                try {
+                    const resolved = await sock?.signalRepository?.lidToJid?.(sender);
+                    if (resolved) sender = cleanJid(resolved);
+                } catch(e) {}
+                if (sender.includes('247922893566044')) {
+                    sender = ownerPureJid;
+                }
+            }
 
             const prefix = '!';
             if (!text.startsWith(prefix) && !text.startsWith('.')) return;
