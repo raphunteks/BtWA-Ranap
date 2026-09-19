@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
@@ -139,6 +140,158 @@ async function redisDelete(key) {
 }
 
 // =========================================================================
+// CLOUD SESSION PERSISTENCE (UPSTASH REDIS CLOUD FOR RAILWAY AUTO-RESTORE)
+// =========================================================================
+const sessionSyncDebounce = new Map();
+
+async function backupSessionToRedis(botId) {
+    const sessionDir = `${sessionsPath}/${botId}`;
+    if (!fs.existsSync(sessionDir)) return;
+    try {
+        const files = fs.readdirSync(sessionDir);
+        for (const file of files) {
+            if (file === 'creds.json' || file.startsWith('app-state-sync-key') || file.startsWith('session-')) {
+                const filePath = path.join(sessionDir, file);
+                const content = fs.readFileSync(filePath, 'utf-8');
+                await redisSet(`session:${botId}:${file}`, content);
+            }
+        }
+        console.log(`☁️ [Session Cloud] Sesi bot [${botId}] berhasil disinkronkan ke Upstash Redis.`);
+    } catch(e) {
+        console.error(`[Session Cloud] Gagal mencadangkan sesi bot [${botId}]:`, e.message || e);
+    }
+}
+
+function debouncedBackupSession(botId) {
+    if (sessionSyncDebounce.has(botId)) {
+        clearTimeout(sessionSyncDebounce.get(botId));
+    }
+    sessionSyncDebounce.set(botId, setTimeout(() => {
+        backupSessionToRedis(botId);
+        sessionSyncDebounce.delete(botId);
+    }, 4000));
+}
+
+async function restoreSessionFromRedis(botId) {
+    const sessionDir = `${sessionsPath}/${botId}`;
+    if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+    
+    // Jika creds.json sudah ada secara lokal, tidak perlu restore
+    const credsPath = path.join(sessionDir, 'creds.json');
+    if (fs.existsSync(credsPath)) {
+        return true;
+    }
+
+    try {
+        const keys = await redisKeys(`session:${botId}:*`);
+        if (!keys || keys.length === 0) return false;
+        
+        console.log(`☁️ [Session Cloud] Memulihkan ${keys.length} file sesi untuk bot [${botId}] dari Upstash Redis...`);
+        for (const key of keys) {
+            const fileName = key.replace(`session:${botId}:`, '');
+            const content = await redisGet(key);
+            if (content) {
+                fs.writeFileSync(path.join(sessionDir, fileName), typeof content === 'string' ? content : JSON.stringify(content));
+            }
+        }
+        console.log(`✅ [Session Cloud] Sesi bot [${botId}] sukses dipulihkan dari Redis. Auto-connect tanpa QR!`);
+        return true;
+    } catch(e) {
+        console.error(`[Session Cloud] Gagal memulihkan sesi bot [${botId}]:`, e.message || e);
+        return false;
+    }
+}
+
+// =========================================================================
+// SCOPED SOCKET & ZERO-DOWNTIME HOT SCRIPT RELOADING
+// =========================================================================
+function createScopedSocket(realSock, bot) {
+    // Bersihkan listener lama dari script versi sebelumnya agar tidak dobel / leak
+    if (bot._scopedListeners && bot._scopedListeners.length > 0) {
+        for (const { event, listener } of bot._scopedListeners) {
+            try { realSock.ev.off(event, listener); } catch(e) {}
+        }
+    }
+    bot._scopedListeners = [];
+
+    // Proxy EventEmitter agar kita bisa melacak dan mencabut listener saat reload
+    const scopedEv = {
+        ...realSock.ev,
+        on: (event, listener) => {
+            bot._scopedListeners.push({ event, listener });
+            return realSock.ev.on(event, listener);
+        },
+        off: (event, listener) => {
+            bot._scopedListeners = bot._scopedListeners.filter(item => item.listener !== listener);
+            return realSock.ev.off(event, listener);
+        }
+    };
+
+    return new Proxy(realSock, {
+        get(target, prop) {
+            if (prop === 'ev') return scopedEv;
+            return target[prop];
+        }
+    });
+}
+
+// Hot-reload script logika bot tanpa mematikan koneksi WhatsApp socket!
+async function loadOrReloadBotScript(botId, scriptName, isReload = false) {
+    const bot = bots.get(botId);
+    if (!bot || !bot.sock) return false;
+
+    const targetScript = scriptName || bot.script || 'messageHandler.js';
+    const absoluteScriptPath = path.resolve(scriptsPath, targetScript);
+
+    if (!fs.existsSync(absoluteScriptPath)) {
+        console.warn(`⚠️ Script '${targetScript}' tidak ditemukan di ${absoluteScriptPath}.`);
+        return false;
+    }
+
+    try {
+        console.log(`⚡ ${isReload ? 'Hot-Reloading' : 'Loading'} script '${targetScript}' untuk bot [${botId}]...`);
+        const fileUrl = pathToFileURL(absoluteScriptPath).href + `?t=${Date.now()}`;
+        const handlerModule = await import(fileUrl);
+        
+        if (typeof handlerModule.default !== 'function') {
+            throw new Error(`Script '${targetScript}' tidak mengekspor default function!`);
+        }
+
+        // Buat scoped socket bersih dan daftarkan handler baru
+        const scopedSock = createScopedSocket(bot.sock, bot);
+        handlerModule.default(scopedSock);
+
+        bot.script = targetScript;
+        console.log(`✅ ${isReload ? 'Hot-Reload' : 'Load'} script '${targetScript}' sukses untuk bot [${botId}] (Koneksi WA Tetap Aktif 100%).`);
+        io.emit('bot_updated', getSafeBotState(botId));
+        return true;
+    } catch(err) {
+        console.error(`❌ Gagal me-load script '${targetScript}' untuk bot [${botId}]:`, err.message || err);
+        return false;
+    }
+}
+
+// Me-reload script untuk bot tertentu
+async function reloadBotHandler(botId) {
+    const bot = bots.get(botId);
+    if (!bot) throw new Error(`Bot [${botId}] tidak ditemukan.`);
+    return await loadOrReloadBotScript(botId, bot.script, true);
+}
+
+// Me-reload semua bot yang menggunakan file script tertentu (misal: 'messageHandler.js')
+async function reloadScriptForBots(scriptName) {
+    console.log(`⚡ Memicu Hot-Reload untuk seluruh bot yang menggunakan script '${scriptName}'...`);
+    const affectedBots = Array.from(bots.values()).filter(b => b.script === scriptName);
+    let successCount = 0;
+    for (const b of affectedBots) {
+        const ok = await loadOrReloadBotScript(b.id, scriptName, true);
+        if (ok) successCount++;
+    }
+    console.log(`⚡ Hot-Reload selesai: ${successCount}/${affectedBots.length} bot diperbarui. Bot dengan script lain TIDAK terganggu.`);
+    return { affected: affectedBots.length, success: successCount };
+}
+
+// =========================================================================
 // MULTI-BOT INSTANCE STATE & MANAGEMENT
 // =========================================================================
 const bots = new Map();
@@ -222,6 +375,9 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
     console.log(`🔄 Memulai Baileys v7 untuk Bot: "${botId}" (Script: ${scriptName})`);
     const sessionDir = `${sessionsPath}/${botId}`;
     if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+
+    // Restore sesi dari Upstash Redis jika di Railway container baru di-spawn
+    await restoreSessionFromRedis(botId);
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const { version, isLatest } = await fetchLatestBaileysVersion();
@@ -358,32 +514,14 @@ async function startBot(botId, scriptName = 'messageHandler.js') {
         }
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    // Auto-save creds ke disk dan auto-sync ke Upstash Redis Cloud
+    sock.ev.on('creds.update', async () => {
+        await saveCreds();
+        debouncedBackupSession(botId);
+    });
 
-    // Dynamic Module Loader untuk Script Handler
-    try {
-        const absoluteScriptPath = path.resolve(scriptsPath, scriptName);
-        if (fs.existsSync(absoluteScriptPath)) {
-            const fileUrl = pathToFileURL(absoluteScriptPath).href + `?t=${Date.now()}`;
-            const handlerModule = await import(fileUrl);
-            if (handlerModule.default) {
-                handlerModule.default(sock); 
-                console.log(`⚡ Script handler '${scriptName}' sukses di-load untuk bot ${botId}.`);
-            }
-        } else {
-            console.warn(`⚠️ Peringatan: Script '${scriptName}' tidak ditemukan di ${absoluteScriptPath}. Menggunakan fallback messageHandler.js jika tersedia.`);
-            if (scriptName !== 'messageHandler.js') {
-                const fallbackPath = path.resolve(scriptsPath, 'messageHandler.js');
-                if (fs.existsSync(fallbackPath)) {
-                    const fallbackUrl = pathToFileURL(fallbackPath).href + `?t=${Date.now()}`;
-                    const fbModule = await import(fallbackUrl);
-                    if (fbModule.default) fbModule.default(sock);
-                }
-            }
-        }
-    } catch (err) {
-        console.error(`❌ Gagal me-load script '${scriptName}' untuk bot ${botId}:`, err.message || err);
-    }
+    // Load Script Handler melalui Scoped Socket (Zero-Downtime & Isolated Architecture)
+    await loadOrReloadBotScript(botId, scriptName, false);
 }
 
 // Me-restart bot tanpa menghapus sesi
@@ -497,6 +635,33 @@ app.post('/api/restart-bot', async (req, res) => {
     }
 });
 
+// REST Endpoint: Hot-Reload Script untuk Bot Tertentu (Zero-Downtime)
+app.post('/api/reload-bot-script', async (req, res) => {
+    const { botId } = req.body;
+    if (!botId) return res.status(400).json({ success: false, error: 'botId wajib diisi!' });
+    try {
+        const ok = await reloadBotHandler(botId);
+        res.json({ 
+            success: ok, 
+            message: ok ? `Script bot [${botId}] sukses di-reload tanpa memutus koneksi WhatsApp!` : `Gagal reload script bot [${botId}].` 
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// REST Endpoint: Hot-Reload Script untuk Seluruh Bot Pengguna Script Tersebut
+app.post('/api/reload-script', async (req, res) => {
+    const { scriptName } = req.body;
+    if (!scriptName) return res.status(400).json({ success: false, error: 'scriptName wajib diisi!' });
+    try {
+        const result = await reloadScriptForBots(scriptName);
+        res.json({ success: true, message: `Hot-reload selesai untuk script '${scriptName}'.`, result });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // =========================================================================
 // SOCKET.IO EVENT HANDLER (REAL-TIME PORTAL COMMUNICATION)
 // =========================================================================
@@ -554,6 +719,34 @@ io.on('connection', (socket) => {
         }
     });
 
+    // Hot-Reload Script untuk Bot Tertentu (Tanpa Disconnect)
+    socket.on('reload_bot_script', async ({ botId }) => {
+        try {
+            const ok = await reloadBotHandler(botId);
+            if (ok) {
+                socket.emit('bot_reloaded', { 
+                    botId, 
+                    success: true, 
+                    message: `⚡ Script bot [${botId}] berhasil di-reload tanpa memutus koneksi WhatsApp!` 
+                });
+            } else {
+                socket.emit('error', `Gagal me-reload script untuk bot [${botId}].`);
+            }
+        } catch(err) {
+            socket.emit('error', 'Gagal reload script bot: ' + err.message);
+        }
+    });
+
+    // Hot-Reload untuk Semua Bot yang Menggunakan Script Tertentu
+    socket.on('reload_script_all', async ({ scriptName }) => {
+        try {
+            const res = await reloadScriptForBots(scriptName);
+            socket.emit('script_reloaded_all', { scriptName, ...res });
+        } catch(err) {
+            socket.emit('error', 'Gagal reload script: ' + err.message);
+        }
+    });
+
     // Kirim Pesan Uji Coba dari Web Portal
     socket.on('send_test_message', async ({ botId, targetNumber, message }) => {
         try {
@@ -575,13 +768,17 @@ io.on('connection', (socket) => {
             }
             bots.delete(botId);
             try { fs.rmSync(`${sessionsPath}/${botId}`, { recursive: true, force: true }); } catch(e){}
+            try {
+                const sKeys = await redisKeys(`session:${botId}:*`);
+                for (const k of sKeys) await redisDelete(k);
+            } catch(e) {}
             await saveBotsConfig();
             io.emit('bot_removed', botId);
         }
     });
 
-    // Upload script handler baru
-    socket.on('upload_script', async ({ fileName, content }) => {
+    // Upload script handler baru (dengan auto hot-reload ke bot pengguna)
+    socket.on('upload_script', async ({ fileName, content, autoReload = true }) => {
         if (!fileName || !fileName.endsWith('.js')) return socket.emit('error', 'Hanya file .js yang diperbolehkan.');
         try {
             console.log(`📥 Menerima upload script baru: ${fileName}`);
@@ -593,6 +790,18 @@ io.on('connection', (socket) => {
                 bots: Array.from(bots.values()).map(b => getSafeBotState(b.id)),
                 scripts: getAvailableScripts()
             });
+
+            // Hot-reload otomatis jika ada bot aktif yang menggunakan script ini
+            if (autoReload) {
+                const reloadRes = await reloadScriptForBots(fileName);
+                if (reloadRes.affected > 0) {
+                    io.emit('terminal_log', {
+                        time: new Date().toLocaleTimeString('id-ID', { hour12: false }),
+                        message: `⚡ Otomatis Hot-Reload script '${fileName}' pada ${reloadRes.success} bot aktif tanpa memutus koneksi!`,
+                        type: 'info'
+                    });
+                }
+            }
         } catch (err) {
             console.error('Upload Error:', err.message || err);
             socket.emit('error', 'Gagal menyimpan script ke server.');
@@ -610,7 +819,8 @@ async function initializeSystem() {
         const contentStr = await redisGet(key);
         if (contentStr) {
             const fileName = key.replace('script:', '');
-            fs.writeFileSync(`${scriptsPath}/${fileName}`, JSON.parse(contentStr));
+            const parsedContent = typeof contentStr === 'string' ? (contentStr.startsWith('"') ? JSON.parse(contentStr) : contentStr) : JSON.stringify(contentStr);
+            fs.writeFileSync(`${scriptsPath}/${fileName}`, parsedContent);
             console.log(`📄 Script disinkronkan dari Redis: ${fileName}`);
         }
     }
@@ -618,8 +828,13 @@ async function initializeSystem() {
     const configs = await redisGet('bots_config') || [];
     console.log(`🤖 Ditemukan ${configs.length} konfigurasi bot tersimpan.`);
     
+    // Staggered queue (Jeda 3.5 detik per-bot agar tidak bentrok/rate-limit di WhatsApp)
+    let delay = 0;
     for (const conf of configs) {
-        startBot(conf.id, conf.script || 'messageHandler.js');
+        setTimeout(() => {
+            startBot(conf.id, conf.script || 'messageHandler.js');
+        }, delay);
+        delay += 3500;
     }
 }
 
