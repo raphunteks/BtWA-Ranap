@@ -1031,34 +1031,19 @@ Aku *Dents Web BOT*, siap membantu kamu.
 
 _Ketik perintah di atas untuk menggunakan fitur._`;
 
-                    // Mengirim sebagai Extended Text Message dengan Rich Card Preview (Paripurna untuk iOS & Android)
+                    // Mengirim sebagai Pesan Biasa (Reply Pesan Pengirim di Grup maupun Private - 100% Support & Tampil di iOS & Android)
                     try {
-                        const cardContext = {
-                            mentionedJid: [ownerPureJid, ownerPureLid].filter(Boolean),
-                            externalAdReply: {
-                                title: "Dents Web WhatsApp Gateway",
-                                body: "RSUD Kota Kendari • Multi-Device Portal",
-                                mediaType: 1,
-                                previewType: 0,
-                                renderLargerThumbnail: true,
-                                ...(thumbBuffer ? { thumbnail: thumbBuffer } : {}),
-                                thumbnailUrl: "https://dentsweb-portal.vercel.app/axalogo.png",
-                                sourceUrl: "https://dentsweb-portal.vercel.app/"
-                            }
-                        };
-
                         await sock.sendMessage(sender, {
                             text: bodyText,
-                            mentions: [ownerPureJid, ownerPureLid].filter(Boolean),
-                            contextInfo: cardContext
+                            mentions: [ownerPureJid, ownerPureLid].filter(Boolean)
                         }, { quoted: msg });
                     } catch(e) {
-                        console.error("[Menu/Help] Error sending rich card, falling back to simple text:", e);
-                        // Fallback teks standar jika render kartu bermasalah
+                        console.error("[Menu/Help] Error reply message:", e);
+                        // Fallback jika quoted msg bermasalah
                         await sock.sendMessage(sender, { 
                             text: bodyText, 
                             mentions: [ownerPureJid, ownerPureLid].filter(Boolean) 
-                        }, { quoted: msg });
+                        });
                     }
                     break;
                 }
