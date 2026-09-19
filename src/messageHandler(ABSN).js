@@ -1130,6 +1130,7 @@ let cachedFormats = [];
 let lastKnownSessionsHash = "";
 let lastKnownGeofenceHash = "";
 const sentEventsToday = new Set();
+const recentBroadcastMap = new Map();
 let isSchedulerRunning = false;
 
 // Format Template Fallback Darurat jika Redis lambat merespons
@@ -1231,6 +1232,15 @@ async function broadcastScenarioToStudents(sock, scenarioId, dataObj = {}) {
         if (!phone) continue;
         const cleanDigits = sanitizeNumber(phone);
         if (!cleanDigits) continue;
+
+        // Layer Deduplikasi 60 Detik (Mencegah pesan dobel dalam rentang waktu berdekatan)
+        const dedupKey = `${cleanDigits}_${scenarioId}_${dataObj.shift || ''}`;
+        const lastSent = recentBroadcastMap.get(dedupKey);
+        if (lastSent && (Date.now() - lastSent) < 60000) {
+            console.log(`[Auto-Scheduler] ⏭️ Melewati pesan duplikat ke ${cleanDigits} untuk Skenario ${scenarioId} (cooldown 60s aktif).`);
+            continue;
+        }
+        recentBroadcastMap.set(dedupKey, Date.now());
 
         const clusterName = clusterMap.get(st.clusterId) || st.clusterId || st.cluster || 'Radiologi Kedokteran Gigi';
 
@@ -1520,6 +1530,16 @@ function startOutboxQueueWorker(sock) {
                         }
                         targetJid = `${cleanDigits}@s.whatsapp.net`;
                     }
+
+                    // Filter deduplikasi outbox 60 detik
+                    const outboxDedupKey = `${targetJid}_${rawMessage.slice(0, 50)}`;
+                    const lastOutboxSent = recentBroadcastMap.get(outboxDedupKey);
+                    if (lastOutboxSent && (Date.now() - lastOutboxSent) < 60000) {
+                        console.log(`[Outbox Worker] ⏭️ Menghapus item duplikat antrian ke ${targetJid} (cooldown 60s aktif).`);
+                        processedIds.push(item.id);
+                        continue;
+                    }
+                    recentBroadcastMap.set(outboxDedupKey, Date.now());
 
                     // Kirim pesan WhatsApp melalui Baileys
                     await currentSock.sendMessage(targetJid, {
