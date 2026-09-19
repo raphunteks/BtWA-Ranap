@@ -1208,9 +1208,18 @@ async function refreshMemoryCacheFromRedis() {
 
 // Broadcast skenario umum ke seluruh mahasiswa dengan throttling aman (350ms antar pesan)
 async function broadcastScenarioToStudents(sock, scenarioId, dataObj = {}) {
-    if (!sock) return;
-    const students = await callDbGet('axaxyz_students') || [];
+    const [students, clusters] = await Promise.all([
+        callDbGet('axaxyz_students'),
+        callDbGet('axaxyz_clusters')
+    ]);
     if (!Array.isArray(students) || students.length === 0) return;
+
+    const clusterMap = new Map();
+    if (Array.isArray(clusters)) {
+        clusters.forEach(c => {
+            if (c.id) clusterMap.set(c.id, c.name);
+        });
+    }
 
     let templateStr = fallbackFormatsMap[scenarioId] || "";
     if (cachedFormats && cachedFormats.length > 0) {
@@ -1225,37 +1234,50 @@ async function broadcastScenarioToStudents(sock, scenarioId, dataObj = {}) {
         const cleanDigits = sanitizeNumber(phone);
         if (!cleanDigits) continue;
 
+        const clusterName = clusterMap.get(st.clusterId) || st.clusterId || st.cluster || 'Radiologi Kedokteran Gigi';
+
         const textMsg = compileScenarioTemplate(templateStr, {
             ...dataObj,
             namaLengkap: st.name || '',
             nim: st.nim || '',
-            kelompok: st.clusterId || st.cluster || '',
+            kelompok: clusterName,
             password: st.password || '',
             link: WEB_PORTAL_URL
         });
 
-        try {
-            await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, {
-                text: formatForWhatsApp(textMsg)
-            });
-            sentCount++;
-        } catch (e) {}
+        if (sock && typeof sock.sendMessage === 'function') {
+            try {
+                await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, {
+                    text: formatForWhatsApp(textMsg)
+                });
+                sentCount++;
+            } catch (e) {
+                console.error(`[Auto-Scheduler] ❌ Gagal kirim Baileys ke ${cleanDigits}:`, e.message);
+            }
+        }
 
         // Jeda 350ms antar kirim pesan untuk memproteksi sesi Baileys
         await new Promise(r => setTimeout(r, 350));
     }
-    console.log(`📢 [Auto-Scheduler WITA] ✅ Sukses mengirim siaran Skenario ${scenarioId} ke ${sentCount} mahasiswa.`);
+    console.log(`📢 [Auto-Scheduler WITA] ✅ Sukses memproses siaran Skenario ${scenarioId} ke ${sentCount} mahasiswa.`);
 }
 
 // Broadcast khusus sisa toleransi (Skenario 22/2) kepada mahasiswa yang belum absen
 async function broadcastWarningToUnloggedStudents(sock, session, closeStr) {
-    if (!sock) return;
-    const [students, logs] = await Promise.all([
-        callDbGet('axaxyz_students') || [],
-        callDbGet('axaxyz_logs') || []
+    const [students, logs, clusters] = await Promise.all([
+        callDbGet('axaxyz_students'),
+        callDbGet('axaxyz_logs'),
+        callDbGet('axaxyz_clusters')
     ]);
 
     if (!Array.isArray(students) || students.length === 0) return;
+
+    const clusterMap = new Map();
+    if (Array.isArray(clusters)) {
+        clusters.forEach(c => {
+            if (c.id) clusterMap.set(c.id, c.name);
+        });
+    }
 
     const wita = getWitaTimeGreeting();
     const todayDateStr = wita.dateIso;
@@ -1289,6 +1311,8 @@ async function broadcastWarningToUnloggedStudents(sock, session, closeStr) {
         const cleanDigits = sanitizeNumber(phone);
         if (!cleanDigits) continue;
 
+        const clusterName = clusterMap.get(st.clusterId) || st.clusterId || st.cluster || 'Radiologi Kedokteran Gigi';
+
         const textMsg = compileScenarioTemplate(templateStr, {
             shift: session.name,
             jamSesi: session.startTime || session.start,
@@ -1296,16 +1320,18 @@ async function broadcastWarningToUnloggedStudents(sock, session, closeStr) {
             sisaWaktu: "15 Menit",
             namaLengkap: st.name || '',
             nim: st.nim || '',
-            kelompok: st.clusterId || st.cluster || '',
+            kelompok: clusterName,
             link: WEB_PORTAL_URL
         });
 
-        try {
-            await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, {
-                text: formatForWhatsApp(textMsg)
-            });
-            sentCount++;
-        } catch (e) {}
+        if (sock && typeof sock.sendMessage === 'function') {
+            try {
+                await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, {
+                    text: formatForWhatsApp(textMsg)
+                });
+                sentCount++;
+            } catch (e) {}
+        }
 
         await new Promise(r => setTimeout(r, 350));
     }
@@ -1339,7 +1365,7 @@ async function broadcastScheduleChange(sock, sessions) {
 
 // Tick lokal dalam memori RAM (Dieksekusi setiap 30 detik tanpa spam request ke Redis)
 async function autonomousWitaSchedulerTick(sock) {
-    if (!sock || !Array.isArray(cachedSessions) || cachedSessions.length === 0) return;
+    if (!Array.isArray(cachedSessions) || cachedSessions.length === 0) return;
 
     const wita = getWitaTimeGreeting();
     const currentTotalMin = wita.hours * 60 + parseInt(wita.minutes, 10);
@@ -1363,42 +1389,45 @@ async function autonomousWitaSchedulerTick(sock) {
         const closeStr = calculateCloseTimeStr(eH, eM, tolMins);
         const sessionId = session.id || session.name || "default";
 
-        // 1. EVENT: PEMBUKAAN SESI PRESENSI (Tepat jam startTime WITA)
+        const isSessionRunningNow = (currentTotalMin >= startMin && currentTotalMin <= closeMin);
+
+        // 1. EVENT: PEMBUKAAN SESI PRESENSI (Skenario 1 - Tepat jam sesi dibuka)
+        // Terpicu jika sesi sedang AKTIF/DIBUKA hari ini dan Skenario 1 belum pernah disiarkan hari ini
         const openEventKey = `open_${todayDateStr}_${sessionId}`;
-        if (currentTotalMin >= startMin && currentTotalMin <= startMin + 2) {
+        if (isSessionRunningNow) {
             if (!sentEventsToday.has(openEventKey)) {
                 sentEventsToday.add(openEventKey);
-                console.log(`⏰ [Auto-Scheduler WITA] 🔔 Memasuki jam buka sesi [${session.name}] (${startStr} WITA). Menyiarkan Skenario 1...`);
+                console.log(`⏰ [Auto-Scheduler WITA] 🔔 Sesi presensi [${session.name}] sedang AKTIF/DIBUKA (${startStr} - ${closeStr} WITA). Menyiarkan Skenario 1 "Pembukaan Sesi" ke seluruh mahasiswa...`);
                 broadcastScenarioToStudents(sock, 1, {
                     shift: session.name,
                     jamSesi: startStr,
                     jamSelesai: endStr,
                     jamTutup: closeStr
-                }).catch(e => console.error('[Auto-Scheduler Error]', e.message));
+                }).catch(e => console.error('[Auto-Scheduler Error Skenario 1]', e.message));
             }
         }
 
-        // 2. EVENT: PERINGATAN SISA WAKTU TOLERANSI 15 MENIT
+        // 2. EVENT: PERINGATAN SISA WAKTU TOLERANSI 15 MENIT (Skenario 22 / Skenario 2)
         const warnEventKey = `warn_${todayDateStr}_${sessionId}`;
-        if (remainingMinutes <= 15 && remainingMinutes >= 12 && currentTotalMin > startMin) {
+        if (isSessionRunningNow && remainingMinutes <= 15 && remainingMinutes > 0) {
             if (!sentEventsToday.has(warnEventKey)) {
                 sentEventsToday.add(warnEventKey);
-                console.log(`⏰ [Auto-Scheduler WITA] ⏳ Toleransi sesi [${session.name}] tersisa 15 menit. Menyiarkan Skenario 22/2...`);
-                broadcastWarningToUnloggedStudents(sock, session, closeStr).catch(e => console.error('[Auto-Scheduler Error]', e.message));
+                console.log(`⏰ [Auto-Scheduler WITA] ⏳ Sisa waktu toleransi sesi [${session.name}] tersisa <= 15 menit (${remainingMinutes} menit lagi). Menyiarkan Skenario 22/2...`);
+                broadcastWarningToUnloggedStudents(sock, session, closeStr).catch(e => console.error('[Auto-Scheduler Error Skenario 22]', e.message));
             }
         }
 
-        // 3. EVENT: PENUTUPAN SESI RESMI (Tepat jam closingTime WITA)
+        // 3. EVENT: PENUTUPAN SESI RESMI (Skenario 4 - Tepat saat batas toleransi berakhir)
         const closeEventKey = `close_${todayDateStr}_${sessionId}`;
-        if (currentTotalMin >= closeMin && currentTotalMin <= closeMin + 2) {
+        if (currentTotalMin >= closeMin) {
             if (!sentEventsToday.has(closeEventKey)) {
                 sentEventsToday.add(closeEventKey);
-                console.log(`⏰ [Auto-Scheduler WITA] 🔴 Batas waktu toleransi sesi [${session.name}] telah berakhir (${closeStr} WITA). Menyiarkan Skenario 4...`);
+                console.log(`⏰ [Auto-Scheduler WITA] 🔴 Batas waktu toleransi sesi [${session.name}] telah berakhir (${closeStr} WITA). Menyiarkan Skenario 4 "Penutupan Sesi"...`);
                 broadcastScenarioToStudents(sock, 4, {
                     shift: session.name,
                     jamTutup: closeStr,
                     statusKehadiran: "Sesi telah resmi ditutup."
-                }).catch(e => console.error('[Auto-Scheduler Error]', e.message));
+                }).catch(e => console.error('[Auto-Scheduler Error Skenario 4]', e.message));
             }
         }
     }
@@ -1412,8 +1441,12 @@ function startAutonomousAttendanceScheduler(sock) {
 
     console.log("⏰ [Auto-Scheduler WITA] Mesin cron penjadwal presensi otonom AKTIF (Memory-First, Zero-Spam Redis, 30s Local Ticker).");
 
-    // Inisialisasi cache memori pertama kali
-    refreshMemoryCacheFromRedis().catch(() => {});
+    // Inisialisasi cache memori pertama kali & langsung jalankan evaluasi jam pertama
+    refreshMemoryCacheFromRedis().then(() => {
+        if (currentSock) {
+            autonomousWitaSchedulerTick(currentSock).catch(() => {});
+        }
+    }).catch(() => {});
 
     // Refresh lambat data sesi & geofence dari Redis setiap 3 Menit (180.000 ms)
     setInterval(() => {
