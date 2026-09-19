@@ -321,6 +321,76 @@ function getWitaTimeGreeting() {
     };
 }
 
+function enrichSessionWithWitaStatus(s, currentWitaHours, currentWitaMinutes) {
+    const currentMins = currentWitaHours * 60 + currentWitaMinutes;
+    const startStr = s.startTime || s.start || "08:00";
+    const endStr = s.endTime || s.end || "16:00";
+    const tolMins = typeof s.toleranceMinutes === 'number' ? s.toleranceMinutes : 15;
+
+    const [sH, sM] = startStr.split(':').map(Number);
+    const [eH, eM] = endStr.split(':').map(Number);
+
+    let closingH = eH;
+    let closingM = eM;
+    if (s.calculatedClosingTime) {
+        const parts = s.calculatedClosingTime.split(':').map(Number);
+        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+            closingH = parts[0];
+            closingM = parts[1];
+        }
+    } else if (s.lateLimit && s.lateLimit !== endStr) {
+        const parts = s.lateLimit.split(':').map(Number);
+        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+            closingH = parts[0];
+            closingM = parts[1];
+        }
+    } else {
+        const totalClosing = eH * 60 + eM + tolMins;
+        closingH = Math.floor((totalClosing / 60) % 24);
+        closingM = totalClosing % 60;
+    }
+
+    const startTotal = sH * 60 + sM;
+    const closingTotal = closingH * 60 + closingM;
+
+    const closingTimeStr = `${String(closingH).padStart(2, '0')}:${String(closingM).padStart(2, '0')}`;
+    const isRunningNow = !!s.active && (currentMins >= startTotal && currentMins <= closingTotal);
+    const isUpcoming = !!s.active && (currentMins < startTotal);
+    const isPassed = !!s.active && (currentMins > closingTotal);
+
+    let remainingMinutes = 0;
+    let minutesToStart = 0;
+    if (isRunningNow) {
+        remainingMinutes = closingTotal - currentMins;
+    } else if (isUpcoming) {
+        minutesToStart = startTotal - currentMins;
+    }
+
+    let statusLabel = "⚪ Non-Aktif";
+    if (isRunningNow) {
+        statusLabel = `🟢 Berlangsung (Sisa ${remainingMinutes} mnt)`;
+    } else if (isUpcoming) {
+        statusLabel = `🟡 Mulai dlm ${minutesToStart} mnt`;
+    } else if (isPassed) {
+        statusLabel = `🔴 Selesai`;
+    }
+
+    return {
+        ...s,
+        name: s.name || s.title || "Sesi Praktikum",
+        startStr,
+        endStr,
+        closingTimeStr,
+        isRunningNow,
+        isUpcoming,
+        isPassed,
+        remainingMinutes,
+        minutesToStart,
+        statusLabel
+    };
+}
+
+
 function enforceCorrectGreeting(text, correctGreeting) {
     if (!text || !correctGreeting) return text;
     return text.replace(/(selamat pagi|selamat siang|selamat sore|selamat malam)/gi, correctGreeting);
@@ -412,8 +482,14 @@ function detectStudentIntent(rawText) {
     if (t.startsWith('!menu') || t.startsWith('/menu') || t.startsWith('!help') || t.startsWith('/help') || t === 'bantuan' || t === 'menu') {
         return 'menu';
     }
+    if (t.startsWith('!broadcastjadwal') || t.startsWith('/broadcastjadwal')) {
+        return 'broadcastjadwal';
+    }
     if (t.startsWith('!broadcast ') || t.startsWith('/broadcast ')) {
         return 'broadcast';
+    }
+    if (t.startsWith('!sesi') || t.startsWith('/sesi')) {
+        return 'sesi';
     }
     if (t.startsWith('!stats') || t.startsWith('/stats')) {
         return 'stats';
@@ -1038,9 +1114,30 @@ ${studentProfile}
 
 // =========================================================================
 // BACKGROUND WORKER: DISPATCHER ANTRIAN OUTBOX CLOUD (axaxyz_wa_queue)
+// & REAL-TIME SESSION OBSERVER (AUTO-DETECT JAM SESI & JADWAL)
 // =========================================================================
 let isOutboxWorkerRunning = false;
 let currentSock = null;
+let lastKnownSessionsHash = "";
+let lastKnownSessions = [];
+
+async function checkAndObserveSessions(sock) {
+    try {
+        const raw = await callDbGet('axaxyz_sessions');
+        if (!raw || !Array.isArray(raw)) return;
+
+        const currentHash = JSON.stringify(raw);
+        if (lastKnownSessionsHash && lastKnownSessionsHash !== currentHash) {
+            console.log("⏰ [Jadwal Auto-Sync] 🔔 Terdeteksi sinkronisasi/perubahan jadwal sesi praktikum dari Admin Portal!");
+            const activeNow = raw.filter(s => s.active);
+            console.log(`⏰ [Jadwal Auto-Sync] ℹ️ Total sesi: ${raw.length} | Sesi aktif: ${activeNow.map(s => s.name || s.title).join(', ') || 'Tidak ada'}`);
+        }
+        lastKnownSessionsHash = currentHash;
+        lastKnownSessions = raw;
+    } catch (e) {
+        // Abaikan error koneksi sementara
+    }
+}
 
 function startOutboxQueueWorker(sock) {
     if (isOutboxWorkerRunning) return;
@@ -1051,6 +1148,9 @@ function startOutboxQueueWorker(sock) {
 
     setInterval(async () => {
         if (!currentSock) return;
+
+        // 1. Observer sinkronisasi otomatis jadwal sesi dari Upstash Redis
+        await checkAndObserveSessions(currentSock);
 
         try {
             const pendingMessages = await callWaPull();
@@ -1183,14 +1283,15 @@ async function messageHandler(sock) {
                         `${wita.greeting}! ${greetingLine}\n\n` +
                         `Berikut adalah daftar perintah interaktif bot presensi:\n\n` +
                         `📋 *PERINTAH MAHASISWA:*\n` +
-                        `• *!absen* : Cek status & panduan presensi hari ini\n` +
-                        `• *!jadwal* : Jadwal rotasi stase & sesi praktikum aktif\n` +
+                        `• *!absen* : Cek status & countdown presensi hari ini\n` +
+                        `• *!jadwal* : Jadwal live & jam operasional sesi praktikum\n` +
                         `• *!lokasi* : Koordinat GPS resmi kampus (Geofence)\n` +
                         `• *!rekap* : Ringkasan kehadiran stase Anda\n` +
                         `• *!kalender* : Jadwal kalender akademik & hari libur\n` +
                         `• *!logout* : Pelepasan ikatan perangkat (jika ganti HP)\n` +
+                        `• *!sesi* : Detail teknis data sesi praktikum terkini\n` +
                         `• *!reset* : Reset percakapan dengan Asisten AI RKG\n\n` +
-                        (isAdmin ? `👑 *PERINTAH ADMINISTRATOR:*\n• *!broadcast <teks>* : Kirim pengumuman ke semua mahasiswa\n• *!stats* : Rekapitulasi kehadiran harian\n• *!ping* : Cek latensi dan status bot\n\n` : '') +
+                        (isAdmin ? `👑 *PERINTAH ADMINISTRATOR:*\n• *!broadcast <teks>* : Kirim pengumuman ke semua mahasiswa\n• *!broadcastjadwal* : Broadcast jadwal sesi terbaru ke semua mahasiswa\n• *!stats* : Rekapitulasi kehadiran harian\n• *!ping* : Cek latensi dan status bot\n\n` : '') +
                         `💬 *Tanya Jawab AI:*\n` +
                         `Anda dapat langsung mengetikkan pertanyaan seputar radiografi gigi, interpretasi lesi, SOP stase, atau kendala portal.\n\n` +
                         `🌐 *Portal Web Absensi:* ${WEB_PORTAL_URL}`;
@@ -1202,25 +1303,41 @@ async function messageHandler(sock) {
 
                 case 'absen': {
                     const wita = getWitaTimeGreeting();
-                    const sessions = await callDbGet('axaxyz_sessions') || [];
-                    const activeSession = sessions.find(s => s.active);
+                    const rawSessions = await callDbGet('axaxyz_sessions') || [];
+                    const enriched = Array.isArray(rawSessions)
+                        ? rawSessions.map(s => enrichSessionWithWitaStatus(s, wita.hours, parseInt(wita.minutes, 10)))
+                        : [];
 
-                    let sessionStatus = "⚠️ Tidak ada sesi praktikum yang sedang aktif saat ini.";
-                    if (activeSession) {
-                        sessionStatus = `🟢 *Sesi Sedang Dibuka:* ${activeSession.name}\n` +
-                            `⏰ *Waktu Sesi:* ${activeSession.start} - ${activeSession.end} WITA\n` +
-                            `⏳ *Batas Toleransi Terlambat:* ${activeSession.lateLimit} WITA`;
+                    const activeRunning = enriched.find(s => s.isRunningNow);
+                    const upcoming = enriched.find(s => s.isUpcoming);
+
+                    let sessionStatus = "";
+                    if (activeRunning) {
+                        sessionStatus = `🟢 *SESI PRESENSI SEDANG DIBUKA!*\n` +
+                            `• *Nama Sesi:* ${activeRunning.name}\n` +
+                            `• *Jam Operasional:* ${activeRunning.startStr} - ${activeRunning.endStr} WITA\n` +
+                            `• *Batas Akhir Presensi (Toleransi):* ${activeRunning.closingTimeStr} WITA\n` +
+                            `• *Sisa Waktu:* ⏳ *${activeRunning.remainingMinutes} Menit Tersisa!* Segera lakukan presensi sekarang!`;
+                    } else if (upcoming) {
+                        sessionStatus = `🟡 *SESI BELUM DIBUKA*\n` +
+                            `Sesi berikutnya (*${upcoming.name}*) akan dibuka pada pukul *${upcoming.startStr} WITA* (kurang lebih ${upcoming.minutesToStart} menit lagi).\n` +
+                            `_Silakan bersiap di area kampus FKG sebelum sesi dibuka._`;
+                    } else {
+                        sessionStatus = `🔴 *TIDAK ADA SESI AKTIF SAAT INI*\n` +
+                            `Sesi praktikum saat ini belum dibuka atau telah berakhir pada jam ${wita.timeStr}.\n` +
+                            `Ketik *!jadwal* untuk melihat seluruh agenda sesi praktikum hari ini.`;
                     }
 
-                    const absenText = `📝 *PANDUAN & STATUS PRESENSI DEPT. RKG*\n\n` +
-                        `Waktu Sekarang: *${wita.timeStr}*\n\n` +
+                    const absenText = `📝 *PANDUAN & STATUS PRESENSI DEPT. RKG*\n` +
+                        `*Fakultas Kedokteran Gigi - Universitas Muslim Indonesia*\n\n` +
+                        `⏰ *Waktu Sekarang:* ${wita.fullWitaStr}\n\n` +
                         `${sessionStatus}\n\n` +
                         `📌 *Langkah Melakukan Presensi:*\n` +
-                        `1. Buka portal resmi: ${WEB_PORTAL_URL}\n` +
-                        `2. Masukkan NIM Anda dan pastikan GPS browser dalam keadaan AKTIF.\n` +
-                        `3. Ambil foto selfie verifikasi di lokasi kampus.\n` +
+                        `1. Pastikan GPS HP Anda aktif dengan akurasi tinggi.\n` +
+                        `2. Buka portal resmi: ${WEB_PORTAL_URL}\n` +
+                        `3. Masukkan NIM Anda dan ambil foto selfie verifikasi di lokasi kampus.\n` +
                         `4. Klik tombol *Kirim Absensi*.\n\n` +
-                        `_Catatan: Presensi wajib dilakukan di dalam radius geofence resmi gedung kampus._`;
+                        `_Catatan: Presensi wajib dilakukan di dalam radius geofence resmi gedung kampus FKG UMI._`;
 
                     await sock.sendMessage(senderInfo.targetJid, { text: absenText });
                     await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
@@ -1228,22 +1345,66 @@ async function messageHandler(sock) {
                 }
 
                 case 'jadwal': {
-                    const sessions = await callDbGet('axaxyz_sessions') || [];
-                    if (sessions.length === 0) {
-                        await sock.sendMessage(senderInfo.targetJid, { text: "⚠️ Belum ada jadwal sesi yang dikonfigurasi di portal." });
+                    const wita = getWitaTimeGreeting();
+                    const rawSessions = await callDbGet('axaxyz_sessions') || [];
+                    if (!Array.isArray(rawSessions) || rawSessions.length === 0) {
+                        await sock.sendMessage(senderInfo.targetJid, {
+                            text: "⚠️ *BELUM ADA JADWAL SESI*\n\nSaat ini belum ada data jadwal sesi praktikum yang terdaftar di portal web."
+                        });
                         return;
                     }
 
-                    let scheduleList = `📅 *JADWAL SESI PRAKTIKUM & KLINIK DEPT. RKG*\n\n`;
-                    sessions.forEach((s, idx) => {
-                        const statusBadge = s.active ? "🟢 [AKTIF]" : "⚪ [TIDAK AKTIF]";
-                        scheduleList += `${idx + 1}. *${s.name}* ${statusBadge}\n` +
-                            `   • Jam Operasional: ${s.start} - ${s.end} WITA\n` +
-                            `   • Batas Toleransi: ${s.lateLimit} WITA\n\n`;
+                    const enriched = rawSessions.map(s => enrichSessionWithWitaStatus(s, wita.hours, parseInt(wita.minutes, 10)));
+                    const activeRunning = enriched.find(s => s.isRunningNow);
+                    const upcoming = enriched.find(s => s.isUpcoming);
+
+                    let scheduleList = `📅 *JADWAL SESI & WAKTU PRESENSI DEPT. RKG*\n` +
+                        `*Fakultas Kedokteran Gigi - Universitas Muslim Indonesia*\n\n` +
+                        `⏰ *Waktu Saat Ini:* ${wita.timeStr}\n` +
+                        `📆 *Hari & Tanggal:* ${wita.fullWitaStr.split(' Pukul ')[0]}\n\n`;
+
+                    if (activeRunning) {
+                        scheduleList += `🟢 *SESI SEDANG BERLANGSUNG:*\n` +
+                            `• *${activeRunning.name}*\n` +
+                            `• Jam Sesi: *${activeRunning.startStr} - ${activeRunning.endStr} WITA*\n` +
+                            `• Batas Toleransi: *${activeRunning.closingTimeStr} WITA*\n` +
+                            `• Sisa Waktu: *⏳ ${activeRunning.remainingMinutes} Menit Lagi!*\n\n`;
+                    } else if (upcoming) {
+                        scheduleList += `🟡 *SESI BERIKUTNYA SEGERA DIBUKA:*\n` +
+                            `• *${upcoming.name}*\n` +
+                            `• Jam Sesi: *${upcoming.startStr} - ${upcoming.endStr} WITA*\n` +
+                            `• Mulai dalam: *${upcoming.minutesToStart} menit lagi*\n\n`;
+                    } else {
+                        scheduleList += `⚪ *STATUS:* Saat ini tidak ada sesi praktikum yang sedang berlangsung.\n\n`;
+                    }
+
+                    scheduleList += `📋 *DAFTAR SELURUH SESI PRAKTIKUM:*\n`;
+                    enriched.forEach((s, idx) => {
+                        let badge = s.isRunningNow ? "🟢 [SEDANG BUKA]" : (s.isUpcoming ? "🟡 [SEGERA BUKA]" : (s.active ? "🔴 [SELESAI]" : "⚪ [NON-AKTIF]"));
+                        scheduleList += `${idx + 1}. *${s.name}* ${badge}\n` +
+                            `   • Jam Sesi: ${s.startStr} - ${s.endStr} WITA\n` +
+                            `   • Batas Toleransi: ${s.closingTimeStr} WITA\n`;
                     });
-                    scheduleList += `Portal Akses: ${WEB_PORTAL_URL}`;
+                    scheduleList += `\n🌐 *Portal Absensi:* ${WEB_PORTAL_URL}\n` +
+                        `_Ketik *!absen* untuk panduan & status presensi langsung._`;
 
                     await sock.sendMessage(senderInfo.targetJid, { text: scheduleList });
+                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+                    return;
+                }
+
+                case 'sesi': {
+                    const rawSessions = await callDbGet('axaxyz_sessions') || [];
+                    const wita = getWitaTimeGreeting();
+                    const enriched = Array.isArray(rawSessions)
+                        ? rawSessions.map(s => enrichSessionWithWitaStatus(s, wita.hours, parseInt(wita.minutes, 10)))
+                        : [];
+
+                    const jsonStr = JSON.stringify(enriched, null, 2);
+                    const displayText = `📋 *DATA JSON SESI PRAKTIKUM (WITA: ${wita.timeStr})*\n\n` +
+                        `\`\`\`json\n${jsonStr.length > 1500 ? jsonStr.substring(0, 1490) + '...\n}' : jsonStr}\`\`\``;
+
+                    await sock.sendMessage(senderInfo.targetJid, { text: displayText });
                     await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
                     return;
                 }
@@ -1397,6 +1558,60 @@ async function messageHandler(sock) {
 
                     await sock.sendMessage(senderInfo.targetJid, {
                         text: `✅ *Broadcast Berhasil Dikirim!*\nTotal terkirim: *${sentCount}* mahasiswa dari total ${targets.length} data.`
+                    });
+                    return;
+                }
+
+                case 'broadcastjadwal': {
+                    if (!isAdmin) {
+                        await sock.sendMessage(senderInfo.targetJid, { text: "⛔ Perintah ini hanya dapat diakses oleh Staf Pengajar / Administrator Dept. RKG." });
+                        return;
+                    }
+
+                    const wita = getWitaTimeGreeting();
+                    const rawSessions = await callDbGet('axaxyz_sessions') || [];
+                    const allStudents = await callDbGet('axaxyz_students') || [];
+                    const targets = allStudents.filter(s => s.phone);
+
+                    if (targets.length === 0) {
+                        await sock.sendMessage(senderInfo.targetJid, { text: "⚠️ Tidak ditemukan mahasiswa yang memiliki nomor telepon terdaftar." });
+                        return;
+                    }
+
+                    let sessionDetail = "";
+                    if (rawSessions.length > 0) {
+                        sessionDetail = rawSessions.map((s, idx) => {
+                            const tol = s.calculatedClosingTime || s.lateLimit || s.endTime || s.end;
+                            return `${idx + 1}. *${s.name || s.title}* (${s.active ? '🟢 Aktif' : '⚪ Non-Aktif'}):\n` +
+                                `   • Jam Sesi: ${s.startTime || s.start} - ${s.endTime || s.end} WITA\n` +
+                                `   • Batas Toleransi: ${tol} WITA`;
+                        }).join('\n\n');
+                    } else {
+                        sessionDetail = "Belum ada sesi praktikum terdaftar di database portal.";
+                    }
+
+                    const formattedAnnouncement = `📢 *PENGUMUMAN JADWAL PRESENSI PRAKTIKUM DEPT. RKG*\n` +
+                        `*Fakultas Kedokteran Gigi - Universitas Muslim Indonesia*\n\n` +
+                        `Yth. Seluruh Rekan Mahasiswa Preklinik/Klinik RKG,\n` +
+                        `Berikut adalah update susunan jam sesi praktikum terbaru yang berlaku:\n\n` +
+                        `${sessionDetail}\n\n` +
+                        `⏰ *Diperbarui pada:* ${wita.fullWitaStr}\n` +
+                        `🌐 *Portal Web Absensi:* ${WEB_PORTAL_URL}\n\n` +
+                        `_Mohon hadir tepat waktu dan melakukan presensi di dalam radius lokasi resmi kampus FKG UMI._`;
+
+                    let sentCount = 0;
+                    for (const st of targets) {
+                        const cleanDigits = sanitizeNumber(st.phone);
+                        if (cleanDigits) {
+                            try {
+                                await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, { text: formattedAnnouncement });
+                                sentCount++;
+                            } catch (e) { }
+                        }
+                    }
+
+                    await sock.sendMessage(senderInfo.targetJid, {
+                        text: `✅ *Broadcast Jadwal Berhasil Dikirim!*\nTotal terkirim: *${sentCount}* mahasiswa dari total ${targets.length} data.`
                     });
                     return;
                 }
