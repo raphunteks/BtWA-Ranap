@@ -11,6 +11,8 @@ import {
     jidEncode,
     downloadMediaMessage,
     getContentType,
+    generateWAMessageFromContent,
+    proto,
     WA_DEFAULT_EPHEMERAL
 } from '@whiskeysockets/baileys';
 import handleAiCommand from './commands/ai.js';
@@ -58,8 +60,43 @@ const sessionPath = './session';
 const schedulesFile = `${sessionPath}/schedules.json`; 
 const settingsFile = `${sessionPath}/settings.json`; 
 const adminsFile = `${sessionPath}/admins.json`;
+const customButtonsFile = `${sessionPath}/custom_buttons.json`;
 
 if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
+
+// Custom Buttons Response Memory & Persistence (Dapat dikustomisasi dinamis)
+let customButtons = {
+    "btn_info": "ℹ️ *Dents Web BOT Engine*\nBot WhatsApp Multi-Device cerdas terintegrasi RSUD Kendari, BMKG, Cuaca, Jadwal Sholat, dan Al-Quran Cloud API.\nKetik *!menu* untuk melihat seluruh perintah.",
+    "btn_layanan": "📋 *DAFTAR LAYANAN BOT:*\n1. 🏥 Pemantauan Rawat Inap & Rawat Jalan RSUD Kendari\n2. 🕌 Pengingat Waktu Sholat & Azan Kendari\n3. 🌤️ Prakiraan Cuaca Realtime & Arsip Open-Meteo\n4. 🌋 Peringatan Dini Gempa Terkini BMKG\n5. 📖 Bacaan & Audio Murottal Al-Quran\n6. 🤖 Chatbot AI & Pembuat Stiker Otomatis\n7. 👥 Manajemen Grup & Otomasi Pesan WhatsApp",
+    "btn_rsud": "🏥 *LAYANAN RSUD KENDARI:*\nKetik *!jadwalranap* untuk cek rawat inap, atau *!cekrajalantrianpxendo*, *!cekrajalantrianpxbm*, *!cekrajalantrianpxperio*, *!cekrajalantrianpxumum*.",
+    "btn_sholat": "!autoinfosholat",
+    "btn_cuaca": "!cuaca",
+    "btn_gempa": "!gempa",
+    "btn_menu": "!menu"
+};
+
+if (fs.existsSync(customButtonsFile)) {
+    try {
+        const savedButtons = JSON.parse(fs.readFileSync(customButtonsFile, 'utf-8'));
+        if (typeof savedButtons === 'object' && savedButtons !== null) {
+            customButtons = { ...customButtons, ...savedButtons };
+        }
+    } catch (e) {
+        console.error('[Custom Buttons] Gagal memuat custom_buttons.json:', e.message);
+    }
+} else {
+    try {
+        fs.writeFileSync(customButtonsFile, JSON.stringify(customButtons, null, 2));
+    } catch (e) {}
+}
+
+function saveCustomButtons() {
+    try {
+        fs.writeFileSync(customButtonsFile, JSON.stringify(customButtons, null, 2));
+    } catch (e) {
+        console.error('[Custom Buttons] Gagal menyimpan custom_buttons.json:', e.message);
+    }
+}
 
 // Load Binary JPEG Thumbnail untuk Baileys externalAdReply (Mencegah Crash/Stanza Drop di WhatsApp iOS)
 const thumbPath = path.resolve('./thumb.jpg');
@@ -724,6 +761,196 @@ async function checkSholatAndWeather(sock) {
 }
 
 // =========================================================================
+// HELPER: PENGIRIMAN PESAN INTERAKTIF & TOMBOL (NATIVE FLOW BAILEYS V7)
+// =========================================================================
+async function sendInteractiveButtons(sock, targetJid, { title, body, footer, buttons = [] }, quoted = null) {
+    if (!sock || !targetJid || !buttons || !Array.isArray(buttons) || buttons.length === 0) return null;
+
+    try {
+        const formattedButtons = buttons.map(b => {
+            if (b.type === 'url' || b.url) {
+                return {
+                    name: 'cta_url',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: b.text || b.displayText || b.title || 'Kunjungi Link',
+                        url: b.url,
+                        merchant_url: b.url
+                    })
+                };
+            } else if (b.type === 'call' || b.phoneNumber) {
+                return {
+                    name: 'cta_call',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: b.text || b.displayText || b.title || 'Hubungi Kami',
+                        phone_number: b.phoneNumber
+                    })
+                };
+            } else if (b.type === 'single_select' || b.sections) {
+                return {
+                    name: 'single_select',
+                    buttonParamsJson: JSON.stringify({
+                        title: b.title || b.text || 'Pilih Opsi',
+                        sections: b.sections || []
+                    })
+                };
+            } else {
+                // Default: quick_reply
+                return {
+                    name: 'quick_reply',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: b.text || b.displayText || b.title || 'Pilih',
+                        id: b.id || b.selectedId || b.text
+                    })
+                };
+            }
+        });
+
+        const interactiveMessage = {
+            body: { text: body || '' },
+            footer: { text: footer || 'Dents Web BOT Engine' },
+            ...(title ? { header: { title: title, hasMediaAttachment: false } } : {}),
+            nativeFlowMessage: {
+                buttons: formattedButtons
+            }
+        };
+
+        const msgContent = generateWAMessageFromContent(targetJid, {
+            viewOnceMessage: {
+                message: {
+                    messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+                    interactiveMessage: interactiveMessage
+                }
+            }
+        }, { 
+            userJid: sock.user?.id || sock.user?.jid, 
+            quoted: quoted || undefined 
+        });
+
+        await sock.relayMessage(targetJid, msgContent.message, { messageId: msgContent.key.id });
+        return msgContent;
+    } catch (err) {
+        console.error('[Interactive Buttons] Gagal mengirim tombol interactive via relayMessage:', err.message || err);
+        // Fallback teks biasa jika interactive proto tidak didukung client penerima
+        let fallbackText = `${title ? '*' + title + '*\n\n' : ''}${body || ''}\n\n${footer ? '_' + footer + '_\n' : ''}*Pilihan Tombol:*`;
+        buttons.forEach((b, idx) => {
+            fallbackText += `\n${idx + 1}. ${b.text || b.title || b.id} (${b.id || b.url || '-'})`;
+        });
+        return await sock.sendMessage(targetJid, { text: fallbackText }, { quoted: quoted || undefined });
+    }
+}
+
+// =========================================================================
+// HANDLER: RESPON OTOMATIS & AKSI TOMBOL KUSTOM
+// =========================================================================
+async function handleCustomButtonResponse(sock, msg, selectedButtonId, selectedButtonText, sender, pureSender, isGroup) {
+    if (!selectedButtonId) return false;
+    
+    console.log(`🔘 [BUTTON CLICK] ID: '${selectedButtonId}' (Text: '${selectedButtonText || '-'}') dari ${pureSender} di ${isGroup ? 'Grup (' + sender + ')' : 'Private'}`);
+
+    // 1. Cek Dynamic Custom Buttons dari file custom_buttons.json
+    if (customButtons && customButtons[selectedButtonId]) {
+        const responseValue = customButtons[selectedButtonId];
+        if (responseValue.startsWith('!') || responseValue.startsWith('.')) {
+            return false; // Biarkan dialihkan ke command processor
+        }
+        await sock.sendPresenceUpdate('composing', sender);
+        await sock.sendMessage(sender, { text: responseValue }, { quoted: msg });
+        return true;
+    }
+
+    // 2. Built-in Handlers untuk ID Standar
+    if (selectedButtonId === 'btn_info') {
+        await sock.sendPresenceUpdate('composing', sender);
+        const uptimeSec = process.uptime();
+        const rHours = Math.floor(uptimeSec / 3600);
+        const rMinutes = Math.floor((uptimeSec % 3600) / 60);
+        const uptimeStr = `${rHours > 0 ? rHours + ' jam ' : ''}${rMinutes} menit`;
+        
+        const infoMsg = `ℹ️ *INFORMASI DENTS WEB BOT GATEWAY*\n\n` +
+                        `• Engine       : Baileys v7 ESM Multi-Device\n` +
+                        `• Status       : Online & Siap Melayani 24/7\n` +
+                        `• Uptime       : ${uptimeStr}\n` +
+                        `• Owner        : @${ownerPureJid.split('@')[0]}\n` +
+                        `• Fitur Utama  : RSUD Kendari Sync, BMKG, Cuaca, Al-Quran, Multi-Tenant Gateway\n\n` +
+                        `_Tekan tombol di bawah atau ketik !menu untuk opsi lainnya._`;
+        
+        await sendInteractiveButtons(sock, sender, {
+            title: "Dents Web BOT Engine",
+            body: infoMsg,
+            footer: "Dents Web Multi-Device Gateway",
+            buttons: [
+                { id: 'btn_layanan', text: '📋 Daftar Layanan' },
+                { id: '!menu', text: '📜 Menu Lengkap' },
+                { id: 'btn_kontak', text: '📞 Kontak Owner' }
+            ]
+        }, msg);
+        return true;
+    }
+
+    if (selectedButtonId === 'btn_layanan') {
+        await sock.sendPresenceUpdate('composing', sender);
+        const layananMsg = `📋 *PORTAL LAYANAN TERPADU DENTS WEB BOT:*\n\n` +
+                           `1. 🏥 *RSUD Kendari Monitoring*\n` +
+                           `   - Cek Antrean & Riwayat 4 Poli (Endo, Perio, Bedah Mulut, Gigi/Umum)\n` +
+                           `   - Cek Rawat Inap & Notifikasi Pasien Realtime\n\n` +
+                           `2. 🕌 *Spiritual & Islami*\n` +
+                           `   - Pengingat Waktu Sholat & Azan Otomatis (Kendari)\n` +
+                           `   - Bacaan 114 Surah & Audio Murottal Al-Quran\n\n` +
+                           `3. 🌦️ *Lingkungan & Alam*\n` +
+                           `   - Prakiraan Cuaca Akurat Open-Meteo\n` +
+                           `   - Peringatan Dini Gempa Terkini BMKG\n\n` +
+                           `4. ⚡ *Utilitas Cerdas*\n` +
+                           `   - AI Assistant & Otomasi Pembuat Stiker WA`;
+        
+        await sendInteractiveButtons(sock, sender, {
+            title: "Katalog Layanan",
+            body: layananMsg,
+            footer: "Pilih layanan di bawah:",
+            buttons: [
+                { id: 'btn_rsud', text: '🏥 RSUD Kendari' },
+                { id: '!cuaca', text: '🌤️ Cek Cuaca' },
+                { id: '!gempa', text: '🌋 Cek Gempa' }
+            ]
+        }, msg);
+        return true;
+    }
+
+    if (selectedButtonId === 'btn_rsud') {
+        await sock.sendPresenceUpdate('composing', sender);
+        const rsudMsg = `🏥 *LAYANAN MONITORING RSUD KENDARI*\n\nPilih modul antrean atau rawat inap yang ingin Anda periksa secara realtime:`;
+        await sendInteractiveButtons(sock, sender, {
+            title: "RSUD Kota Kendari",
+            body: rsudMsg,
+            footer: "Sinkronisasi Web Portal & Ekstensi PC",
+            buttons: [
+                { id: '!jadwalranap', text: '🛏️ Rawat Inap' },
+                { id: '!cekrajalantrianpxendo', text: '🦷 Poli Endodonsi' },
+                { id: '!cekrajalantrianpxbm', text: '🩺 Bedah Mulut' }
+            ]
+        }, msg);
+        return true;
+    }
+
+    if (selectedButtonId === 'btn_kontak') {
+        await sock.sendMessage(sender, {
+            contacts: {
+                displayName: "Owner Dents Web BOT",
+                contacts: [{
+                    vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:Owner Dents Web BOT\nORG:Dents Web Solution;\nTEL;type=CELL;type=VOICE;waid=${ownerPureJid.split('@')[0]}:+${ownerPureJid.split('@')[0]}\nEND:VCARD`
+                }]
+            }
+        }, { quoted: msg });
+        return true;
+    }
+
+    // 3. Respon default jika ID tombol kustom ditekan tapi belum diatur
+    await sock.sendMessage(sender, {
+        text: `🔘 *Respon Tombol Terdeteksi:*\n• Pilihan: *${selectedButtonText || selectedButtonId}*\n• ID Tombol: \`${selectedButtonId}\`\n\n_Tips: Admin dapat menyetel balasan kustom tombol ini dengan perintah:_\n\`!addbutton ${selectedButtonId} | <balasan teks>\``
+    }, { quoted: msg });
+    return true;
+}
+
+// =========================================================================
 // 6. EXPORT MESSAGE HANDLER & EVENT LISTENERS
 // =========================================================================
 let isIntervalStarted = false;
@@ -795,14 +1022,54 @@ export default function setupMessageHandler(sock) {
             const msg = m.messages[0];
             if (!msg || !msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
-            // Ekstraksi teks pesan dari berbagai format
-            const msgType = getContentType(msg.message);
-            const text = msg.message.conversation || 
-                         msg.message.extendedTextMessage?.text || 
-                         msg.message.imageMessage?.caption || 
-                         msg.message.videoMessage?.caption || 
-                         msg.message.pollCreationMessage?.name || 
-                         '';
+            // 1. Deep Unwrap: Mengurai pesan jika terbungkus container (ephemeral / viewOnce)
+            let innerMsg = msg.message;
+            if (innerMsg?.ephemeralMessage?.message) innerMsg = innerMsg.ephemeralMessage.message;
+            if (innerMsg?.viewOnceMessage?.message) innerMsg = innerMsg.viewOnceMessage.message;
+            if (innerMsg?.viewOnceMessageV2?.message) innerMsg = innerMsg.viewOnceMessageV2.message;
+            if (innerMsg?.documentWithCaptionMessage?.message) innerMsg = innerMsg.documentWithCaptionMessage.message;
+
+            // 2. Deteksi respon klik tombol & interaktif (Multi-Protocol Button & List Reply)
+            let selectedButtonId = null;
+            let selectedButtonText = null;
+
+            // A. buttonsResponseMessage (Tombol Balasan Legacy WhatsApp)
+            if (innerMsg?.buttonsResponseMessage) {
+                selectedButtonId = innerMsg.buttonsResponseMessage.selectedButtonId;
+                selectedButtonText = innerMsg.buttonsResponseMessage.selectedDisplayText;
+            } 
+            // B. templateButtonReplyMessage (Tombol Template)
+            else if (innerMsg?.templateButtonReplyMessage) {
+                selectedButtonId = innerMsg.templateButtonReplyMessage.selectedId;
+                selectedButtonText = innerMsg.templateButtonReplyMessage.selectedDisplayText;
+            } 
+            // C. interactiveResponseMessage (Native Flow Interactive Messages v2 / Baileys v7)
+            else if (innerMsg?.interactiveResponseMessage) {
+                const nativeFlow = innerMsg.interactiveResponseMessage.nativeFlowResponseMessage;
+                if (nativeFlow?.paramsJson) {
+                    try {
+                        const parsedParams = JSON.parse(nativeFlow.paramsJson);
+                        selectedButtonId = parsedParams.id || parsedParams.selectedId || null;
+                    } catch (e) {
+                        console.error('[Button Response] Gagal parse paramsJson:', e);
+                    }
+                }
+                selectedButtonText = innerMsg.interactiveResponseMessage.body?.text || null;
+            } 
+            // D. listResponseMessage (Menu Opsi / Single Select List)
+            else if (innerMsg?.listResponseMessage) {
+                selectedButtonId = innerMsg.listResponseMessage.singleSelectReply?.selectedRowId;
+                selectedButtonText = innerMsg.listResponseMessage.title;
+            }
+
+            // Ekstraksi teks pesan dari berbagai format standar
+            const msgType = getContentType(innerMsg || msg.message);
+            let text = innerMsg?.conversation || 
+                       innerMsg?.extendedTextMessage?.text || 
+                       innerMsg?.imageMessage?.caption || 
+                       innerMsg?.videoMessage?.caption || 
+                       innerMsg?.pollCreationMessage?.name || 
+                       '';
 
             // Ekstrak pengirim dengan sanitasi anti-corrupted JID
             const rawSender = msg.key.remoteJid;
@@ -822,6 +1089,23 @@ export default function setupMessageHandler(sock) {
                 } catch(e) {}
                 if (sender.includes('247922893566044')) {
                     sender = ownerPureJid;
+                }
+            }
+
+            // 🚀 DUAL-ROUTE DISPATCHER: RESPON TOMBOL vs PERINTAH TEKS BIASA
+            if (selectedButtonId) {
+                // Jika ID tombol berawalan ! atau ., jalankan langsung sebagai perintah
+                if (selectedButtonId.startsWith('!') || selectedButtonId.startsWith('.')) {
+                    text = selectedButtonId;
+                } 
+                // Cek apakah ada mapping di customButtons yang merujuk ke perintah
+                else if (customButtons && customButtons[selectedButtonId] && (customButtons[selectedButtonId].startsWith('!') || customButtons[selectedButtonId].startsWith('.'))) {
+                    text = customButtons[selectedButtonId];
+                }
+                // Jika tombol adalah custom ID (btn_info, btn_layanan, dll.), arahkan ke Custom Button Handler
+                else {
+                    const handled = await handleCustomButtonResponse(sock, msg, selectedButtonId, selectedButtonText, sender, pureSender, isGroup);
+                    if (handled) return; // Selesai diproses
                 }
             }
 
@@ -1017,6 +1301,13 @@ Aku *Dents Web BOT*, siap membantu kamu.
 ├ !storyimage [caption] - Bikin Status Story (Reply Foto)
 ╰ !broadcast <pesan> - Kirim broadcast ke langganan
 
+*─── 🔘 TOMBOL & INTERAKTIF (BARU) ───*
+├ !sendbutton <target> | <teks> | <Btn1:ID1> | ...
+├ !addbutton <id> | <respon teks atau !command>
+├ !delbutton <id> - Hapus respon tombol
+├ !listbutton - Daftar respon tombol aktif
+╰ Respon Otomatis: buttonsResponse, templateButton, interactiveResponse
+
 *─── ⚙️ UTILITAS & AI ───*
 ├ !ai <pertanyaan> - Chatbot AI Pintar
 ├ !sticker / !s - Konversi gambar ke stiker WebP
@@ -1037,6 +1328,19 @@ _Ketik perintah di atas untuk menggunakan fitur._`;
                             text: bodyText,
                             mentions: [ownerPureJid, ownerPureLid].filter(Boolean)
                         }, { quoted: msg });
+
+                        // Mengirim Tombol Cepat Interaktif (Quick Reply Shortcut Buttons)
+                        await sendInteractiveButtons(sock, sender, {
+                            title: "Navigasi Cepat Dents Web BOT",
+                            body: "_Gunakan tombol cepat di bawah untuk respon instan tanpa mengetik:_ ",
+                            footer: "Dents Web Multi-Device Gateway",
+                            buttons: [
+                                { id: 'btn_layanan', text: '📋 Layanan Bot' },
+                                { id: 'btn_rsud', text: '🏥 RSUD Kendari' },
+                                { id: '!cuaca', text: '🌤️ Cuaca Kendari' },
+                                { id: '!autoinfosholat', text: '🕌 Jadwal Sholat' }
+                            ]
+                        });
                     } catch(e) {
                         console.error("[Menu/Help] Error reply message:", e);
                         // Fallback jika quoted msg bermasalah
@@ -1964,6 +2268,131 @@ _Status Protocol: Baileys v7.0.0-rc14 Interactive Message Supported._`;
                         } catch(e) { gagal++; }
                     }
                     await sock.sendMessage(sender, { text: `✅ Broadcast Selesai!\n• Terkirim: ${sukses}\n• Gagal: ${gagal}` }, { quoted: msg });
+                    break;
+                }
+
+                // =========================================================
+                // CUSTOM BUTTON MANAGEMENT & INTERACTIVE DISPATCHER
+                // =========================================================
+                case 'addbutton': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus untuk Owner/Admin bot.' }, { quoted: msg });
+                    const fullParam = args.join(' ');
+                    const parts = fullParam.split('|').map(s => s.trim());
+                    if (parts.length < 2 || !parts[0] || !parts[1]) {
+                        const helpTxt = `⚠️ *FORMAT SALAH!*\n\n` +
+                                        `Format perintah:\n` +
+                                        `\`!addbutton <id_tombol> | <respon teks atau perintah>\`\n\n` +
+                                        `*Contoh Respon Teks Kustom:*\n` +
+                                        `\`!addbutton btn_bantuan | Halo! Ini kontak layanan CS kami: 0852xxx\`\n\n` +
+                                        `*Contoh Mapping ke Perintah Bot:*\n` +
+                                        `\`!addbutton btn_cekcuaca | !cuaca\`\n` +
+                                        `\`!addbutton btn_sholat | !autoinfosholat\``;
+                        return await sock.sendMessage(sender, { text: helpTxt }, { quoted: msg });
+                    }
+                    const btnId = parts[0].toLowerCase().replace(/\s+/g, '_');
+                    const btnResponse = parts.slice(1).join('|').trim();
+                    customButtons[btnId] = btnResponse;
+                    saveCustomButtons();
+                    await sock.sendMessage(sender, { 
+                        text: `✅ *Tombol Kustom Berhasil Disimpan!*\n\n• ID Tombol : \`${btnId}\`\n• Respon    : ${btnResponse}\n\n_Tombol dengan ID ini akan langsung merespons saat ditekan pengguna._` 
+                    }, { quoted: msg });
+                    break;
+                }
+
+                case 'delbutton': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus untuk Owner/Admin bot.' }, { quoted: msg });
+                    if (!args[0]) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Masukkan ID tombol yang ingin dihapus!\nContoh: `!delbutton btn_bantuan`' }, { quoted: msg });
+                    }
+                    const targetId = args[0].trim().toLowerCase();
+                    if (customButtons && customButtons[targetId]) {
+                        delete customButtons[targetId];
+                        saveCustomButtons();
+                        await sock.sendMessage(sender, { text: `🗑️ Tombol kustom dengan ID \`${targetId}\` berhasil dihapus.` }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(sender, { text: `❌ ID tombol \`${targetId}\` tidak ditemukan dalam daftar.` }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'listbutton': {
+                    const keys = Object.keys(customButtons || {});
+                    if (keys.length === 0) {
+                        return await sock.sendMessage(sender, { text: '📭 Belum ada tombol kustom yang didaftarkan di sistem.' }, { quoted: msg });
+                    }
+                    let listTxt = `🔘 *DAFTAR RESPON TOMBOL KUSTOM (${keys.length}):*\n\n`;
+                    keys.forEach((k, i) => {
+                        const val = customButtons[k];
+                        const preview = val.length > 60 ? val.substring(0, 60) + '...' : val;
+                        listTxt += `*${i + 1}. [ID: ${k}]*\n> ${preview}\n\n`;
+                    });
+                    listTxt += `_Ketik !addbutton <id> | <respon> untuk menambah/mengubah._\n_Ketik !delbutton <id> untuk menghapus._`;
+                    await sock.sendMessage(sender, { text: listTxt }, { quoted: msg });
+                    break;
+                }
+
+                case 'sendbutton':
+                case 'sendinteractive': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus untuk Owner/Admin bot.' }, { quoted: msg });
+                    const rawInput = args.join(' ');
+                    const sections = rawInput.split('|').map(s => s.trim());
+                    
+                    if (sections.length < 2) {
+                        const helpSend = `⚠️ *PANDUAN PENGIRIMAN TOMBOL KUSTOM:*\n\n` +
+                                         `*1. Kirim ke chat saat ini:*\n` +
+                                         `\`!sendbutton Silakan pilih layanan: | Info:btn_info | Layanan:btn_layanan | Cek Cuaca:!cuaca\`\n\n` +
+                                         `*2. Kirim ke target nomor tertentu:*\n` +
+                                         `\`!sendbutton 6281234567890 | Pesan Anda | Tombol 1:btn_1 | Tombol 2:btn_2\`\n\n` +
+                                         `*3. Tombol Link Web / URL:*\n` +
+                                         `\`!sendbutton Kunjungi Website: | Buka Portal:https://dentsweb-portal.vercel.app/\``;
+                        return await sock.sendMessage(sender, { text: helpSend }, { quoted: msg });
+                    }
+                    
+                    let targetChat = sender;
+                    let bodyIndex = 0;
+                    
+                    // Cek jika parameter pertama adalah nomor tujuan
+                    if (sections[0].includes('@') || /^[0-9]{8,18}$/.test(sections[0].replace(/[^0-9]/g, ''))) {
+                        targetChat = cleanJid(formatPhoneToJid(sections[0]));
+                        bodyIndex = 1;
+                    }
+                    
+                    const msgBody = sections[bodyIndex];
+                    const buttonDefs = sections.slice(bodyIndex + 1);
+                    
+                    if (buttonDefs.length === 0) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Minimal cantumkan 1 tombol! Format: `<Teks Tombol>:<ID atau URL>`' }, { quoted: msg });
+                    }
+                    
+                    const builtButtons = [];
+                    for (const def of buttonDefs) {
+                        const colonIdx = def.lastIndexOf(':');
+                        if (colonIdx === -1) {
+                            builtButtons.push({ id: def.toLowerCase().replace(/\s+/g, '_'), text: def });
+                        } else {
+                            const bText = def.slice(0, colonIdx).trim();
+                            const bTarget = def.slice(colonIdx + 1).trim();
+                            if (bTarget.startsWith('http://') || bTarget.startsWith('https://')) {
+                                builtButtons.push({ text: bText, url: bTarget });
+                            } else if (bTarget.startsWith('tel:') || /^\+?[0-9]{7,15}$/.test(bTarget)) {
+                                builtButtons.push({ text: bText, phoneNumber: bTarget.replace('tel:', '') });
+                            } else {
+                                builtButtons.push({ id: bTarget, text: bText });
+                            }
+                        }
+                    }
+                    
+                    await sock.sendPresenceUpdate('composing', targetChat);
+                    await sendInteractiveButtons(sock, targetChat, {
+                        title: "Dents Web Notification",
+                        body: msgBody,
+                        footer: "Dents Web BOT Engine",
+                        buttons: builtButtons
+                    });
+                    
+                    if (targetChat !== sender) {
+                        await sock.sendMessage(sender, { text: `✅ Pesan tombol interaktif berhasil dikirim ke ${targetChat.split('@')[0]}!` }, { quoted: msg });
+                    }
                     break;
                 }
 
