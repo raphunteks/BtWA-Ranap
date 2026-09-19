@@ -1,37 +1,29 @@
 import fs from 'fs';
 import process from 'process';
 import os from 'os';
-import path from 'path';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 
-// =========================================================================
-// HANDLER PERINTAH EKSTERNAL (OPSIONAL DENGAN GRACEFUL FALLBACK)
-// =========================================================================
-let handleStickerCommand = null;
-try {
-    const stickerModule = await import('./commands/sticker.js').catch(() => null);
-    if (stickerModule && (stickerModule.default || stickerModule.handleStickerCommand)) {
-        handleStickerCommand = stickerModule.default || stickerModule.handleStickerCommand;
-    }
-} catch (e) {
-    handleStickerCommand = null;
-}
+// Handler perintah eksternal pendukun
+import handleStickerCommand from './commands/sticker.js';
 
 // =========================================================================
-// KONFIGURASI SISTEM & REST API WEB ABSENSI V7 (DEPT. RADIOLOGI KEDOKTERAN GIGI)
+// KONFIGURASI SISTEM & REST API GOOGLE APPS SCRIPT (SIMGOS RSKDGM)
 // =========================================================================
-const WEB_ABSENSI_API_URL = process.env.WEB_ABSENSI_API_URL || "https://absensi.maksaarsyad.xyz/api";
-const WEB_PORTAL_URL = process.env.WEB_PORTAL_URL || "https://absensi.maksaarsyad.xyz";
-const OWNER_NUMBER = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
+const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
 
-// Daftar Administrator & Staf Dept. RKG FKG UMI
-const ADMIN_JID_LIST = [
-    OWNER_NUMBER,
-    "6285256739684@s.whatsapp.net", // drg. M. Aksa Arsyad (Super Admin / Penanggung Jawab Sistem)
-    "6282291675363@s.whatsapp.net"  // drg. Hj. Kurniawaty, Sp.KG / Staf Pengajar RKG
+// URL REST API SIMGOS RSKDGM (Utama: Vercel Ultra-Fast Engine)
+const SIMGOS_API_URL = process.env.SIMGOS_API_URL || "https://rskdgmsimgosdb.vercel.app/api";
+// URL REST API Google Apps Script (GAS) SIMGOS RSKDGM (Layer 2 Secondary / Fallback Storage)
+const GAS_URL_SIMGOS_FALLBACK = process.env.GAS_WEBAPP_URL || process.env.GAS_URL_SIMGOS || "https://script.google.com/macros/s/AKfycbxyhqtMxKBxrXScl39RkAoxXM2IQRYpv0Nnsgdib3eeU_sqZdPznQaaUp42aaUVPM8/exec";
+const GAS_URL_SIMGOS = SIMGOS_API_URL;
+
+// Kontak WhatsApp Dokter Cadangan jika Setting Belum Terisi
+const DOKTER_JID_LIST = [
+    "6282291675363@s.whatsapp.net", // drg. Hj. Kurniawaty, Sp.KG (DPJP Utama)
+    "6285256739684@s.whatsapp.net"  // drg. M. Aksa Arsyad
 ];
 
-// Whitelist Model Groq AI untuk Fallback Tingkat Tinggi
+// Model fallback Groq AI yang diizinkan
 const GROQ_ALLOWED_MODELS = [
     "openai/gpt-oss-120b",
     "qwen/qwen3.8-27b",
@@ -41,82 +33,7 @@ const GROQ_ALLOWED_MODELS = [
     "groq/compound-mini"
 ];
 
-// =========================================================================
-// DIRECT CLOUD UPSTASH REDIS CLIENT (KONEKSI RESMI MULTI-PLATFORM / RAILWAY)
-// =========================================================================
-const KV_REST_API_URL = process.env.KV_REST_API_URL || 
-    process.env.UPSTASH_REDIS_REST_URL || 
-    process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_URL ||
-    "https://electric-pangolin-87989.upstash.io";
-
-const KV_REST_API_TOKEN = process.env.KV_REST_API_TOKEN || 
-    process.env.UPSTASH_REDIS_REST_TOKEN || 
-    process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_TOKEN ||
-    "gQAAAAAAAVe1AAIgcDJiYzYzOGIzNmQ5ZTQ0Yzg1OWQwZmYxNjU2MWY3NDMwNQ";
-
-function safeParseJson(data) {
-    if (data === null || data === undefined) return null;
-    let parsed = data;
-    let depth = 0;
-    while (typeof parsed === 'string' && depth < 3) {
-        try {
-            parsed = JSON.parse(parsed);
-        } catch (e) {
-            break;
-        }
-        depth++;
-    }
-    return parsed;
-}
-
-async function redisDirectGet(key) {
-    if (!KV_REST_API_URL || !KV_REST_API_TOKEN) return null;
-    const cleanUrl = KV_REST_API_URL.replace(/\/+$/, '');
-    try {
-        const res = await fetch(cleanUrl, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${KV_REST_API_TOKEN}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(["GET", key]),
-            cache: 'no-store'
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        if (data.error || data.result === null || data.result === undefined) return null;
-        return safeParseJson(data.result);
-    } catch (e) {
-        return null;
-    }
-}
-
-async function redisDirectSet(key, value, exSeconds = null) {
-    if (!KV_REST_API_URL || !KV_REST_API_TOKEN) return false;
-    const cleanUrl = KV_REST_API_URL.replace(/\/+$/, '');
-    try {
-        const strVal = typeof value === 'string' ? value : JSON.stringify(value);
-        const command = (typeof exSeconds === 'number' && exSeconds > 0)
-            ? ["SET", key, strVal, "EX", exSeconds]
-            : ["SET", key, strVal];
-        const res = await fetch(cleanUrl, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${KV_REST_API_TOKEN}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(command)
-        });
-        const data = await res.json();
-        return !data.error;
-    } catch (e) {
-        return false;
-    }
-}
-
-// =========================================================================
-// NORMALISASI & SANITASI ROUTER AI
-// =========================================================================
+// Normalisasi URL Endpoint 9Router VPS
 function normalize9RouterUrl(rawUrl) {
     let url = (rawUrl || '').trim();
     if (!url) return "http://43.134.43.146:20128/v1/chat/completions";
@@ -131,9 +48,12 @@ function normalize9RouterUrl(rawUrl) {
     return url;
 }
 
+// Sanitizer Cerdas Nama Model (Membersihkan string kurung yang merusak URL Google)
 function sanitize9RouterModel(rawModel) {
     let model = String(rawModel || 'auto').trim();
+    // Hilangkan tanda kurung beserta isinya seperti (high), (low), (preview)
     model = model.replace(/\s*\([^)]*\)/g, '').trim();
+    // Hilangkan awalan berulang jika ada
     if (model.startsWith('gemini/gemini/')) {
         model = model.replace('gemini/gemini/', 'gemini/');
     }
@@ -141,601 +61,593 @@ function sanitize9RouterModel(rawModel) {
 }
 
 // =========================================================================
-// BIDIRECTIONAL LID & PHONE RESOLVER BESERTA PERSISTENT CACHE LOKAL
+// SMART BIDIRECTIONAL RESOLVER & PERSISTENT CACHE (TTL 24 JAM)
 // =========================================================================
 const sessionPath = './session';
 const lidCacheFile = `${sessionPath}/lid_mappings.json`;
-const studentCacheFile = `${sessionPath}/student_cache.json`;
+const patientCacheFile = `${sessionPath}/patient_cache.json`;
 
-if (!fs.existsSync(sessionPath)) {
+if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
+
+const lidToPhoneMap = new Map();     // Kunci: LID Digits -> Nilai: Phone Digits (628xxx)
+const phoneToLidMap = new Map();     // Kunci: Phone Digits (628xxx) -> Nilai: LID Digits
+const patientCacheMap = new Map();   // Kunci: Phone Digits / LID Digits / No. RM -> { data, cachedAt }
+
+const PATIENT_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 Jam penuh untuk siklus kontrol pasien
+
+function formatToInternational(raw) {
+    if (!raw && raw !== 0) return '';
+    let p = String(raw).trim().replace(/\D/g, '');
+    if (p.startsWith('0')) p = '62' + p.substring(1);
+    else if (p.startsWith('8')) p = '62' + p;
+    else if (!p.startsWith('62') && p.length >= 8) p = '62' + p;
+    return p;
+}
+
+if (fs.existsSync(lidCacheFile)) {
     try {
-        fs.mkdirSync(sessionPath, { recursive: true });
+        const savedMappings = JSON.parse(fs.readFileSync(lidCacheFile, 'utf-8'));
+        for (const [lid, phone] of Object.entries(savedMappings.lidToPhone || {})) {
+            lidToPhoneMap.set(lid, phone);
+        }
+        for (const [phone, lid] of Object.entries(savedMappings.phoneToLid || {})) {
+            phoneToLidMap.set(phone, lid);
+        }
     } catch (e) { }
 }
 
-const lidToPhoneMap = new Map();
-const phoneToLidMap = new Map();
-const studentCacheMap = new Map(); // key: phone, lid, atau NIM
-
-function formatToInternational(raw) {
-    if (!raw) return null;
-    let digits = String(raw).replace(/@.*$/, '').replace(/\D/g, '');
-    if (!digits) return null;
-    if (digits.startsWith('08')) {
-        digits = '628' + digits.slice(2);
-    } else if (digits.startsWith('8')) {
-        digits = '628' + digits.slice(1);
-    } else if (!digits.startsWith('62') && digits.length >= 9 && digits.length <= 13) {
-        digits = '62' + digits;
-    }
-    return digits.length >= 8 && digits.length <= 16 ? digits : null;
-}
-
-// Load Persistent LID Mappings dari Disk
-try {
-    if (fs.existsSync(lidCacheFile)) {
-        const rawData = fs.readFileSync(lidCacheFile, 'utf8');
-        const parsed = JSON.parse(rawData);
-        if (parsed.lidToPhone) {
-            for (const [k, v] of Object.entries(parsed.lidToPhone)) {
-                lidToPhoneMap.set(k, v);
-                phoneToLidMap.set(v, k);
+if (fs.existsSync(patientCacheFile)) {
+    try {
+        const savedPatients = JSON.parse(fs.readFileSync(patientCacheFile, 'utf-8'));
+        const now = Date.now();
+        for (const [k, v] of Object.entries(savedPatients)) {
+            if (v && v.cachedAt && (now - v.cachedAt < PATIENT_CACHE_TTL_MS)) {
+                patientCacheMap.set(k, v);
             }
         }
-        console.log(`[LID Cache] Memuat ${lidToPhoneMap.size} pemetaan LID terverifikasi dari disk.`);
-    }
-} catch (e) {
-    console.warn('[LID Cache] Gagal membaca berkas cache:', e.message);
-}
-
-// Load Persistent Student Cache dari Disk
-try {
-    if (fs.existsSync(studentCacheFile)) {
-        const rawData = fs.readFileSync(studentCacheFile, 'utf8');
-        const parsed = JSON.parse(rawData);
-        for (const [k, v] of Object.entries(parsed)) {
-            studentCacheMap.set(k, v);
-        }
-        console.log(`[Student Cache] Memuat ${studentCacheMap.size} entri mahasiswa RKG dari disk.`);
-    }
-} catch (e) {
-    console.warn('[Student Cache] Gagal membaca berkas cache:', e.message);
+    } catch (e) { }
 }
 
 function persistLidMappings() {
     try {
-        const obj = {
+        const data = {
             lidToPhone: Object.fromEntries(lidToPhoneMap),
-            updatedAt: new Date().toISOString()
+            phoneToLid: Object.fromEntries(phoneToLidMap)
         };
-        fs.writeFileSync(lidCacheFile, JSON.stringify(obj, null, 2), 'utf8');
+        fs.writeFileSync(lidCacheFile, JSON.stringify(data, null, 2));
     } catch (e) { }
 }
 
-function persistStudentCache() {
-    try {
-        fs.writeFileSync(studentCacheFile, JSON.stringify(Object.fromEntries(studentCacheMap), null, 2), 'utf8');
-    } catch (e) { }
+let persistPatientTimer = null;
+function persistPatientCache() {
+    if (persistPatientTimer) clearTimeout(persistPatientTimer);
+    persistPatientTimer = setTimeout(() => {
+        try {
+            const obj = Object.fromEntries(patientCacheMap);
+            fs.writeFileSync(patientCacheFile, JSON.stringify(obj, null, 2));
+        } catch (e) { }
+    }, 1000);
 }
 
 function registerIdentityMapping(lidDigits, phoneDigits) {
     if (!lidDigits || !phoneDigits) return;
     const cleanLid = String(lidDigits).replace(/\D/g, '');
     const cleanPhone = formatToInternational(phoneDigits);
-    if (!cleanLid || !cleanPhone) return;
 
-    const changed = (lidToPhoneMap.get(cleanLid) !== cleanPhone);
-    lidToPhoneMap.set(cleanLid, cleanPhone);
-    phoneToLidMap.set(cleanPhone, cleanLid);
-
-    if (changed) {
+    if (cleanLid && cleanPhone && cleanLid !== cleanPhone) {
+        lidToPhoneMap.set(cleanLid, cleanPhone);
+        phoneToLidMap.set(cleanPhone, cleanLid);
         persistLidMappings();
     }
 }
 
-function cacheStudentObject(key, studentObj) {
-    if (!key || !studentObj) return;
-    const k = String(key).trim();
-    studentCacheMap.set(k, studentObj);
-    if (studentObj.nim) studentCacheMap.set(studentObj.nim, studentObj);
-    if (studentObj.phone) {
-        const cleanPhone = formatToInternational(studentObj.phone);
-        if (cleanPhone) studentCacheMap.set(cleanPhone, studentObj);
-    }
-    persistStudentCache();
+function cachePatientObject(key, patientObj) {
+    if (!key || !patientObj) return;
+    const cleanKey = String(key).replace(/\D/g, '') || String(key).trim();
+    patientCacheMap.set(cleanKey, {
+        data: patientObj,
+        cachedAt: Date.now()
+    });
+    persistPatientCache();
 }
 
-function getCachedStudentObject(key) {
+function getCachedPatientObject(key) {
     if (!key) return null;
-    const k = String(key).trim();
-    if (studentCacheMap.has(k)) return studentCacheMap.get(k);
-    const clean = formatToInternational(k);
-    if (clean && studentCacheMap.has(clean)) return studentCacheMap.get(clean);
-    return null;
+    const cleanKey = String(key).replace(/\D/g, '') || String(key).trim();
+    if (!patientCacheMap.has(cleanKey)) return null;
+    const item = patientCacheMap.get(cleanKey);
+    if (Date.now() - item.cachedAt > PATIENT_CACHE_TTL_MS) {
+        patientCacheMap.delete(cleanKey);
+        persistPatientCache();
+        return null;
+    }
+    return item.data;
 }
 
 function parseSenderInfo(rawJid) {
-    if (!rawJid) return { jid: '', id: '', isLid: false, targetJid: '' };
-    const jid = String(rawJid).trim();
-    const isLid = jid.endsWith('@lid');
-    const id = jid.replace(/@.*$/, '');
+    if (!rawJid) return { rawJid: '', id: '', isLid: false, targetJid: '', resolvedPhone: '', resolvedLid: '' };
+    const jidStr = String(rawJid).trim();
+    const isLid = jidStr.toLowerCase().endsWith('@lid');
+    const isGroup = jidStr.toLowerCase().endsWith('@g.us');
+    const isBroadcast = jidStr.toLowerCase().includes('broadcast');
+
+    const cleanId = jidStr.replace(/@(lid|s\.whatsapp\.net|broadcast|g\.us)$/i, '').replace(/\D/g, '');
+
+    let targetJid = jidStr;
+    let resolvedPhone = '';
+    let resolvedLid = '';
+
+    if (isLid) {
+        targetJid = `${cleanId}@lid`;
+        resolvedLid = cleanId;
+        if (lidToPhoneMap.has(cleanId)) {
+            resolvedPhone = lidToPhoneMap.get(cleanId);
+        }
+    } else if (!isGroup && !isBroadcast) {
+        let phone = formatToInternational(cleanId);
+        targetJid = `${phone}@s.whatsapp.net`;
+        resolvedPhone = phone;
+        if (phoneToLidMap.has(phone)) {
+            resolvedLid = phoneToLidMap.get(phone);
+        }
+    }
+
     return {
-        jid,
-        id,
-        isLid,
-        targetJid: isLid ? `${id}@lid` : `${id}@s.whatsapp.net`
+        rawJid: jidStr,
+        id: cleanId,
+        isLid: isLid,
+        targetJid: targetJid,
+        resolvedPhone: resolvedPhone,
+        resolvedLid: resolvedLid
     };
 }
 
 function sanitizeNumber(rawNumber) {
-    if (!rawNumber) return "";
-    let clean = String(rawNumber).replace(/\D/g, '');
-    if (clean.startsWith('08')) {
-        clean = '628' + clean.slice(2);
-    } else if (clean.startsWith('8')) {
-        clean = '628' + clean.slice(1);
+    if (!rawNumber) return '';
+    const str = String(rawNumber).trim();
+    if (str.toLowerCase().endsWith('@lid')) {
+        return str.replace(/\D/g, '') + '@lid';
     }
-    return clean;
-}
-
-// Memeriksa kesiapan socket Baileys sebelum mencoba mengirim pesan
-// Menghindari exception fatal TypeError: Cannot read properties of undefined (reading 'id')
-function isSocketReadyToSend(s) {
-    if (!s || typeof s.sendMessage !== 'function') return false;
-    
-    // Periksa apakah user/identitas Baileys sudah terotentikasi di sesi
-    const hasUser = Boolean(s.user?.id || s.user?.jid || s.authState?.creds?.me?.id);
-    if (!hasUser) return false;
-
-    // Periksa status websocket jika properti ws ada
-    if (s.ws) {
-        if (s.ws.isOpen === false || s.ws.readyState === 2 || s.ws.readyState === 3) {
-            return false;
-        }
-    }
-    return true;
+    let cleaned = str.replace(/@s\.whatsapp\.net$/i, '').replace(/\D/g, '');
+    return formatToInternational(cleaned) + '@s.whatsapp.net';
 }
 
 function formatForWhatsApp(text) {
-    if (!text) return "";
+    if (!text) return '';
     let formatted = String(text);
     formatted = formatted.replace(/\*\*(.*?)\*\*/g, '*$1*');
-    formatted = formatted.replace(/### (.*?)\n/g, '*$1*\n');
-    formatted = formatted.replace(/## (.*?)\n/g, '*$1*\n');
-    formatted = formatted.replace(/# (.*?)\n/g, '*$1*\n');
-    return formatted;
+    formatted = formatted.replace(/^###\s*(.*)$/gm, '\n*$1*');
+    formatted = formatted.replace(/^##\s*(.*)$/gm, '\n*$1*');
+    formatted = formatted.replace(/^#\s*(.*)$/gm, '\n*$1*');
+    formatted = formatted.replace(/^[\*\-]\s+(.*)$/gm, '• $1');
+    formatted = formatted.replace(/\n{3,}/g, '\n\n');
+    return formatted.trim();
 }
 
 function getWitaTimeGreeting() {
-    const nowUtc = new Date();
-    const witaOffsetMs = 8 * 60 * 60 * 1000;
-    const witaDate = new Date(nowUtc.getTime() + witaOffsetMs);
+    const now = new Date();
+    const hourStr = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Makassar',
+        hour: 'numeric',
+        hour12: false
+    }).format(now);
+    const hour = parseInt(hourStr, 10);
 
-    const hours = witaDate.getUTCHours();
-    const minutes = String(witaDate.getUTCMinutes()).padStart(2, '0');
-
-    let greeting = "Halo Rekan Mahasiswa";
-    if (hours >= 4 && hours < 11) {
-        greeting = "Selamat Pagi";
-    } else if (hours >= 11 && hours < 15) {
-        greeting = "Selamat Siang";
-    } else if (hours >= 15 && hours < 18) {
-        greeting = "Selamat Sore";
+    let greeting = "Selamat malam";
+    if (hour >= 4 && hour < 11) {
+        greeting = "Selamat pagi";
+    } else if (hour >= 11 && hour < 15) {
+        greeting = "Selamat siang";
+    } else if (hour >= 15 && hour < 18) {
+        greeting = "Selamat sore";
     } else {
-        greeting = "Selamat Malam";
+        greeting = "Selamat malam";
     }
 
-    const dayNames = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
-    const monthNames = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+    const fullWitaStr = new Intl.DateTimeFormat('id-ID', {
+        timeZone: 'Asia/Makassar',
+        dateStyle: 'full',
+        timeStyle: 'medium'
+    }).format(now) + " WITA";
 
-    const dayName = dayNames[witaDate.getUTCDay()];
-    const dateNum = witaDate.getUTCDate();
-    const monthName = monthNames[witaDate.getUTCMonth()];
-    const monthNum = witaDate.getUTCMonth() + 1;
-    const yearNum = witaDate.getUTCFullYear();
-
-    return {
-        greeting,
-        hours,
-        minutes,
-        dateNum,
-        monthNum,
-        yearNum,
-        dateIso: `${yearNum}-${String(monthNum).padStart(2, '0')}-${String(dateNum).padStart(2, '0')}`,
-        timeStr: `${String(hours).padStart(2, '0')}:${minutes} WITA`,
-        fullWitaStr: `${dayName}, ${dateNum} ${monthName} ${yearNum} Pukul ${String(hours).padStart(2, '0')}:${minutes} WITA`
-    };
+    return { hour, greeting, fullWitaStr };
 }
-
-function enrichSessionWithWitaStatus(s, currentWitaHours, currentWitaMinutes) {
-    const currentMins = currentWitaHours * 60 + currentWitaMinutes;
-    const startStr = s.startTime || s.start || "08:00";
-    const endStr = s.endTime || s.end || "16:00";
-    const tolMins = typeof s.toleranceMinutes === 'number' ? s.toleranceMinutes : 15;
-
-    const [sH, sM] = startStr.split(':').map(Number);
-    const [eH, eM] = endStr.split(':').map(Number);
-
-    let closingH = eH;
-    let closingM = eM;
-    if (s.calculatedClosingTime) {
-        const parts = s.calculatedClosingTime.split(':').map(Number);
-        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-            closingH = parts[0];
-            closingM = parts[1];
-        }
-    } else if (s.lateLimit && s.lateLimit !== endStr) {
-        const parts = s.lateLimit.split(':').map(Number);
-        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-            closingH = parts[0];
-            closingM = parts[1];
-        }
-    } else {
-        const totalClosing = eH * 60 + eM + tolMins;
-        closingH = Math.floor((totalClosing / 60) % 24);
-        closingM = totalClosing % 60;
-    }
-
-    const startTotal = sH * 60 + sM;
-    const closingTotal = closingH * 60 + closingM;
-
-    const closingTimeStr = `${String(closingH).padStart(2, '0')}:${String(closingM).padStart(2, '0')}`;
-    const isRunningNow = !!s.active && (currentMins >= startTotal && currentMins <= closingTotal);
-    const isUpcoming = !!s.active && (currentMins < startTotal);
-    const isPassed = !!s.active && (currentMins > closingTotal);
-
-    let remainingMinutes = 0;
-    let minutesToStart = 0;
-    if (isRunningNow) {
-        remainingMinutes = closingTotal - currentMins;
-    } else if (isUpcoming) {
-        minutesToStart = startTotal - currentMins;
-    }
-
-    let statusLabel = "⚪ Non-Aktif";
-    if (isRunningNow) {
-        statusLabel = `🟢 Berlangsung (Sisa ${remainingMinutes} mnt)`;
-    } else if (isUpcoming) {
-        statusLabel = `🟡 Mulai dlm ${minutesToStart} mnt`;
-    } else if (isPassed) {
-        statusLabel = `🔴 Selesai`;
-    }
-
-    return {
-        ...s,
-        name: s.name || s.title || "Sesi Praktikum",
-        startStr,
-        endStr,
-        closingTimeStr,
-        isRunningNow,
-        isUpcoming,
-        isPassed,
-        remainingMinutes,
-        minutesToStart,
-        statusLabel
-    };
-}
-
 
 function enforceCorrectGreeting(text, correctGreeting) {
-    if (!text || !correctGreeting) return text;
-    return text.replace(/(selamat pagi|selamat siang|selamat sore|selamat malam)/gi, correctGreeting);
+    if (!text) return text;
+    return text.replace(/\b(selamat\s+(pagi|siang|sore|malam))\b/gi, correctGreeting);
 }
 
-function compileTemplateText(templateStr, dataObj = {}) {
+function compileTemplateText(templateStr, patient, sysCfg) {
     if (!templateStr) return "";
-    let compiled = templateStr;
-    for (const [k, v] of Object.entries(dataObj)) {
-        const regex = new RegExp(`{{${k}}}`, 'gi');
-        compiled = compiled.replace(regex, v !== undefined && v !== null ? String(v) : '');
-    }
-    return compiled;
+    return templateStr
+        .replace(/{NAMA_PASIEN}/g, patient?.namaPasien || "-")
+        .replace(/{NO_RM}/g, patient?.noRm || "-")
+        .replace(/{TGL_KONTROL}/g, patient?.tglKontrol || "-")
+        .replace(/{TGL_MASUK}/g, patient?.tglMasuk || "-")
+        .replace(/{UMUR}/g, patient?.umur || "-")
+        .replace(/{AGAMA}/g, patient?.agama || "-")
+        .replace(/{JENIS_KELAMIN}/g, patient?.jenisKelamin || "-")
+        .replace(/{NO_WA}/g, patient?.noHp || "-")
+        .replace(/{NO_SENDER}/g, patient?.noSender || "-")
+        .replace(/{NO_LID}/g, patient?.noLid || "-")
+        .replace(/{TGL_RESCHEDULE}/g, patient?.tglReschedule || "-")
+        .replace(/{STATUS_RESCHEDULE}/g, patient?.statusReschedule || "-")
+        .replace(/{STATUS_RUJUKAN}/g, patient?.statusRujukan || "Rujukan Habis")
+        .replace(/{DPJP_UTAMA}/g, sysCfg.dpjpUtama || "drg. Hj. Kurniawaty, Sp.KG")
+        .replace(/{DPJP_PENDAMPING}/g, sysCfg.dpjpPendamping || "drg. M. Aksa Arsyad")
+        .replace(/{NAMA_INSTANSI}/g, sysCfg.instansi || "RSKD Gigi dan Mulut Prov. Sulsel")
+        .replace(/{POLI_KLINIK}/g, sysCfg.poli || "Poli Konservasi dan Endodonsi");
 }
 
 // =========================================================================
-// KONTROL SESI PERCAKAPAN MAHASISWA & AI MEMORY
+// CACHE CERDAS: PROMPT, TEMPLATES & KREDENSIAL AI
 // =========================================================================
-const userSessions = new Map();
-const SESSION_TTL_MS = 3 * 60 * 60 * 1000; // 3 Jam
+let cachedSystemConfig = {
+    prompt: '',
+    templates: {},
+    instansi: 'RSKD Gigi dan Mulut Prov. Sulsel',
+    poli: 'Poli Konservasi dan Endodonsi',
+    dpjpUtama: 'drg. Hj. Kurniawaty, Sp.KG',
+    dpjpUtamaWa: '6282291675363',
+    dpjpPendamping: 'drg. M. Aksa Arsyad',
+    geminiApiKey: '',
+    geminiModel: 'gemini-3.5-flash',
+    groqApiKey: '',
+    groqModel: 'openai/gpt-oss-120b',
+    nineRouterUrl: normalize9RouterUrl(process.env.NINEROUTER_URL),
+    nineRouterApiKey: (process.env.NINEROUTER_API_KEY || '9router').trim().replace(/^["']|["']$/g, ''),
+    nineRouterModel: sanitize9RouterModel(process.env.NINEROUTER_MODEL || 'gemini-3.8-flash'),
+    nineRouterFallbackModel: sanitize9RouterModel(process.env.NINEROUTER_FALLBACK_MODEL || 'ag/gemini-3.8-flash-high'),
+    doctors: [],
+    delayChat: 60,
+    timestamp: 0
+};
+const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000;
+
+const conversationSessions = new Map();
+const SESSION_TTL_MS = 45 * 60 * 1000;
+
+const settingsFile = `${sessionPath}/settings.json`;
+
+let botSettings = {
+    autoFollowupSimgos: false,
+    autoFollowupHour: "08",
+    autoFollowupMinute: "30",
+    lastAutoFollowupDate: ""
+};
+
+if (fs.existsSync(settingsFile)) {
+    try {
+        botSettings = { ...botSettings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf-8')) };
+    } catch (e) { }
+}
+
+function saveSettings() {
+    fs.writeFileSync(settingsFile, JSON.stringify(botSettings, null, 2));
+}
+
+// DAFTAR PERINTAH RESMI BOT RSKDGM (GUARDED SET AGAR TIDAK DIJAWAB OLEH AI)
+const BOT_COMMAND_SET = new Set([
+    'menu', 'help',
+    'test9router', 'ping9router', 'cek9router',
+    'converstalltolid', 'convertalltolid', 'syncalllid', 'syncalldb', 'synclids', 'syncpasien',
+    'reschedulepx', 'rescheduleterbatalkan',
+    'cekrujukanaktif', 'rujukanaktif',
+    'cekrujukanhabis', 'rujukanhabis',
+    'bindpasien', 'linkpasien',
+    'followupnow', 'follownow',
+    'setjamfollowup',
+    'followup', 'cekfollowup',
+    'gassfollowup', 'kirimfollowup', 'gass',
+    'caripasien',
+    'reschedule',
+    'statskontrol', 'statssimgos',
+    'settingssimgos',
+    'templatesimgos',
+    'autofollowup',
+    'setdelaychat', 'setdelay', 'delaychat',
+    'fixsender', 'syncsender',
+    'getprompt',
+    'testapirskdgm', 'testapivercel', 'testrskdgm', 'pingrskdgm',
+    'testapigas', 'testgas', 'pinggas',
+    'ping',
+    'runtime',
+    'sticker', 's'
+]);
 
 function cleanExpiredSessions() {
     const now = Date.now();
-    for (const [key, session] of userSessions.entries()) {
-        if (now - session.lastActivity > SESSION_TTL_MS) {
-            userSessions.delete(key);
+    for (const [phone, session] of conversationSessions.entries()) {
+        if (now - session.lastSeen > SESSION_TTL_MS) {
+            conversationSessions.delete(phone);
         }
     }
 }
+setInterval(cleanExpiredSessions, 10 * 60 * 1000);
 
 function getRelativeTime(seconds) {
-    const s = Math.floor(Number(seconds) || 0);
-    const m = Math.floor(s / 60);
-    const h = Math.floor(m / 60);
-    if (h > 0) return `${h} jam ${m % 60} mnt`;
-    if (m > 0) return `${m} menit`;
-    return `${s} detik`;
+    const m = Math.floor(seconds / 60);
+    const h = Math.floor(seconds / 3600);
+    const d = Math.floor(seconds / 86400);
+    if (d > 0) return `${d} hari lalu`;
+    if (h > 0) return `${h} jam lalu`;
+    if (m > 0) return `${m} menit lalu`;
+    return `${Math.floor(seconds)} detik lalu`;
 }
 
 function extractDateFromText(text) {
     if (!text) return null;
-    const match = text.match(/\b(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]20\d{2})\b/);
-    if (match) {
-        const raw = match[0].replace(/[-/.]/g, '-');
-        const parts = raw.split('-');
-        if (parts[0].length === 4) {
-            return `${parts[0]}-${String(parts[1]).padStart(2, '0')}-${String(parts[2]).padStart(2, '0')}`;
-        } else {
-            return `${parts[2]}-${String(parts[1]).padStart(2, '0')}-${String(parts[0]).padStart(2, '0')}`;
+    const t = text.trim();
+
+    const isoMatch = t.match(/\b(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})\b/);
+    if (isoMatch) {
+        const y = isoMatch[1];
+        const m = String(isoMatch[2]).padStart(2, '0');
+        const d = String(isoMatch[3]).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+    }
+
+    const dmyMatch = t.match(/\b(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})\b/);
+    if (dmyMatch) {
+        const d = String(dmyMatch[1]).padStart(2, '0');
+        const m = String(dmyMatch[2]).padStart(2, '0');
+        const y = dmyMatch[3];
+        return `${y}-${m}-${d}`;
+    }
+
+    const monthMap = {
+        'januari': '01', 'jan': '01',
+        'februari': '02', 'feb': '02',
+        'maret': '03', 'mar': '03',
+        'april': '04', 'apr': '04',
+        'mei': '05',
+        'juni': '06', 'jun': '06',
+        'juli': '07', 'jul': '07',
+        'agustus': '08', 'ags': '08', 'agt': '08',
+        'september': '09', 'sep': '09',
+        'oktober': '10', 'okt': '10',
+        'november': '11', 'nov': '11',
+        'desember': '12', 'des': '12'
+    };
+
+    const idMatch = t.match(/\b(\d{1,2})\s+([a-zA-Z]+)(?:\s+(\d{4}))?\b/);
+    if (idMatch) {
+        const d = String(idMatch[1]).padStart(2, '0');
+        const mName = idMatch[2].toLowerCase();
+        const y = idMatch[3] || '2026';
+        if (monthMap[mName]) {
+            return `${y}-${monthMap[mName]}-${d}`;
         }
     }
+
     return null;
 }
 
-function extractNimFromText(text) {
-    if (!text) return null;
-    const match = text.match(/\b(16[12]20\d{5,7}|\d{9,11})\b/);
-    return match ? match[0] : null;
+function detectPatientIntent(rawText) {
+    const text = rawText.trim().toLowerCase();
+
+    const jknCancelPattern1 = /\b(terbatalkan|batal|dibatalkan)\b.*\b(mobile\s*jkn|jkn|aplikasi|bpjs|sistem)\b/i;
+    const jknCancelPattern2 = /\b(mobile\s*jkn|jkn)\b.*\b(terbatalkan|batal|dibatalkan)\b/i;
+    const jknExactPhrase = /saya\s*terbatalkan\s*(di\s*aplikasi)?\s*mobile\s*jkn/i;
+
+    if (jknExactPhrase.test(text) || jknCancelPattern1.test(text) || jknCancelPattern2.test(text)) {
+        return { type: 'TERBATALKAN_JKN' };
+    }
+
+    const wrongPersonPattern = /\b(salah\s*orang|bukan\s*saya|salah\s*nomor|salah\s*ki|salah\s*kirim|salah\s*target|tidak\s*pernah\s*(ke|periksa|daftar))\b/i;
+    if (wrongPersonPattern.test(text)) {
+        return { type: 'SALAH_ORANG' };
+    }
+
+    const isNegative = /\b(tidak|nggak|engga|gak|gk|belum|batal)\s*(bisa|hadir|datang|ikut|boleh)?\b/i.test(text);
+
+    const hadirPattern = /\b(hadir|bisa\s*(dok|kak|min|hadir|datang|ikut|ia|ya)?|boleh\s*(dok|kak|min)?|siap\s*(dok|kak|min|hadir|datang)?|oke\s*(dok|kak|min)?|ok\s*(dok|kak|min)?|baik\s*(dok|kak|min)?|insya\s*allah\s*(bisa|hadir|datang)?|datang|dateng|ikut)\b/i;
+
+    if (!isNegative && hadirPattern.test(text) && !text.includes('reschedule') && !text.includes('ganti') && !text.includes('undur')) {
+        return { type: 'HADIR' };
+    }
+
+    const reschedPattern = /\b(reschedule|reschedole|rescedule|riscedul|rescedul|jadwal ulang|ganti jadwal|ubah jadwal|undur|mundur|tunda|ganti hari|pindah hari|ganti tanggal|pindah tanggal)\b/i;
+    const extractedDate = extractDateFromText(text);
+
+    if (isNegative || reschedPattern.test(text)) {
+        return {
+            type: 'RESCHEDULE',
+            date: extractedDate
+        };
+    }
+
+    if (extractedDate && text.length <= 30) {
+        return {
+            type: 'RESCHEDULE',
+            date: extractedDate
+        };
+    }
+
+    return { type: 'GENERAL' };
 }
 
-function detectStudentIntent(rawText) {
-    const t = (rawText || '').toLowerCase().trim();
-    if (!t) return 'unknown';
+// CLIENT REST API GAS SIMGOS
+async function callSimgosApi(action, params = {}) {
+    const query = new URLSearchParams({ action, ...params }).toString();
+    const url = `${GAS_URL_SIMGOS}?${query}`;
 
-    if (t.startsWith('!absen') || t.startsWith('/absen') || t.includes('cara absen') || t.includes('mau absen') || t.includes('link absen')) {
-        return 'absen';
-    }
-    if (t.startsWith('!jadwal') || t.startsWith('/jadwal') || t.includes('jadwal sesi') || t.includes('jam praktikum') || t.includes('jadwal hari ini')) {
-        return 'jadwal';
-    }
-    if (t.startsWith('!lokasi') || t.startsWith('!gps') || t.startsWith('!geofence') || t.includes('titik lokasi') || t.includes('radius absen') || t.includes('lokasi kampus')) {
-        return 'lokasi';
-    }
-    if (t.startsWith('!rekap') || t.startsWith('/rekap') || t.includes('rekap kehadiran') || t.includes('riwayat absen') || t.includes('cek kehadiran')) {
-        return 'rekap';
-    }
-    if (t.startsWith('!logout') || t.startsWith('/logout') || t.includes('lepas perangkat') || t.includes('ganti hp') || t.includes('reset device')) {
-        return 'logout';
-    }
-    if (t.startsWith('!kalender') || t.startsWith('/kalender') || t.includes('hari libur') || t.includes('libur stase')) {
-        return 'kalender';
-    }
-    if (t.startsWith('!reset') || t.startsWith('/reset') || t === 'reset') {
-        return 'reset';
-    }
-    if (t.startsWith('!ping') || t.startsWith('/ping') || t === 'ping') {
-        return 'ping';
-    }
-    if (t.startsWith('!menu') || t.startsWith('/menu') || t.startsWith('!help') || t.startsWith('/help') || t === 'bantuan' || t === 'menu') {
-        return 'menu';
-    }
-    if (t.startsWith('!broadcastjadwal') || t.startsWith('/broadcastjadwal')) {
-        return 'broadcastjadwal';
-    }
-    if (t.startsWith('!broadcast ') || t.startsWith('/broadcast ')) {
-        return 'broadcast';
-    }
-    if (t.startsWith('!sesi') || t.startsWith('/sesi')) {
-        return 'sesi';
-    }
-    if (t.startsWith('!stats') || t.startsWith('/stats')) {
-        return 'stats';
-    }
-    if (t.startsWith('!sync') || t.startsWith('/sync') || t.startsWith('!reloadsessions') || t.startsWith('/reloadsessions')) {
-        return 'sync';
-    }
-    return 'ai_chat';
-}
-
-// =========================================================================
-// REST API & DIRECT CLOUD REDIS CLIENT LAYER (HYBRID DUAL-ENGINE)
-// =========================================================================
-
-// Mengambil data dari Upstash Cloud secara langsung, dengan fallback ke REST API lokal
-async function callDbGet(key) {
-    // 1. Coba koneksi langsung ke Upstash Redis Cloud (Tanpa Ketergantungan Localhost)
-    const redisResult = await redisDirectGet(key);
-    if (redisResult !== null && redisResult !== undefined) {
-        return redisResult;
-    }
-
-    // 2. Fallback: Coba HTTP API Web Absensi jika sedang di lingkungan lokal
-    if (WEB_ABSENSI_API_URL && !WEB_ABSENSI_API_URL.includes('localhost:3000')) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-            const res = await fetch(`${WEB_ABSENSI_API_URL}/db?key=${encodeURIComponent(key)}`, {
-                method: 'GET',
-                headers: { 'Accept': 'application/json' },
-                cache: 'no-store'
+            const res = await fetch(url, {
+                method: "GET",
+                redirect: "follow",
+                headers: {
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                }
             });
-            if (res.ok) {
-                const json = await res.json();
-                if (json.success && json.data !== undefined) return json.data;
+
+            const rawText = await res.text();
+
+            if (!rawText || rawText.trim().startsWith("<")) {
+                throw new Error(`Google Apps Script mengembalikan halaman HTML. Pastikan Web App di-deploy dengan akses 'Anyone'.`);
             }
-        } catch (e) { }
+
+            const jsonData = JSON.parse(rawText);
+            if (jsonData.status === "error") {
+                throw new Error(jsonData.message || "GAS Server Error");
+            }
+
+            return jsonData;
+        } catch (err) {
+            lastError = err;
+            if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
+        }
     }
 
-    return null;
+    throw new Error(`Gagal komunikasi dengan API SIMGOS: ${lastError.message}`);
 }
 
-// Menyimpan data langsung ke Upstash Cloud, dengan fallback ke REST API lokal
-async function callDbSet(key, value) {
-    // 1. Tulis langsung ke Upstash Redis Cloud
-    const successDirect = await redisDirectSet(key, value);
-    if (successDirect) return true;
-
-    // 2. Fallback: Tulis via HTTP API
+async function callSimgosPost(payload = {}) {
     try {
-        const res = await fetch(`${WEB_ABSENSI_API_URL}/db`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify({ key, value })
+        const res = await fetch(GAS_URL_SIMGOS, {
+            method: "POST",
+            redirect: "follow",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: JSON.stringify(payload)
         });
-        if (res.ok) {
-            const json = await res.json();
-            return json.success === true;
-        }
-    } catch (e) { }
-
-    return false;
+        return await res.json();
+    } catch (err) {
+        return { status: "error", message: err.message };
+    }
 }
 
-// Menarik antrian pesan outbox (Mendukung Upstash Cloud key 'axaxyz_wa_queue')
-async function callWaPull() {
-    // 1. Coba baca antrian langsung dari Upstash Redis Cloud (Key: axaxyz_wa_queue)
-    const cloudQueue = await redisDirectGet('axaxyz_wa_queue');
-    if (Array.isArray(cloudQueue) && cloudQueue.length > 0) {
-        return cloudQueue;
+async function fetchSystemAIConfig() {
+    const now = Date.now();
+    if (cachedSystemConfig.prompt && cachedSystemConfig.geminiApiKey && (now - cachedSystemConfig.timestamp < CONFIG_CACHE_TTL_MS)) {
+        return cachedSystemConfig;
     }
 
-    // 2. Fallback: Coba request ke endpoint /api/wa?action=pull
     try {
-        const res = await fetch(`${WEB_ABSENSI_API_URL}/wa?action=pull`, {
-            method: 'GET',
-            headers: { 'Accept': 'application/json' },
-            cache: 'no-store'
-        });
-        if (res.ok) {
-            const json = await res.json();
-            if (json.success && Array.isArray(json.queue)) {
-                return json.queue;
-            }
-            if (json.success && Array.isArray(json.messages)) {
-                return json.messages;
-            }
+        const res = await callSimgosApi("get_active_prompt");
+        if (res && res.status === "success") {
+            cachedSystemConfig = {
+                prompt: res.activePrompt || cachedSystemConfig.prompt,
+                templates: res.templates || cachedSystemConfig.templates,
+                instansi: res.config?.instansi || "RSKD Gigi dan Mulut Prov. Sulsel",
+                poli: res.config?.poli || cachedSystemConfig.poli,
+                dpjpUtama: res.config?.doctors?.[0]?.name || "drg. Hj. Kurniawaty, Sp.KG",
+                dpjpUtamaWa: res.config?.doctors?.[0]?.wa || "6282291675363",
+                dpjpPendamping: res.config?.doctors?.[1]?.name || "drg. M. Aksa Arsyad",
+                geminiApiKey: res.aiConfig?.geminiApiKey || cachedSystemConfig.geminiApiKey,
+                geminiModel: res.aiConfig?.geminiModel || "gemini-3.5-flash",
+                groqApiKey: res.aiConfig?.groqApiKey || cachedSystemConfig.groqApiKey,
+                groqModel: res.aiConfig?.groqModel || "openai/gpt-oss-120b",
+                nineRouterUrl: normalize9RouterUrl(process.env.NINEROUTER_URL || res.aiConfig?.nineRouterUrl || cachedSystemConfig.nineRouterUrl),
+                nineRouterApiKey: (process.env.NINEROUTER_API_KEY || res.aiConfig?.nineRouterApiKey || cachedSystemConfig.nineRouterApiKey || '9router').trim().replace(/^["']|["']$/g, ''),
+                nineRouterModel: sanitize9RouterModel(process.env.NINEROUTER_MODEL || res.aiConfig?.nineRouterModel || cachedSystemConfig.nineRouterModel || 'gemini-3.8-flash'),
+                nineRouterFallbackModel: sanitize9RouterModel(process.env.NINEROUTER_FALLBACK_MODEL || res.aiConfig?.nineRouterFallbackModel || cachedSystemConfig.nineRouterFallbackModel || 'ag/gemini-3.8-flash-high'),
+                doctors: res.config?.doctors || [],
+                delayChat: parseInt(res.config?.delayChat || res.delay_chat || cachedSystemConfig.delayChat || 60, 10),
+                timestamp: now
+            };
+            return cachedSystemConfig;
         }
     } catch (e) { }
 
-    return [];
+    return cachedSystemConfig;
 }
 
-// Menghapus pesan dari antrian setelah berhasil dikirim
-async function callWaAcknowledge(processedIds = []) {
-    if (!Array.isArray(processedIds) || processedIds.length === 0) return true;
-
-    // 1. Hapus langsung dari Upstash Redis Cloud
-    try {
-        let currentQueue = await redisDirectGet('axaxyz_wa_queue');
-        if (Array.isArray(currentQueue)) {
-            const idSet = new Set(processedIds);
-            const remaining = currentQueue.filter(msg => !idSet.has(msg.id));
-            await redisDirectSet('axaxyz_wa_queue', remaining);
-        }
-    } catch (e) { }
-
-    // 2. Kirim juga request DELETE ke REST API jika tersedia
-    try {
-        await fetch(`${WEB_ABSENSI_API_URL}/wa`, {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify({ message_ids: processedIds })
-        });
-    } catch (e) { }
-
-    return true;
-}
-
-// =========================================================================
-// BAILEYS USYNC & SIGNAL KEYSTORE REVERSE RESOLVER (LID <-> PHONE)
-// =========================================================================
+// USYNC LID RESOLVER
 async function resolveLidFromWhatsAppServer(sock, rawPhone) {
     const cleanPhone = formatToInternational(rawPhone);
     if (!cleanPhone || cleanPhone.length < 8) return null;
 
-    if (phoneToLidMap.has(cleanPhone)) {
-        return phoneToLidMap.get(cleanPhone);
-    }
-
     try {
-        if (sock && typeof sock.onWhatsApp === 'function') {
-            const waCheck = await sock.onWhatsApp(cleanPhone);
-            if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
-                const lid = String(waCheck[0].lid).replace(/\D/g, '');
-                registerIdentityMapping(lid, cleanPhone);
-                return lid;
-            }
+        const waCheck = await sock.onWhatsApp(cleanPhone);
+        if (waCheck && waCheck.length > 0 && waCheck[0].lid) {
+            return String(waCheck[0].lid).replace(/\D/g, '');
         }
     } catch (e) { }
 
     try {
-        if (sock && typeof sock.query === 'function') {
-            const usyncIqNode = {
-                tag: 'iq',
-                attrs: {
-                    to: 's.whatsapp.net',
-                    type: 'get',
-                    xmlns: 'usync',
-                },
-                content: [
-                    {
-                        tag: 'usync',
-                        attrs: {
-                            sid: `usync-lid-${Date.now()}`,
-                            mode: 'query',
-                            last: 'true',
-                            index: '0',
-                            context: 'interactive',
+        const usyncIqNode = {
+            tag: 'iq',
+            attrs: {
+                to: 's.whatsapp.net',
+                type: 'get',
+                xmlns: 'usync',
+            },
+            content: [
+                {
+                    tag: 'usync',
+                    attrs: {
+                        sid: `usync-lid-${Date.now()}`,
+                        mode: 'query',
+                        last: 'true',
+                        index: '0',
+                        context: 'interactive',
+                    },
+                    content: [
+                        {
+                            tag: 'query',
+                            attrs: {},
+                            content: [
+                                { tag: 'contact', attrs: {} },
+                                { tag: 'lid', attrs: {} }
+                            ]
                         },
-                        content: [
-                            {
-                                tag: 'query',
-                                attrs: {},
-                                content: [
-                                    { tag: 'contact', attrs: {} },
-                                    { tag: 'lid', attrs: {} }
-                                ]
-                            },
-                            {
-                                tag: 'list',
-                                attrs: {},
-                                content: [
-                                    {
-                                        tag: 'user',
-                                        attrs: { jid: `${cleanPhone}@s.whatsapp.net` }
-                                    }
-                                ]
-                            }
-                        ]
+                        {
+                            tag: 'list',
+                            attrs: {},
+                            content: [
+                                {
+                                    tag: 'user',
+                                    attrs: { jid: `${cleanPhone}@s.whatsapp.net` }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        };
+
+        const res = await sock.query(usyncIqNode);
+        if (res && res.content) {
+            const extractLid = (node) => {
+                if (!node) return null;
+                if (node.tag === 'lid' && node.attrs && (node.attrs.val || node.attrs.jid)) {
+                    return String(node.attrs.val || node.attrs.jid).replace(/\D/g, '');
+                }
+                if (Array.isArray(node.content)) {
+                    for (const c of node.content) {
+                        const found = extractLid(c);
+                        if (found) return found;
                     }
-                ]
+                }
+                return null;
             };
 
-            const res = await sock.query(usyncIqNode);
-            if (res && res.content) {
-                const extractLid = (node) => {
-                    if (!node) return null;
-                    if (node.tag === 'lid' && node.attrs && (node.attrs.val || node.attrs.jid)) {
-                        return String(node.attrs.val || node.attrs.jid).replace(/\D/g, '');
-                    }
-                    if (Array.isArray(node.content)) {
-                        for (const c of node.content) {
-                            const found = extractLid(c);
-                            if (found) return found;
-                        }
-                    }
-                    return null;
-                };
-
-                const foundLid = extractLid(res);
-                if (foundLid) {
-                    registerIdentityMapping(foundLid, cleanPhone);
-                    return foundLid;
-                }
-            }
+            const foundLid = extractLid(res);
+            if (foundLid) return foundLid;
         }
-    } catch (e) { }
+    } catch (errUsync) { }
 
     return null;
 }
 
+// REVERSE RESOLVER (LID -> PHONE NUMBER)
 async function resolvePhoneFromLid(sock, rawLid) {
     const cleanLid = String(rawLid).replace(/\D/g, '');
     if (!cleanLid) return null;
 
-    // 1. Cek cache memori (0ms)
+    // 1. Cek memory map terlebih dahulu (0ms)
     if (lidToPhoneMap.has(cleanLid)) {
         return lidToPhoneMap.get(cleanLid);
     }
 
-    // 2. Cek Signal Repository dari Baileys jika ada
+    // 2. Cek Signal Repository dari Baileys jika tersedia
     try {
         if (sock?.signalRepository?.lidToJid) {
             const jidResult = await sock.signalRepository.lidToJid(`${cleanLid}@lid`);
@@ -751,163 +663,390 @@ async function resolvePhoneFromLid(sock, rawLid) {
 
     // 3. Query USYNC ke server WhatsApp
     try {
-        if (sock && typeof sock.query === 'function') {
-            const usyncNode = {
-                tag: 'iq',
-                attrs: {
-                    to: 's.whatsapp.net',
-                    type: 'get',
-                    xmlns: 'usync',
-                },
-                content: [
-                    {
-                        tag: 'usync',
-                        attrs: {
-                            sid: `usync-rev-${Date.now()}`,
-                            mode: 'query',
-                            last: 'true',
-                            index: '0',
-                            context: 'interactive',
+        const usyncNode = {
+            tag: 'iq',
+            attrs: {
+                to: 's.whatsapp.net',
+                type: 'get',
+                xmlns: 'usync',
+            },
+            content: [
+                {
+                    tag: 'usync',
+                    attrs: {
+                        sid: `usync-rev-${Date.now()}`,
+                        mode: 'query',
+                        last: 'true',
+                        index: '0',
+                        context: 'interactive',
+                    },
+                    content: [
+                        {
+                            tag: 'query',
+                            attrs: {},
+                            content: [
+                                { tag: 'contact', attrs: {} },
+                                { tag: 'phone', attrs: {} }
+                            ]
                         },
-                        content: [
-                            {
-                                tag: 'query',
-                                attrs: {},
-                                content: [
-                                    { tag: 'contact', attrs: {} },
-                                    { tag: 'phone', attrs: {} }
-                                ]
-                            },
-                            {
-                                tag: 'list',
-                                attrs: {},
-                                content: [
-                                    {
-                                        tag: 'user',
-                                        attrs: { jid: `${cleanLid}@lid` }
-                                    }
-                                ]
-                            }
-                        ]
+                        {
+                            tag: 'list',
+                            attrs: {},
+                            content: [
+                                {
+                                    tag: 'user',
+                                    attrs: { jid: `${cleanLid}@lid` }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        };
+
+        const res = await sock.query(usyncNode);
+        if (res && res.content) {
+            const extractPhone = (node) => {
+                if (!node) return null;
+                if (node.attrs && (node.attrs.phone || node.attrs.jid)) {
+                    const raw = node.attrs.phone || node.attrs.jid;
+                    const p = formatToInternational(raw);
+                    if (p && p.length >= 8 && p.length <= 15) return p;
+                }
+                if (Array.isArray(node.content)) {
+                    for (const c of node.content) {
+                        const found = extractPhone(c);
+                        if (found) return found;
                     }
-                ]
+                }
+                return null;
             };
 
-            const res = await sock.query(usyncNode);
-            if (res && res.content) {
-                const extractPhone = (node) => {
-                    if (!node) return null;
-                    if (node.attrs && (node.attrs.phone || node.attrs.jid)) {
-                        const raw = node.attrs.phone || node.attrs.jid;
-                        const p = formatToInternational(raw);
-                        if (p && p.length >= 8 && p.length <= 15) return p;
-                    }
-                    if (Array.isArray(node.content)) {
-                        for (const c of node.content) {
-                            const found = extractPhone(c);
-                            if (found) return found;
-                        }
-                    }
-                    return null;
-                };
+            const foundPhone = extractPhone(res);
+            if (foundPhone) {
+                registerIdentityMapping(cleanLid, foundPhone);
+                return foundPhone;
+            }
+        }
+    } catch (e) { }
 
-                const foundPhone = extractPhone(res);
-                if (foundPhone) {
-                    registerIdentityMapping(cleanLid, foundPhone);
-                    return foundPhone;
+    return null;
+}
+
+// PRE-WARMING DOKTER & OWNER
+async function prewarmDoctorAndOwnerLids(sock) {
+    try {
+        const sysCfg = await fetchSystemAIConfig();
+        const phoneCandidates = [
+            ownerNumber,
+            ...(sysCfg.doctors || []).map(d => d.wa),
+            "6282291675363",
+            "6285256739684"
+        ].map(p => formatToInternational(p)).filter(Boolean);
+
+        for (const phone of phoneCandidates) {
+            if (!phoneToLidMap.has(phone)) {
+                try {
+                    const lid = await resolveLidFromWhatsAppServer(sock, phone);
+                    if (lid) {
+                        registerIdentityMapping(lid, phone);
+                        console.log(`[Identity Pre-warm] ${phone} <-> ${lid}@lid`);
+                    }
+                } catch (e) { }
+            }
+        }
+    } catch (e) { }
+}
+
+// CONVERT ALL PATIENTS TO LID & SAVE TO COLUMN 18 (NO LID)
+async function convertAllPatientsToLid(sock, forceAll = false) {
+    console.log(`[Auto-Converter] Memulai konversi satu-satu No WA ke Kolom 18 (No LID)...`);
+    try {
+        const actionToCall = forceAll ? "get_all_patient_phones" : "get_unlinked_patients";
+        const res = await callSimgosApi(actionToCall);
+
+        if (res.status !== "success" || !Array.isArray(res.data) || res.data.length === 0) {
+            console.log(`[Auto-Converter] Semua pasien di spreadsheet telah memiliki No LID resmi.`);
+            return { total: 0, matched: 0 };
+        }
+
+        const patientList = res.data;
+        console.log(`[Auto-Converter] Memproses ${patientList.length} pasien untuk konversi LID resmi...`);
+
+        const batchUpdates = [];
+        let matchedCount = 0;
+
+        for (const p of patientList) {
+            const phoneFull = formatToInternational(p.cleanPhone || p.noHp);
+            if (!phoneFull || phoneFull.length < 8) continue;
+
+            try {
+                const resolvedLid = await resolveLidFromWhatsAppServer(sock, phoneFull);
+                if (resolvedLid) {
+                    registerIdentityMapping(resolvedLid, phoneFull);
+                    p.noLid = resolvedLid;
+                    p.noSender = phoneFull;
+                    cachePatientObject(resolvedLid, p);
+                    cachePatientObject(phoneFull, p);
+                    cachePatientObject(p.noRm, p);
+
+                    batchUpdates.push({
+                        noRm: p.noRm,
+                        phone: phoneFull,
+                        lid: resolvedLid,
+                        rowNumber: p.rowNumber
+                    });
+
+                    matchedCount++;
+                    console.log(`[LID Match SUKSES] ${p.namaPasien} (RM: ${p.noRm}): No WA ${phoneFull} -> LID: ${resolvedLid}`);
+                }
+                await new Promise(r => setTimeout(r, 250));
+            } catch (errCheck) {
+                console.warn(`[Resolve Error: ${phoneFull}]`, errCheck.message);
+            }
+        }
+
+        if (batchUpdates.length > 0) {
+            await callSimgosPost({
+                action: "batch_update_lids",
+                updates: batchUpdates
+            });
+            console.log(`[Auto-Converter] Sukses menyimpan ${batchUpdates.length} data ke Kolom 18 (No LID) Spreadsheet!`);
+        }
+
+        return { total: patientList.length, matched: matchedCount };
+    } catch (errSync) {
+        console.error("[Auto-Converter Error]", errSync.message);
+        return { total: 0, matched: 0, error: errSync.message };
+    }
+}
+
+// Helper: Mengekstrak Nomor RM dari teks pesan pasien (Contoh: 'RM 123456', 'No. RM 12-34-56', atau 5-8 digit angka)
+function extractRmFromText(text) {
+    if (!text || typeof text !== 'string') return null;
+    const rmMatch = text.match(/(?:no\.?\s*rm|nomor\s*rm|rekam\s*medis|rm)\s*[:#.-]?\s*(\d{2}[-.]?\d{2}[-.]?\d{2}|\d{5,8})/i);
+    if (rmMatch) {
+        return rmMatch[1].replace(/[-.]/g, '');
+    }
+    const standAloneDigitMatch = text.trim().match(/^(\d{2}[-.]?\d{2}[-.]?\d{2}|\d{5,8})$/);
+    if (standAloneDigitMatch) {
+        return standAloneDigitMatch[1].replace(/[-.]/g, '');
+    }
+    return null;
+}
+
+// Helper: Memilih kandidat pasien terbaik jika query menghasilkan lebih dari 1 data kontrol
+function selectBestPatientCandidate(candidates) {
+    if (!Array.isArray(candidates) || candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0];
+
+    // 1. Prioritaskan yang status kontrolnya masih 'Pending'
+    const pending = candidates.find(c => {
+        const sH2 = String(c.statusWaH2 || c.statusWa || "").toLowerCase();
+        const sH1 = String(c.statusWaH1 || "").toLowerCase();
+        return sH2 === "pending" || sH2 === "" || sH1 === "pending" || sH1 === "";
+    });
+    if (pending) return pending;
+
+    // 2. Ambil kandidat paling baru (indeks terakhir)
+    return candidates[candidates.length - 1];
+}
+
+// SMART VERIFIED RESOLVER: Verifikasi Instan Identitas Pasien (LID, Phone, RM di Chat, Nama Lengkap & Auto-Bind LID)
+async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") {
+    let matchedPatient = null;
+
+    // 1. Cek Cache Memori (Instant 0ms)
+    if (senderInfo.id) {
+        matchedPatient = getCachedPatientObject(senderInfo.id);
+    }
+    if (!matchedPatient && senderInfo.resolvedPhone) {
+        matchedPatient = getCachedPatientObject(senderInfo.resolvedPhone);
+    }
+    if (!matchedPatient && senderInfo.targetJid) {
+        matchedPatient = getCachedPatientObject(senderInfo.targetJid);
+    }
+
+    if (matchedPatient && matchedPatient.namaPasien && matchedPatient.noRm && matchedPatient.noRm !== "-") {
+        if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
+            const match = matchedPatient.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+            if (match) matchedPatient.tglReschedule = match[1];
+        }
+        return matchedPatient;
+    }
+
+    // 2. Cek apakah ada Nomor RM yang diketikkan di dalam teks pesan pasien
+    const extractedRm = extractRmFromText(messageText);
+    if (extractedRm) {
+        try {
+            const rmRes = await callSimgosApi("search_patient", {
+                query: extractedRm,
+                lid: senderInfo.id
+            });
+            if (rmRes.status === "success" && Array.isArray(rmRes.data) && rmRes.data.length > 0) {
+                matchedPatient = selectBestPatientCandidate(rmRes.data);
+            }
+        } catch (e) { }
+    }
+
+    // 3. Pencarian via Phone atau LID pengirim di Google Sheets
+    if (!matchedPatient) {
+        let lookupPhone = senderInfo.resolvedPhone;
+        if (!lookupPhone && senderInfo.isLid && lidToPhoneMap.has(senderInfo.id)) {
+            lookupPhone = lidToPhoneMap.get(senderInfo.id);
+        } else if (!lookupPhone && !senderInfo.isLid) {
+            lookupPhone = senderInfo.id;
+        }
+
+        const cleanLookupPhone = (lookupPhone && lookupPhone.length >= 8 && lookupPhone.length <= 15)
+            ? formatToInternational(lookupPhone)
+            : "";
+        const lookupLid = senderInfo.isLid ? senderInfo.id : (phoneToLidMap.get(senderInfo.id) || "");
+
+        try {
+            const searchRes = await callSimgosApi("search_patient", {
+                phone: cleanLookupPhone,
+                lid: lookupLid || senderInfo.id,
+                query: cleanLookupPhone || lookupLid || senderInfo.id
+            });
+
+            if (searchRes.status === "success" && Array.isArray(searchRes.data) && searchRes.data.length > 0) {
+                matchedPatient = selectBestPatientCandidate(searchRes.data);
+            }
+        } catch (e) { }
+    }
+
+    // 4. Reverse Resolve Phone dari WhatsApp Server jika pengirim adalah LID
+    if (senderInfo.isLid && !matchedPatient) {
+        try {
+            const resolvedPhone = await resolvePhoneFromLid(sock, senderInfo.id);
+            if (resolvedPhone) {
+                registerIdentityMapping(senderInfo.id, resolvedPhone);
+                const searchRev = await callSimgosApi("search_patient", {
+                    phone: resolvedPhone,
+                    lid: senderInfo.id,
+                    query: resolvedPhone
+                });
+                if (searchRev.status === "success" && Array.isArray(searchRev.data) && searchRev.data.length > 0) {
+                    matchedPatient = selectBestPatientCandidate(searchRev.data);
+                }
+            }
+        } catch (e) { }
+    }
+
+    // 4b. Dynamic Fallback: Jika pengirim adalah LID belum terpetakan, cek antrean kontrol aktif hari ini & H-1
+    if (senderInfo.isLid && !matchedPatient) {
+        try {
+            const [h1Res, h2Res] = await Promise.all([
+                callSimgosApi("get_followup", { mode: "h1", tgl: "auto" }).catch(() => null),
+                callSimgosApi("get_followup", { mode: "h2", tgl: "auto" }).catch(() => null)
+            ]);
+            const candidatePatients = [];
+            if (h1Res?.status === "success" && Array.isArray(h1Res.data)) candidatePatients.push(...h1Res.data);
+            if (h2Res?.status === "success" && Array.isArray(h2Res.data)) candidatePatients.push(...h2Res.data);
+
+            for (const cp of candidatePatients) {
+                const phoneCandidate = formatToInternational(cp.noHp);
+                if (!phoneCandidate || phoneCandidate.length < 8) continue;
+
+                let cLid = phoneToLidMap.get(phoneCandidate) || (cp.noLid && cp.noLid !== "-" && cp.noLid.length > 10 ? cp.noLid : null);
+                if (!cLid) {
+                    cLid = await resolveLidFromWhatsAppServer(sock, phoneCandidate);
+                }
+                if (cLid && String(cLid).replace(/\D/g, '') === String(senderInfo.id).replace(/\D/g, '')) {
+                    console.log(`[Dynamic LID Match] Pengirim ${senderInfo.id} teridentifikasi sebagai ${cp.namaPasien} (RM: ${cp.noRm}, No: ${phoneCandidate})`);
+                    matchedPatient = cp;
+                    registerIdentityMapping(senderInfo.id, phoneCandidate);
+                    break;
+                }
+            }
+        } catch (e) { }
+    }
+
+    // 5. Pencarian Cerdas via Nama Lengkap (PushName atau Teks Pesan)
+    if (!matchedPatient && pushName && pushName.length >= 3 && pushName !== "Pasien") {
+        try {
+            const cleanName = pushName.replace(/[^a-zA-Z0-9\s.,]/g, '').trim();
+            const nameCheck = await callSimgosApi("search_patient", { query: cleanName, lid: senderInfo.id });
+            if (nameCheck.status === "success" && Array.isArray(nameCheck.data) && nameCheck.data.length > 0) {
+                matchedPatient = selectBestPatientCandidate(nameCheck.data);
+            }
+        } catch (e) { }
+    }
+
+    // 6. Post-Process: Normalisasi & Auto-Binding LID ke Database Spreadsheet
+    if (matchedPatient) {
+        if ((!matchedPatient.tglReschedule || matchedPatient.tglReschedule === "-") && matchedPatient.statusReschedule) {
+            const match = matchedPatient.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+            if (match) matchedPatient.tglReschedule = match[1];
+        }
+
+        if (senderInfo.id) {
+            registerIdentityMapping(senderInfo.id, matchedPatient.noHp || senderInfo.id);
+            cachePatientObject(senderInfo.id, matchedPatient);
+        }
+        if (matchedPatient.noHp) {
+            cachePatientObject(formatToInternational(matchedPatient.noHp), matchedPatient);
+        }
+        if (matchedPatient.noRm) {
+            cachePatientObject(matchedPatient.noRm, matchedPatient);
+        }
+
+        // Auto-bind LID pengirim ke spreadsheet kolom 18 secara background agar permanen
+        if (senderInfo.isLid && matchedPatient.rowNumber) {
+            callSimgosApi("update_status", {
+                row: matchedPatient.rowNumber,
+                type: "lid_only",
+                no_lid: senderInfo.id
+            }).catch(() => {});
+        }
+    }
+
+    return matchedPatient;
+}
+
+// Saring Pasien Berdasarkan Status Rujukan
+async function fetchPatientsByRujukanStatus(statusType) {
+    const collected = new Map();
+    try {
+        const [h2Res, h1Res] = await Promise.all([
+            callSimgosApi("get_followup", { mode: "h2", tgl: "auto" }).catch(() => null),
+            callSimgosApi("get_followup", { mode: "h1", tgl: "auto" }).catch(() => null)
+        ]);
+
+        const candidateLists = [];
+        if (h2Res?.status === "success" && Array.isArray(h2Res.data)) candidateLists.push(...h2Res.data);
+        if (h1Res?.status === "success" && Array.isArray(h1Res.data)) candidateLists.push(...h1Res.data);
+
+        for (const p of candidateLists) {
+            if (!p || !p.noRm) continue;
+            const r = String(p.statusRujukan || "").toLowerCase();
+            const isAktif = r.includes("aktif");
+            const isHabis = r.includes("habis") || !r || r === "-";
+
+            if ((statusType === "aktif" && isAktif) || (statusType === "habis" && isHabis)) {
+                if (!collected.has(p.noRm)) {
+                    collected.set(p.noRm, p);
                 }
             }
         }
     } catch (e) { }
-
-    return null;
-}
-
-// Pre-warming LID admin dan staf pengajar secara background
-async function prewarmAdminAndOwnerLids(sock) {
-    if (!sock) return;
-    try {
-        const adminPhones = ADMIN_JID_LIST.map(j => j.replace(/@.*$/, ''));
-        for (const p of adminPhones) {
-            const clean = formatToInternational(p);
-            if (clean && !phoneToLidMap.has(clean)) {
-                await resolveLidFromWhatsAppServer(sock, clean).catch(() => null);
-            }
-        }
-    } catch (e) { }
+    return Array.from(collected.values());
 }
 
 // =========================================================================
-// SMART VERIFIKASI MAHASISWA (DATABASE DEPT. RKG)
+// ENGINE 1 (UTAMA): 9ROUTER MULTI-TIER GATEWAY (GEMINI DIRECT -> ANTIGRAVITY -> AUTO)
 // =========================================================================
-async function smartVerifyStudent(sock, senderInfo, messageText = "") {
-    // 1. Cek di cache memori dulu
-    let candidate = getCachedStudentObject(senderInfo.id);
-    if (candidate) return candidate;
-
-    // 2. Jika pengirim berupa LID, coba dapatkan nomor telepon aslinya
-    let realPhone = null;
-    if (senderInfo.isLid) {
-        realPhone = await resolvePhoneFromLid(sock, senderInfo.id);
-        if (realPhone) {
-            candidate = getCachedStudentObject(realPhone);
-            if (candidate) return candidate;
-        }
-    } else {
-        realPhone = formatToInternational(senderInfo.id);
-    }
-
-    // 3. Query database mahasiswa dari Redis
-    const allStudents = await callDbGet('axaxyz_students') || [];
-    if (!Array.isArray(allStudents) || allStudents.length === 0) return null;
-
-    // A. Cocokkan berdasarkan nomor telepon
-    if (realPhone) {
-        const matched = allStudents.find(s => {
-            const sp = formatToInternational(s.phone);
-            return sp && sp === realPhone;
-        });
-        if (matched) {
-            cacheStudentObject(senderInfo.id, matched);
-            cacheStudentObject(realPhone, matched);
-            return matched;
-        }
-    }
-
-    // B. Cek apakah pesan berisi NIM mahasiswa
-    const inputNim = extractNimFromText(messageText);
-    if (inputNim) {
-        const matchedByNim = allStudents.find(s => String(s.nim).trim() === inputNim);
-        if (matchedByNim) {
-            // Auto-link nomor WA / LID ke mahasiswa tersebut jika nomornya belum terdaftar
-            if (!matchedByNim.phone && realPhone) {
-                matchedByNim.phone = realPhone;
-                const updatedList = allStudents.map(s => s.id === matchedByNim.id ? matchedByNim : s);
-                await callDbSet('axaxyz_students', updatedList);
-            }
-            cacheStudentObject(senderInfo.id, matchedByNim);
-            if (realPhone) cacheStudentObject(realPhone, matchedByNim);
-            return matchedByNim;
-        }
-    }
-
-    return null;
-}
-
-// =========================================================================
-// MULTI-TIER AI ENGINE (DEPT. RADIOLOGI KEDOKTERAN GIGI FKG UMI)
-// =========================================================================
-
-// Tier 1: 9Router VPS OpenAI-compatible Gateway (Prioritas Model: axyz-combos / gemini-flash)
-async function ask9RouterRkg(conversationHistory, systemPromptText, aiConfig = {}) {
+async function ask9RouterClinic(conversationHistory, systemPromptText, aiConfig, customModelOverride = null) {
     const rawUrl = aiConfig.nineRouterUrl || process.env.NINEROUTER_URL || "http://43.134.43.146:20128/v1/chat/completions";
     const endpoint = normalize9RouterUrl(rawUrl);
     const apiKey = (aiConfig.nineRouterApiKey || process.env.NINEROUTER_API_KEY || "9router").trim().replace(/^["']|["']$/g, '');
 
-    const primaryModel = sanitize9RouterModel(aiConfig.nineRouterModel || process.env.NINEROUTER_MODEL || 'axyz-combos');
-    const fallbackModel = sanitize9RouterModel(aiConfig.nineRouterFallbackModel || process.env.NINEROUTER_FALLBACK_MODEL || 'gemini-2.5-flash');
+    // Model Cascading Pipeline
+    const primaryModel = sanitize9RouterModel(customModelOverride || aiConfig.nineRouterModel || process.env.NINEROUTER_MODEL || 'gemini-3.8-flash');
+    const antigravityFallback = sanitize9RouterModel(aiConfig.nineRouterFallbackModel || process.env.NINEROUTER_FALLBACK_MODEL || 'ag/gemini-3.8-flash-high');
 
-    const modelsPipeline = [primaryModel, fallbackModel, 'auto'].filter((v, i, a) => v && a.indexOf(v) === i);
+    const modelsPipeline = [primaryModel, antigravityFallback, 'auto'].filter((v, i, a) => v && a.indexOf(v) === i);
 
     const openAiMessages = [
         { role: "system", content: systemPromptText }
@@ -921,7 +1060,7 @@ async function ask9RouterRkg(conversationHistory, systemPromptText, aiConfig = {
         }
     }
 
-    let lastError = null;
+    let last9RouterErr = null;
 
     for (const targetModel of modelsPipeline) {
         const controller = new AbortController();
@@ -947,8 +1086,8 @@ async function ask9RouterRkg(conversationHistory, systemPromptText, aiConfig = {
             clearTimeout(timeoutId);
 
             if (!res.ok) {
-                const errText = await res.text();
-                throw new Error(`[${targetModel}] ${res.status}: ${errText}`);
+                const errBody = await res.text();
+                throw new Error(`[${targetModel}] ${res.status}: ${errBody}`);
             }
 
             const data = await res.json();
@@ -958,65 +1097,82 @@ async function ask9RouterRkg(conversationHistory, systemPromptText, aiConfig = {
             return { reply: reply.trim(), resolvedModel: targetModel };
         } catch (err) {
             clearTimeout(timeoutId);
-            lastError = err;
-            console.warn(`[9Router AI Failover] Model ${targetModel} gagal: ${err.message}. Lanjut model berikutnya...`);
+            last9RouterErr = err;
+            console.warn(`[9Router Multi-Cascade Failover] Model ${targetModel} gagal: ${err.message}. Mencoba model berikutnya...`);
         }
     }
 
-    throw lastError || new Error("Semua rute model 9Router gagal.");
+    throw last9RouterErr || new Error("Semua rute model 9Router (Gemini & Antigravity) gagal.");
 }
 
-// Tier 2: Google Gemini AI Direct (Cadangan 1)
-async function askGeminiRkg(conversationHistory, systemPromptText, aiConfig = {}) {
-    const apiKey = (aiConfig.geminiApiKey || process.env.GEMINI_API_KEY || "").trim();
-    const model = aiConfig.geminiModel || process.env.GEMINI_MODEL || "gemini-2.5-flash";
+// =========================================================================
+// ENGINE 2 (CADANGAN 1): GOOGLE AI STUDIO (GEMINI DIRECT)
+// =========================================================================
+async function askGeminiClinic(conversationHistory, systemPromptText, aiConfig) {
+    const apiKey = aiConfig.geminiApiKey ? aiConfig.geminiApiKey.trim() : "";
+    const model = aiConfig.geminiModel || "gemini-3.5-flash";
 
-    if (!apiKey) throw new Error("Gemini API Key belum terkonfigurasi di environment.");
+    if (!apiKey) throw new Error("Gemini API Key belum terpasang di Sheet 'SETTING'.");
 
-    const contents = [];
+    const sanitizedHistory = [];
     for (const turn of conversationHistory) {
         if (!turn.parts || !turn.parts[0] || !turn.parts[0].text) continue;
         const role = turn.role === 'model' ? 'model' : 'user';
         const text = String(turn.parts[0].text).trim();
-        if (text) {
-            contents.push({ role, parts: [{ text }] });
+        if (!text) continue;
+
+        if (sanitizedHistory.length > 0 && sanitizedHistory[sanitizedHistory.length - 1].role === role) {
+            sanitizedHistory[sanitizedHistory.length - 1].parts[0].text += `\n${text}`;
+        } else {
+            sanitizedHistory.push({ role, parts: [{ text }] });
         }
     }
 
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const payload = {
-        system_instruction: {
+    while (sanitizedHistory.length > 0 && sanitizedHistory[0].role !== 'user') {
+        sanitizedHistory.shift();
+    }
+
+    if (sanitizedHistory.length === 0) throw new Error('History pesan Gemini kosong.');
+
+    const requestBody = {
+        contents: sanitizedHistory,
+        systemInstruction: {
             parts: [{ text: systemPromptText }]
         },
-        contents: contents,
         generationConfig: {
             temperature: 0.2,
-            maxOutputTokens: 2048
+            maxOutputTokens: 2048,
+            topP: 0.85
         }
     };
 
-    const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const headers = { 'Content-Type': 'application/json' };
+
+    const res = await fetch(url, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(requestBody)
     });
 
     if (!res.ok) {
         const errText = await res.text();
-        throw new Error(`Gemini Direct (${model}) ${res.status}: ${errText}`);
+        throw new Error(`Google AI Studio (${model}) ${res.status}: ${errText}`);
     }
 
     const data = await res.json();
-    const candidate = data.candidates?.[0];
-    const reply = candidate?.content?.parts?.[0]?.text;
-    if (!reply || !reply.trim()) throw new Error("Respon kosong dari Google Gemini.");
-    return reply.trim();
+    const rawReply = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!rawReply || !rawReply.trim()) throw new Error('Respon Gemini kosong');
+
+    return rawReply.trim();
 }
 
-// Tier 3: Groq Cloud AI (Cadangan 2)
-async function askGroqRkg(conversationHistory, systemPromptText, aiConfig = {}) {
-    const groqKey = (aiConfig.groqApiKey || process.env.GROQ_API_KEY || "").trim();
-    if (!groqKey) throw new Error("Groq API Key belum terpasang.");
+// =========================================================================
+// ENGINE 3 (CADANGAN 2): GROQ AI FALLBACK ENGINE
+// =========================================================================
+async function askGroqClinic(conversationHistory, systemPromptText, aiConfig) {
+    const groqKey = aiConfig.groqApiKey ? aiConfig.groqApiKey.trim() : "";
+    if (!groqKey) throw new Error("Groq API Key belum terpasang di Sheet 'SETTING'.");
 
     const groqMessages = [
         { role: "system", content: systemPromptText }
@@ -1069,1215 +1225,1732 @@ async function askGroqRkg(conversationHistory, systemPromptText, aiConfig = {}) 
         }
     }
 
-    throw lastGroqError || new Error("Seluruh model Groq AI gagal merespon.");
-}
-
-// Unified Cascading AI (9Router -> Gemini -> Groq)
-async function askAIRkgUnified(conversationHistory, studentContext = null, senderPushName = "Mahasiswa", senderInfo = null) {
-    const wita = getWitaTimeGreeting();
-
-    let studentProfile = "Identitas Belum Terdata (Belum memasukkan NIM resmi).";
-    if (studentContext) {
-        studentProfile = `Nama: ${studentContext.name}\n` +
-            `NIM: ${studentContext.nim}\n` +
-            `Kelompok Stase: ${studentContext.clusterId || studentContext.cluster || 'Belum Ditentukan'}\n` +
-            `Status Perangkat (DeviceId): ${studentContext.deviceId ? 'Terkunci pada perangkat aktif' : 'Belum Terikat / Bebas'}`;
-    }
-
-    const systemPromptText = `Anda adalah Asisten Virtual Cerdas dan Helpdesk Resmi Departemen Radiologi Kedokteran Gigi (Dept. RKG) Fakultas Kedokteran Gigi Universitas Muslim Indonesia (FKG UMI).
-
-[INFORMASI LOKAL & WAKTU REAL-TIME]:
-- Waktu Lokal Makassar (WITA, UTC+8): ${wita.fullWitaStr}
-- Sapaan Waktu Resmi Saat Ini: "${wita.greeting}"
-- Portal Resmi Presensi Web: ${WEB_PORTAL_URL}
-
-[PROFIL MAHASISWA PENGIRIM PESAN]:
-- Nama Panggilan WhatsApp: ${senderPushName}
-- WhatsApp ID: ${senderInfo ? senderInfo.id : '-'}
-${studentProfile}
-
-[TUGAS & TANGGUNG JAWAB]:
-1. Memberikan informasi akurat seputar tata cara presensi web absensi Dept. RKG (jadwal sesi, jam toleransi keterlambatan, titik koordinat GPS kampus, dan syarat selfie).
-2. Membantu mahasiswa jika mengalami kendala login, ganti perangkat (perintah !logout), atau memeriksa rekap kehadiran (!rekap).
-3. Menjawab pertanyaan akademis seputar keilmuan Radiologi Kedokteran Gigi:
-   - Teknik Radiografi Gigi: Periapikal (Paralel & Biseksi), Bite-Wing, Oklusal, Panoramik (OPG), Sefalometri, CBCT 3D.
-   - Interpretasi Radiografi: Gambaran radiopak, radiolusen, mixed, lesi periapikal (abses, granuloma, kista radikuler), impaksi kaninus/molar ketiga (Klasifikasi Winter & Pell-Gregory), karies dentin/email.
-   - Proteksi Radiasi: Prinsip ALARA (As Low As Reasonably Achievable), apron timbal, collimator, dosimeter saku.
-4. Gaya Bahasa: Ramah, profesional, santun, akademis, menggunakan bahasa Indonesia formal yang hangat, dan selalu mengawali sapaan dengan "${wita.greeting}". Gunakan format bold WhatsApp (*teks*) dan poin-poin rapi agar mudah dibaca di layar HP.`;
-
-    // 1. Coba Tier 1: 9Router VPS
-    try {
-        const res9 = await ask9RouterRkg(conversationHistory, systemPromptText);
-        return enforceCorrectGreeting(res9.reply, wita.greeting);
-    } catch (e1) {
-        console.warn(`[Cascading AI] Tier 1 (9Router) gagal: ${e1.message}. Mencoba Tier 2 (Gemini)...`);
-    }
-
-    // 2. Coba Tier 2: Gemini Direct
-    try {
-        const resGemini = await askGeminiRkg(conversationHistory, systemPromptText);
-        return enforceCorrectGreeting(resGemini, wita.greeting);
-    } catch (e2) {
-        console.warn(`[Cascading AI] Tier 2 (Gemini) gagal: ${e2.message}. Mencoba Tier 3 (Groq)...`);
-    }
-
-    // 3. Coba Tier 3: Groq Cloud
-    try {
-        const resGroq = await askGroqRkg(conversationHistory, systemPromptText);
-        return enforceCorrectGreeting(resGroq, wita.greeting);
-    } catch (e3) {
-        console.error(`[Cascading AI] Tier 3 (Groq) gagal: ${e3.message}.`);
-    }
-
-    // Fallback Darurat Statis jika seluruh koneksi internet AI bermasalah
-    return `*${wita.greeting}, Rekan Mahasiswa.* 🦷\n\n` +
-        `Sistem AI Dept. RKG sedang mengalami peningkatan jaringan sementara.\n` +
-        `Berikut perintah cepat yang dapat Anda gunakan:\n` +
-        `• *!absen* : Panduan & status presensi harian\n` +
-        `• *!jadwal* : Jadwal sesi praktikum hari ini\n` +
-        `• *!lokasi* : Titik koordinat GPS radius kampus\n` +
-        `• *!rekap* : Cek rekapitulasi kehadiran Anda\n` +
-        `• *!logout* : Pelepasan kunci perangkat jika ganti HP\n\n` +
-        `Portal Resmi: ${WEB_PORTAL_URL}`;
+    throw lastGroqError || new Error("Seluruh model Groq AI gagal.");
 }
 
 // =========================================================================
-// AUTONOMOUS WITA ATTENDANCE SCHEDULER & ZERO-SPAM IN-MEMORY CRON ENGINE
-// (Murni Berjalan di Bot WA, Nol Spam ke Redis, Beban Server Web 0%)
+// UNIFIED INTELLIGENT AI (9ROUTER CASCADE -> GEMINI DIRECT -> GROQ AI)
 // =========================================================================
-let cachedSessions = [];
-let cachedGeofence = null;
-let cachedFormats = [];
-let lastKnownSessionsHash = "";
-let lastKnownGeofenceHash = "";
-const sentEventsToday = new Set();
-const recentBroadcastMap = new Map();
-let isSchedulerRunning = false;
+async function askAIClinicUnified(conversationHistory, patientContext = null, senderPushName = "Pasien", senderInfo = null) {
+    const aiConfig = await fetchSystemAIConfig();
+    const sysConfig = aiConfig;
+    let systemPromptText = aiConfig.prompt;
 
-// =========================================================================
-// PERSISTENT DAILY EVENT LOCK DI UPSTASH REDIS CLOUD (24H TTL)
-// Mencegah siaran sesi ganda/lampau saat bot restart di jam yang sudah jauh
-// =========================================================================
-async function loadSentEventsFromCloud(todayDateStr) {
-    if (!todayDateStr) return;
+    systemPromptText = systemPromptText.replace(/RSKDGM Care|RSKD Care/gi, "RSKD Gigi dan Mulut Prov. Sulsel");
+
+    // Injeksi Waktu Lokal Real-Time Makassar (WITA / UTC+8)
+    const witaTime = getWitaTimeGreeting();
+    const timeInjection = `\n\n[PANDUAN WAKTU & SALAM LOKAL REAL-TIME MAKASSAR (WITA)]:
+- Waktu Lokal Makassar Saat Ini: ${witaTime.fullWitaStr}
+- Sapaan Waktu Resmi: "${witaTime.greeting}"
+- ATURAN SALAM: Wajib mengawali percakapan secara formal dengan "${witaTime.greeting}". Hindari sapaan yang bertentangan dengan zona waktu saat ini!`;
+
+    systemPromptText += timeInjection;
+
+    if (patientContext && patientContext.namaPasien && patientContext.namaPasien !== "-") {
+        let finalReschedDate = (patientContext.tglReschedule && patientContext.tglReschedule !== "-") ? patientContext.tglReschedule : "";
+        if (!finalReschedDate && patientContext.statusReschedule) {
+            const match = patientContext.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+            if (match) finalReschedDate = match[1];
+        }
+
+        const hasResched = !!finalReschedDate;
+        const isJknCanceled = String(patientContext.statusReschedule || "").toLowerCase().includes("terbatalkan");
+        const statusRaw = `${patientContext.statusWa || ''} ${patientContext.statusWaH2 || ''} ${patientContext.statusWaH1 || ''} ${patientContext.statusReschedule || ''}`.toLowerCase();
+        const isConfirmedHadir = statusRaw.includes("hadir") || statusRaw.includes("terkonfirmasi");
+
+        systemPromptText += `\n\n[DATA RESMI REKAM MEDIS PASIEN (SIMGOS RSKDGM)]:
+- Nama Lengkap Resmi Pasien: ${patientContext.namaPasien}
+- Nomor Rekam Medis (No. RM): ${patientContext.noRm}
+- Jadwal Kontrol Semula (Awal): ${patientContext.tglKontrol}
+- Jadwal Reschedule Baru (Kolom 19): ${hasResched ? finalReschedDate : "-"}
+- Status Konfirmasi Kehadiran: ${isConfirmedHadir ? "HADIR (TERKONFIRMASI)" : (patientContext.statusReschedule || patientContext.statusWa || "-")}
+- Status Rujukan BPJS: ${patientContext.statusRujukan || "Rujukan Aktif"}
+- Dokter DPJP Utama: ${sysConfig.dpjpUtama}
+- Unit Kerja Pelayanan: Poli Konservasi dan Endodonsi RSKD Gigi dan Mulut Prov. Sulsel
+
+PEDOMAN TATA BAHASA & ATURAN MEDIS BIROKRATIS (MUTLAK):
+1. PENYEBUTAN NAMA LENGKAP:
+   Wajib menyapa dan menyebut identitas pasien dengan sebutan kehormatan "Bapak/Ibu/Sdr(i) ${patientContext.namaPasien}" sesuai data resmi database rekam medis. Dilarang mengubah, memotong, atau menggunakan nama samaran lain.
+2. JAWABAN JADWAL KONTROL & STATUS KONFIRMASI:
+${hasResched ? `
+   • STATUS: PASIEN TELAH MEMILIKI TANGGAL RESCHEDULE RESMI YAITU: *${finalReschedDate}*!
+   • PERNYATAAN BIROKRATIS WAJIB:
+     Jelaskan secara formal dan tegas bahwa jadwal kontrol semula pada tanggal ${patientContext.tglKontrol} telah resmi dialihkan/dijadwalkan ulang ke tanggal *${finalReschedDate}* bersama DPJP Utama (${sysConfig.dpjpUtama}). Nomor Rekam Medis (RM) pasien adalah ${patientContext.noRm}.
+   • LARANGAN KERAS: DILARANG KERAS mengatakan "jadwal kontrol tetap dan tidak ada perubahan pada tanggal ${patientContext.tglKontrol}" karena jadwal tersebut telah resmi diperbarui di sistem SIMGOS!` :
+isJknCanceled ? `
+   • STATUS: PASIEN TERBATALKAN OTOMATIS OLEH SISTEM APLIKASI MOBILE JKN!
+   • PERNYATAAN BIROKRATIS WAJIB:
+     Sampaikan bahwa jadwal kontrol semula pada tanggal ${patientContext.tglKontrol} telah tercatat terbatalkan oleh sistem aplikasi Mobile JKN. Laporan tersebut telah diteruskan secara kedinasan kepada DPJP Utama (${sysConfig.dpjpUtama}) untuk penerbitan jadwal kontrol pengganti. Pasien dimohon menunggu konfirmasi jadwal baru melalui saluran komunikasi ini.` :
+isConfirmedHadir ? `
+   • STATUS KONFIRMASI: PASIEN TELAH RESMI MENGONFIRMASI *HADIR (TERKONFIRMASI)* DI SISTEM RSKDGM!
+   • LARANGAN MUTLAK (SANGAT PENTING): DILARANG KERAS menyuruh, meminta, atau mengulang perintah "Balas hadir konfirmasi kedatangan" kepada pasien ini! Pasien SUDAH mengonfirmasi hadir!
+   • PANDUAN RESPON: Akui dengan hangat bahwa jadwal kehadiran kontrol pada tanggal *${patientContext.tglKontrol}* bersama ${sysConfig.dpjpUtama} (No. RM: ${patientContext.noRm}) telah tercatat rapi di Poli Konservasi. Jawab langsung, fokus, cerdas, dan tuntas apa yang ditanyakan atau dikonsultasikan oleh pasien.` : `
+   • STATUS: JADWAL KONTROL AKTIF TERJADWAL PADA TANGGAL *${patientContext.tglKontrol}* BERSAMA ${sysConfig.dpjpUtama} (No. RM: ${patientContext.noRm}).
+     Jika pasien bertanya persiapan kontrol, ingatkan membawa KTP/BPJS dan kartu kontrol. Jika pasien menanyakan masalah klinis gigi, prioritaskan menjawab keluhan klinisnya terlebih dahulu secara tuntas.`}
+3. KOMPETENSI KLINIS KEDOKTERAN GIGI (SOUL OF RSKDGM DENTAL SPECIALIST):
+   Berperanlah sebagai Asisten AI Klinis Rumah Sakit Khusus Daerah Gigi dan Mulut yang cerdas, berwawasan medis spesialisasi tinggi, empatik, dan menenangkan.
+   - Pahami dengan cermat patofisiologi kedokteran gigi: Pulpitis ireversibel/reversibel, nekrosis pulpa, abses periapikal, periodontitis, gingivitis, impaksi gigi bungsu, karies profunda, tahapan Perawatan Saluran Akar (PSA / Endodonsi: ekstirpasi pulpa, preparasi biomekanis, medikamen intrakanal, obturasi gutta-percha), tambal resin komposit estetik, mahkota jaket/crown, dan perawatan gigi tiruan.
+   - Respon dengan empati mendalam bagi pasien yang merasakan nyeri gigi berdenyut, berikan saran pertolongan pertama sementara yang aman, dan tegaskan bahwa perawatan medis kuratif definitif dilakukan oleh DPJP di Dental Chair.
+4. INTEGRITAS KONTEKS & RELEVANSI INTERAKSI:
+   Jawablah secara spesifik dan terfokus pada pesan terakhir yang ditanyakan pasien. Jangan mengulang-ulang informasi yang tidak relevan dengan pertanyaan pasien.
+5. REGISTER BAHASA:
+   Gunakan bahasa Indonesia birokratis rumah sakit formal, santun, lugas, mengayomi, dan tertata rapi.`;
+    } else {
+        systemPromptText += `\n\n[DATA PENGIRIM CHAT]:
+- Nama Profil: ${senderPushName}
+- Status: Nomor WhatsApp belum terhubung dengan antrean kontrol aktif.
+PETUNJUK: Berikan salam formal birokratis dan persilakan pengirim menginformasikan Nama Lengkap serta Tanggal Lahir guna verifikasi data rekam medis di sistem SIMGOS.`;
+    }
+
+    let finalReply = "";
+
+    // 1. Prioritas Utama: 9Router Gateway (Gemini Direct -> Antigravity OAuth -> Auto)
     try {
-        const cloudData = await redisDirectGet(`axaxyz_sent_events:${todayDateStr}`);
-        if (Array.isArray(cloudData)) {
-            cloudData.forEach(ev => sentEventsToday.add(ev));
+        const result = await ask9RouterClinic(conversationHistory, systemPromptText, aiConfig);
+        finalReply = result.reply;
+    } catch (nineRouterErr) {
+        console.warn(`[9Router Failover -> Beralih ke Gemini Direct Google AI Studio]`, nineRouterErr.message);
+        // 2. Cadangan 1: Google AI Studio Gemini Direct
+        try {
+            finalReply = await askGeminiClinic(conversationHistory, systemPromptText, aiConfig);
+        } catch (geminiErr) {
+            console.warn(`[Gemini Direct Failover -> Beralih ke Groq AI]`, geminiErr.message);
+            // 3. Cadangan 2: Groq AI Multi-model
+            finalReply = await askGroqClinic(conversationHistory, systemPromptText, aiConfig);
         }
-    } catch (e) {}
-}
-
-async function markCloudEventSent(todayDateStr, eventKey) {
-    if (!todayDateStr || !eventKey) return;
-    sentEventsToday.add(eventKey);
-    try {
-        const list = Array.from(sentEventsToday);
-        await redisDirectSet(`axaxyz_sent_events:${todayDateStr}`, list, 86400); // TTL 24 Jam
-    } catch (e) {}
-}
-
-// Format Template Fallback Darurat jika Redis lambat merespons
-const fallbackFormatsMap = {
-    1: "🔔 *NOTIFIKASI ABSENSI DIBUKA* 🔔\n\nHalo *[Nama Lengkap]*, sesi absensi untuk *[Shift]* Dept. RKG hari ini telah resmi *DIBUKA*.\n\n📋 *Detail Sesi Absensi:*\n• Kelompok: *[Kelompok]*\n• Jam Tepat Waktu: *[Jam Sesi]* WITA\n• Batas Tutup Sesi: *[Jam Tutup]* WITA\n\nYuk, segera lakukan validasi kehadiran Anda sekarang melalui portal resmi kami:\n[Link]\n\nSelamat bertugas! 🏥",
-    2: "⚠️ *PENGINGAT TERAKHIR ABSENSI* ⚠️\n\nPanggilan kepada *[Nama Lengkap]*! Sistem mendeteksi Anda *BELUM* melakukan absensi untuk *[Shift]* hari ini.\n\nWaktu absensi Anda hampir habis. Sesi ini akan ditutup secara permanen pada pukul *[Jam Tutup]* WITA.\n\nMohon segera menuju area batas kampus dan selesaikan absen Anda di sini:\n[Link]",
-    4: "📊 *STATUS AKHIR KEHADIRAN* 📊\n\nHalo *[Nama Lengkap]*, batas waktu absensi untuk *[Shift]* telah resmi *DITUTUP* pada pukul *[Jam Tutup]* WITA.\n\nBerikut adalah rekapan status kehadiran Anda untuk sesi ini:\n*[Status Kehadiran]*\n\nTransparansi data Anda bisa diakses kembali melalui:\n[Link]",
-    8: "🔄 *INFO PERUBAHAN JADWAL ABSENSI* 🔄\n\nPerhatian *[Nama Lengkap]*, terdapat penyesuaian jadwal pada sistem absensi Dept. RKG untuk *[Shift]*.\n\nJadwal absensi terbaru Anda:\n⏳ Mulai Buka: *[Jam Sesi]* WITA\n⏳ Jam Berakhir: *[Jam Selesai]* WITA\n⏳ Batas Akhir Toleransi: *[Jam Tutup]* WITA\n\nMohon sesuaikan jam kedatangan Anda dengan jadwal terbaru ini.\nPortal Presensi: [Link]\nTerima kasih atas perhatiannya!",
-    13: "📍 *PEMBARUAN TITIK LOKASI ABSENSI* 📍\n\nHalo rekan-rekan mahasiswa Dept. RKG!\nTerdapat pembaruan pada titik pusat radar Lokasi Absensi (Geofence) yang berlaku mulai hari ini.\n\n• Titik Lokasi Baru: *[Nama Lokasi Geofence]*\n• Jangkauan Radar: *[Radius]* Meter\n\nPastikan Anda berada di area gedung tersebut dan selalu mengizinkan akses GPS pada browser Anda sebelum melakukan absensi di: [Link]",
-    22: "⏳ *PERINGATAN SISA WAKTU TOLERANSI* ⏳\n\nPerhatian *[Nama Lengkap]*! Waktu toleransi untuk *[Shift]* tersisa *[Sisa Waktu]* lagi.\n\nGerbang absensi akan ditutup permanen tepat pada pukul *[Jam Tutup]* WITA. Jika Anda belum menyelesaikan selfie lokasi, segera lakukan validasi sekarang di: [Link]"
-};
-
-function compileScenarioTemplate(templateStr, dataObj = {}) {
-    if (!templateStr) return "";
-    let compiled = templateStr
-        .replace(/\[Nama Lengkap\]/g, dataObj.namaLengkap || '')
-        .replace(/\[NIM\]/g, dataObj.nim || '')
-        .replace(/\[Kelompok\]/g, dataObj.kelompok || '')
-        .replace(/\[Shift\]/g, String(dataObj.shift || ''))
-        .replace(/\[Jam Sesi\]/g, String(dataObj.jamSesi || ''))
-        .replace(/\[Jam Selesai\]/g, String(dataObj.jamSelesai || dataObj.jamTutup || ''))
-        .replace(/\[Jam Tutup\]/g, String(dataObj.jamTutup || ''))
-        .replace(/\[Jam Absen\]/g, String(dataObj.jamAbsen || ''))
-        .replace(/\[Sisa Waktu\]/g, String(dataObj.sisaWaktu || '15 Menit'))
-        .replace(/\[Tanggal Mulai\]/g, String(dataObj.tanggalMulai || ''))
-        .replace(/\[Tanggal Akhir\]/g, String(dataObj.tanggalAkhir || ''))
-        .replace(/\[Tanggal\]/g, String(dataObj.tanggal || ''))
-        .replace(/\[Password\]/g, String(dataObj.password || ''))
-        .replace(/\[Pesan Custom\]/g, String(dataObj.pesanCustom || ''))
-        .replace(/\[Radius\]/g, String(dataObj.radius || '50'))
-        .replace(/\[Nama Lokasi Geofence\]/g, String(dataObj.lokasiGeofence || 'Gedung FKG UMI'))
-        .replace(/\[Status Kehadiran\]/g, String(dataObj.statusKehadiran || 'Sesi Ditutup'))
-        .replace(/\[Link\]/g, String(dataObj.link || WEB_PORTAL_URL));
-
-    // Jaminan URL Mutlak: Selalu arahkan ke domain resmi dan bersihkan referensi localhost:3000
-    if (compiled.includes('localhost:3000')) {
-        compiled = compiled.replace(/http:\/\/localhost:3000/g, WEB_PORTAL_URL)
-                           .replace(/localhost:3000/g, WEB_PORTAL_URL.replace(/^https?:\/\//, ''));
-    }
-    return compiled;
-}
-
-function calculateCloseTimeStr(eH, eM, tolMins = 0) {
-    const total = Number(eH) * 60 + Number(eM) + Number(tolMins);
-    const cH = Math.floor((total / 60) % 24);
-    const cM = total % 60;
-    return `${String(cH).padStart(2, '0')}:${String(cM).padStart(2, '0')}`;
-}
-
-// Refresh lambat data sesi & geofence dari Redis (Setiap 3 Menit)
-// Menjamin Nol Spam Request ke Upstash Redis
-async function refreshMemoryCacheFromRedis(forceReload = false) {
-    try {
-        const [sessions, geofence, formats] = await Promise.all([
-            callDbGet('axaxyz_sessions'),
-            callDbGet('axaxyz_geofence'),
-            callDbGet('axaxyz_formats')
-        ]);
-
-        if (Array.isArray(sessions) && sessions.length > 0) {
-            const newHash = JSON.stringify(sessions);
-            lastKnownSessionsHash = newHash;
-            cachedSessions = sessions;
-        }
-
-        if (geofence && typeof geofence === 'object') {
-            const newGfHash = JSON.stringify(geofence);
-            // Nonaktifkan auto-broadcast implisit Skenario 13 di background cache refresh
-            // untuk mencegah false-positive pengiriman Skenario 13 saat sinkronisasi jadwal.
-            lastKnownGeofenceHash = newGfHash;
-            cachedGeofence = geofence;
-        }
-
-        if (Array.isArray(formats) && formats.length > 0) {
-            cachedFormats = formats;
-        }
-    } catch (e) {
-        // Abaikan error jaringan sementara
-    }
-}
-
-// Broadcast skenario umum ke seluruh mahasiswa dengan throttling aman (350ms antar pesan)
-async function broadcastScenarioToStudents(sock, scenarioId, dataObj = {}) {
-    if (!isSocketReadyToSend(sock)) {
-        return 0;
     }
 
-    const [students, clusters] = await Promise.all([
-        callDbGet('axaxyz_students'),
-        callDbGet('axaxyz_clusters')
-    ]);
-    if (!Array.isArray(students) || students.length === 0) return 0;
-
-    const clusterMap = new Map();
-    if (Array.isArray(clusters)) {
-        clusters.forEach(c => {
-            if (c.id) clusterMap.set(c.id, c.name);
-        });
-    }
-
-    let templateStr = fallbackFormatsMap[scenarioId] || "";
-    if (cachedFormats && cachedFormats.length > 0) {
-        const found = cachedFormats.find(f => f.id === scenarioId);
-        if (found && found.template) templateStr = found.template;
-    }
-
-    let sentCount = 0;
-    let alreadySentCooldownCount = 0;
-    let validStudentsCount = 0;
-
-    for (const st of students) {
-        const phone = st.noHp || st.phone;
-        if (!phone) continue;
-        const cleanDigits = sanitizeNumber(phone);
-        if (!cleanDigits) continue;
-        validStudentsCount++;
-
-        // Layer Deduplikasi 60 Detik (Mencegah pesan dobel dalam rentang waktu berdekatan)
-        const dedupKey = `${cleanDigits}_${scenarioId}_${dataObj.shift || ''}`;
-        const lastSent = recentBroadcastMap.get(dedupKey);
-        if (lastSent && (Date.now() - lastSent) < 60000) {
-            alreadySentCooldownCount++;
-            continue;
-        }
-
-        const clusterName = clusterMap.get(st.clusterId) || st.clusterId || st.cluster || 'Radiologi Kedokteran Gigi';
-
-        const textMsg = compileScenarioTemplate(templateStr, {
-            ...dataObj,
-            namaLengkap: st.name || '',
-            nim: st.nim || '',
-            kelompok: clusterName,
-            password: st.password || '',
-            link: WEB_PORTAL_URL
-        });
-
-        if (isSocketReadyToSend(sock)) {
-            try {
-                await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, {
-                    text: formatForWhatsApp(textMsg)
-                });
-                recentBroadcastMap.set(dedupKey, Date.now());
-                sentCount++;
-            } catch (e) {
-                console.error(`[Auto-Scheduler] ❌ Gagal kirim Baileys ke ${cleanDigits}:`, e.message);
-            }
-        }
-
-        // Jeda 350ms antar kirim pesan untuk memproteksi sesi Baileys
-        await new Promise(r => setTimeout(r, 350));
-    }
-
-    // ZERO-SPAM LOGGING: Hanya log jika benar-benar ada mahasiswa yang berhasil dikirimi pesan
-    if (sentCount > 0) {
-        console.log(`📢 [Auto-Scheduler WITA] ✅ Sukses memproses siaran Skenario ${scenarioId} ke ${sentCount} mahasiswa.`);
-        return sentCount;
-    }
-
-    // Jika seluruh mahasiswa valid sudah menerima siaran dalam cooldown 60 detik,
-    // kembalikan nilai sukses simbolik agar scheduler mengunci event hari ini dan tidak mengulang pengiriman
-    if (validStudentsCount > 0 && alreadySentCooldownCount === validStudentsCount) {
-        return validStudentsCount;
-    }
-
-    return 0;
-}
-
-// Broadcast khusus sisa toleransi (Skenario 22/2) kepada mahasiswa yang belum absen
-async function broadcastWarningToUnloggedStudents(sock, session, closeStr) {
-    if (!isSocketReadyToSend(sock)) {
-        return 0;
-    }
-
-    const [students, logs, clusters] = await Promise.all([
-        callDbGet('axaxyz_students'),
-        callDbGet('axaxyz_logs'),
-        callDbGet('axaxyz_clusters')
-    ]);
-
-    if (!Array.isArray(students) || students.length === 0) return 0;
-
-    const clusterMap = new Map();
-    if (Array.isArray(clusters)) {
-        clusters.forEach(c => {
-            if (c.id) clusterMap.set(c.id, c.name);
-        });
-    }
-
-    const wita = getWitaTimeGreeting();
-    const todayDateStr = wita.dateIso;
-
-    // Filter mahasiswa yang sudah absen hari ini pada sesi ini
-    const loggedNims = new Set();
-    if (Array.isArray(logs)) {
-        logs.forEach(l => {
-            if (l.date === todayDateStr || (l.timestamp && l.timestamp.includes(todayDateStr))) {
-                if (l.session === session.name || !l.session) {
-                    loggedNims.add(l.nim);
-                    if (l.studentId) loggedNims.add(l.studentId);
-                }
-            }
-        });
-    }
-
-    const unloggedStudents = students.filter(st => !loggedNims.has(st.nim) && !loggedNims.has(st.id));
-    if (unloggedStudents.length === 0) return 0;
-
-    const targets = unloggedStudents;
-
-    let templateStr = fallbackFormatsMap[22] || fallbackFormatsMap[2] || "";
-    if (cachedFormats && cachedFormats.length > 0) {
-        const found = cachedFormats.find(f => f.id === 22 || f.id === 2);
-        if (found && found.template) templateStr = found.template;
-    }
-
-    let sentCount = 0;
-    let alreadySentCooldownCount = 0;
-    let validTargetsCount = 0;
-
-    for (const st of targets) {
-        const phone = st.noHp || st.phone;
-        if (!phone) continue;
-        const cleanDigits = sanitizeNumber(phone);
-        if (!cleanDigits) continue;
-        validTargetsCount++;
-
-        const dedupKey = `${cleanDigits}_warn_${session.name || ''}`;
-        const lastSent = recentBroadcastMap.get(dedupKey);
-        if (lastSent && (Date.now() - lastSent) < 60000) {
-            alreadySentCooldownCount++;
-            continue;
-        }
-
-        const clusterName = clusterMap.get(st.clusterId) || st.clusterId || st.cluster || 'Radiologi Kedokteran Gigi';
-
-        const textMsg = compileScenarioTemplate(templateStr, {
-            shift: session.name,
-            jamSesi: session.startTime || session.start,
-            jamTutup: closeStr,
-            sisaWaktu: "15 Menit",
-            namaLengkap: st.name || '',
-            nim: st.nim || '',
-            kelompok: clusterName,
-            link: WEB_PORTAL_URL
-        });
-
-        if (isSocketReadyToSend(sock)) {
-            try {
-                await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, {
-                    text: formatForWhatsApp(textMsg)
-                });
-                recentBroadcastMap.set(dedupKey, Date.now());
-                sentCount++;
-            } catch (e) {
-                console.error(`[Auto-Scheduler] ❌ Gagal kirim peringatan Baileys ke ${cleanDigits}:`, e.message);
-            }
-        }
-
-        await new Promise(r => setTimeout(r, 350));
-    }
-
-    if (sentCount > 0) {
-        console.log(`⏳ [Auto-Scheduler WITA] ⚠️ Sukses mengirim pengingat sisa waktu sesi [${session.name}] ke ${sentCount} mahasiswa belum absen.`);
-        return sentCount;
-    }
-
-    if (validTargetsCount > 0 && alreadySentCooldownCount === validTargetsCount) {
-        return validTargetsCount;
-    }
-
-    return 0;
-}
-
-// Broadcast otomatis saat koordinat geofence kampus diubah di Admin
-async function broadcastGeofenceChange(sock, geofence) {
-    if (!sock || !geofence) return;
-    await broadcastScenarioToStudents(sock, 13, {
-        lokasiGeofence: geofence.name || 'Gedung FKG Kampus 2 UMI',
-        radius: String(geofence.radius || '50')
-    });
-}
-
-// Broadcast otomatis saat jam shift sesi diubah di Admin
-async function broadcastScheduleChange(sock, sessions) {
-    if (!sock || !Array.isArray(sessions) || sessions.length === 0) return;
-    const active = sessions.find(s => s.active || s.isActive !== false) || sessions[0];
-    const tolMins = typeof active.toleranceMinutes === 'number' ? active.toleranceMinutes : 15;
-    const [eH, eM] = (active.endTime || active.end || "16:00").split(':').map(Number);
-    const closeStr = calculateCloseTimeStr(eH, eM, tolMins);
-
-    await broadcastScenarioToStudents(sock, 8, {
-        shift: active.name || active.title || 'Sesi Praktikum',
-        jamSesi: active.startTime || active.start || '08:00',
-        jamSelesai: active.endTime || active.end || '16:00',
-        jamTutup: closeStr
-    });
-}
-
-// Tick lokal dalam memori RAM (Dieksekusi setiap 30 detik tanpa spam request ke Redis)
-let isEvaluatingTick = false;
-
-async function autonomousWitaSchedulerTick(sock) {
-    if (isEvaluatingTick) return;
-    if (!sock || !isSocketReadyToSend(sock)) return;
-    if (!Array.isArray(cachedSessions) || cachedSessions.length === 0) return;
-
-    isEvaluatingTick = true;
-    try {
-        const wita = getWitaTimeGreeting();
-        const currentTotalMin = wita.hours * 60 + parseInt(wita.minutes, 10);
-        const todayDateStr = wita.dateIso;
-
-        // Muat riwayat siaran hari ini dari Upstash Redis Cloud ke RAM (Kebal Reboot Railway)
-        await loadSentEventsFromCloud(todayDateStr);
-
-        for (const session of cachedSessions) {
-            const isSessionActive = session.isActive !== undefined ? Boolean(session.isActive) : (session.active !== undefined ? Boolean(session.active) : true);
-            if (!isSessionActive) continue;
-
-            const startStr = session.startTime || session.start || "08:00";
-            const endStr = session.endTime || session.end || "16:00";
-            const tolMins = typeof session.toleranceMinutes === 'number' ? session.toleranceMinutes : 15;
-
-            const [sH, sM] = startStr.split(':').map(Number);
-            const [eH, eM] = endStr.split(':').map(Number);
-
-            if (isNaN(sH) || isNaN(eH)) continue;
-
-            const startMin = sH * 60 + sM;
-            const closeMin = eH * 60 + eM + tolMins;
-            const remainingMinutes = closeMin - currentTotalMin;
-            const closeStr = calculateCloseTimeStr(eH, eM, tolMins);
-            const sessionId = session.id || session.name || "default";
-
-            const isSessionRunningNow = (currentTotalMin >= startMin && currentTotalMin <= closeMin);
-
-            // 1. EVENT: PEMBUKAAN SESI PRESENSI (Skenario 1)
-            // Jendela pemicuan KETAT: Hanya dalam 5 menit pertama sejak jam buka (startMin s/d startMin + 5)
-            // Mencegah siaran pembukaan jika bot baru online puluhan menit setelah jam buka
-            const openEventKey = `open_${todayDateStr}_${sessionId}_${startStr}`;
-            const isOpeningJustNow = (currentTotalMin >= startMin && currentTotalMin <= startMin + 5);
-            if (isOpeningJustNow) {
-                if (!sentEventsToday.has(openEventKey)) {
-                    const sent = await broadcastScenarioToStudents(sock, 1, {
-                        shift: session.name,
-                        jamSesi: startStr,
-                        jamSelesai: endStr,
-                        jamTutup: closeStr
-                    }).catch(e => {
-                        console.error('[Auto-Scheduler Error Skenario 1]', e.message);
-                        return 0;
-                    });
-                    if (sent > 0) {
-                        await markCloudEventSent(todayDateStr, openEventKey);
-                    }
-                }
-            }
-
-            // 2. EVENT: PERINGATAN SISA WAKTU TOLERANSI 15 MENIT (Skenario 22 / Skenario 2)
-            // Jendela pemicuan: Hanya saat sesi sedang berjalan dan sisa toleransi antara 1 s/d 15 menit
-            const warnEventKey = `warn_${todayDateStr}_${sessionId}_${startStr}`;
-            const isWarningWindow = (isSessionRunningNow && remainingMinutes <= 15 && remainingMinutes >= 1);
-            if (isWarningWindow) {
-                if (!sentEventsToday.has(warnEventKey)) {
-                    const sent = await broadcastWarningToUnloggedStudents(sock, session, closeStr).catch(e => {
-                        console.error('[Auto-Scheduler Error Skenario 22]', e.message);
-                        return 0;
-                    });
-                    if (sent > 0) {
-                        await markCloudEventSent(todayDateStr, warnEventKey);
-                    }
-                }
-            }
-
-            // 3. EVENT: PENUTUPAN SESI RESMI (Skenario 4)
-            // Jendela pemicuan KETAT: HANYA dalam rentang 2 menit pasca batas penutupan (closeMin s/d closeMin + 2)
-            // Sesi yang sudah tutup berjam-jam lalu (seperti Shift Pagi/Siang saat bot reboot jam 16:27) 100% DIABAIKAN!
-            const closeEventKey = `close_${todayDateStr}_${sessionId}_${closeStr}`;
-            const isClosingJustNow = (currentTotalMin >= closeMin && currentTotalMin <= closeMin + 2);
-            if (isClosingJustNow) {
-                if (!sentEventsToday.has(closeEventKey)) {
-                    const sent = await broadcastScenarioToStudents(sock, 4, {
-                        shift: session.name,
-                        jamTutup: closeStr,
-                        statusKehadiran: "Sesi telah resmi ditutup."
-                    }).catch(e => {
-                        console.error('[Auto-Scheduler Error Skenario 4]', e.message);
-                        return 0;
-                    });
-                    if (sent > 0) {
-                        await markCloudEventSent(todayDateStr, closeEventKey);
-                    }
-                }
-            }
-        }
-    } finally {
-        isEvaluatingTick = false;
-    }
-}
-
-// Inisialisasi Mesin Scheduler Otonom (Hanya di Bot WA)
-function startAutonomousAttendanceScheduler(sock) {
-    currentSock = sock; // Pastikan currentSock selalu diperbarui ke instance aktif terbaru
-    if (isSchedulerRunning) return;
-    isSchedulerRunning = true;
-
-    console.log("⏰ [Auto-Scheduler WITA] Mesin cron penjadwal presensi otonom AKTIF (Memory-First, Zero-Spam Redis, 30s Local Ticker).");
-
-    // Inisialisasi cache memori pertama kali & jalankan evaluasi jika socket sudah siap
-    refreshMemoryCacheFromRedis().then(() => {
-        if (currentSock && isSocketReadyToSend(currentSock)) {
-            autonomousWitaSchedulerTick(currentSock).catch(() => {});
-        } else {
-            console.log("⏰ [Auto-Scheduler WITA] Cache sesi termuat di RAM. Menunggu socket Baileys open sebelum evaluasi jadwal perdana.");
-        }
-    }).catch(() => {});
-
-    // Refresh lambat data sesi & geofence dari Redis setiap 3 Menit (180.000 ms)
-    setInterval(() => {
-        refreshMemoryCacheFromRedis().catch(() => {});
-    }, 180000);
-
-    // Pengecekan jam WITA lokal murni di memori RAM setiap 30 detik (Nol request Redis)
-    setInterval(() => {
-        if (currentSock && isSocketReadyToSend(currentSock)) {
-            autonomousWitaSchedulerTick(currentSock).catch(() => {});
-        }
-    }, 30000);
+    finalReply = enforceCorrectGreeting(finalReply, witaTime.greeting);
+    return finalReply.replace(/RSKDGM Care|RSKD Care/gi, "RSKD Gigi dan Mulut Prov. Sulsel");
 }
 
 // =========================================================================
-// BACKGROUND WORKER: DISPATCHER ANTRIAN OUTBOX CLOUD (axaxyz_wa_queue)
+// CIRCUIT BREAKER, CONNECTION AUTO-RECOVERY & LOGIKA BLAST FOLLOW-UP
 // =========================================================================
-let isOutboxWorkerRunning = false;
 let currentSock = null;
+let isIntervalStarted = false;
 
-function startOutboxQueueWorker(sock) {
-    currentSock = sock; // Pastikan currentSock selalu diperbarui ke instance aktif terbaru
-    if (isOutboxWorkerRunning) return;
-    isOutboxWorkerRunning = true;
+async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "auto", overrideToSender = false, modeH = "h2") {
+    const resultLog = {
+        mode: modeH,
+        totalTarget: 0,
+        pasienTerkirim: 0,
+        pasienGagal: 0,
+        pasienSkipRujukanHabis: 0,
+        pasienWaTidakTerdaftar: 0,
+        laporanDokterTerkirim: 0,
+        laporanDokterGagal: 0,
+        targetDate: "",
+        isSenderConverted: false,
+        convertedToPhone: ""
+    };
 
-    console.log("🚀 [Outbox Worker] Background dispatcher antrian pesan WhatsApp Web Absensi V7 AKTIF (Interval 5s, Direct Cloud Redis, Auto-Purge Stale >10m).");
+    const senderInfo = parseSenderInfo(replyTargetJid);
+    const apiParams = { tgl: tglParam, mode: modeH };
 
-    // Startup Sweep: Bersihkan antrean usang (>10 menit) saat worker pertama kali aktif
-    (async () => {
-        try {
-            const rawQueue = await redisDirectGet('axaxyz_wa_queue');
-            if (Array.isArray(rawQueue) && rawQueue.length > 0) {
-                const now = Date.now();
-                const staleIds = [];
-                const freshQueue = [];
-                for (const qItem of rawQueue) {
-                    const qTime = qItem.created_at ? new Date(qItem.created_at).getTime() : (qItem.timestamp ? new Date(qItem.timestamp).getTime() : 0);
-                    if (qTime > 0 && (now - qTime > 10 * 60 * 1000)) {
-                        staleIds.push(qItem.id);
-                    } else {
-                        freshQueue.push(qItem);
-                    }
-                }
-                if (staleIds.length > 0) {
-                    console.log(`[Outbox Worker] 🧹 Startup Sweep: Menghapus ${staleIds.length} pesan usang/kadaluarsa (>10m) dari antrean Redis.`);
-                    await redisDirectSet('axaxyz_wa_queue', freshQueue);
-                }
-            }
-        } catch (e) {}
-    })();
+    if (overrideToSender && senderInfo.id) {
+        apiParams.override_wa = senderInfo.id;
+        apiParams.no_lid = senderInfo.id;
+        resultLog.isSenderConverted = true;
+        resultLog.convertedToPhone = `${senderInfo.id} (${senderInfo.isLid ? 'LID' : 'Phone'})`;
+    }
 
-    setInterval(async () => {
-        if (!currentSock || !isSocketReadyToSend(currentSock)) return;
+    const followupData = await callSimgosApi("get_followup", apiParams);
+    if (!followupData || followupData.status !== "success" || !Array.isArray(followupData.data)) {
+        throw new Error(followupData?.message || "Data kontrol tidak tersedia.");
+    }
 
-        try {
-            const pendingMessages = await callWaPull();
-            if (!Array.isArray(pendingMessages) || pendingMessages.length === 0) return;
+    const listPasien = followupData.data;
+    resultLog.totalTarget = listPasien.length;
+    resultLog.targetDate = followupData.target_control_date || tglParam;
 
-            const processedIds = [];
+    if (listPasien.length === 0) return resultLog;
 
-            for (const item of pendingMessages) {
-                try {
-                    // Cek sinyal kontrol instan (SYNC_SCHEDULE) dari Web Dashboard
-                    if (item.type === 'SYNC_SCHEDULE' || item.action === 'reload_sessions') {
-                        try {
-                            await refreshMemoryCacheFromRedis(true);
-                            if (currentSock && isSocketReadyToSend(currentSock)) {
-                                await autonomousWitaSchedulerTick(currentSock);
-                            }
-                        } catch (syncErr) {
-                            console.error("[Live-Trigger Error]", syncErr.message);
-                        } finally {
-                            // Selalu acknowledge item sinyal kontrol agar antrean bersih dan tidak memicu perulangan
-                            processedIds.push(item.id);
-                        }
-                        continue;
-                    }
+    const sysConfig = await fetchSystemAIConfig();
+    const delaySeconds = parseInt(followupData?.delay_chat || sysConfig?.delayChat, 10) || 60;
+    const effectiveDelayMs = overrideToSender ? 3000 : (delaySeconds * 1000);
 
-                    // Ekstraksi nomor tujuan yang fleksibel (target_number / phone / targetJid / to)
-                    const rawTarget = item.target_number || item.phone || item.targetJid || item.target || item.to || '';
-                    // Ekstraksi pesan (formatted_message / message / text)
-                    let rawMessage = item.formatted_message || item.message || item.text || '';
+    const targetDoctors = followupData.doctors && followupData.doctors.length > 0
+        ? followupData.doctors.map(d => sanitizeNumber(d.wa)).filter(Boolean)
+        : DOKTER_JID_LIST;
 
-                    if (!rawTarget || !rawMessage) {
-                        processedIds.push(item.id);
-                        continue;
-                    }
+    const currentDocTargets = (overrideToSender && replyTargetJid) ? [senderInfo.targetJid] : targetDoctors;
 
-                    // 1. FILTER UMUR PESAN (STALENESS GUARD): Hapus pesan jika usianya sudah > 10 menit
-                    const itemTime = item.created_at ? new Date(item.created_at).getTime() : (item.timestamp ? new Date(item.timestamp).getTime() : 0);
-                    if (itemTime > 0 && (Date.now() - itemTime > 10 * 60 * 1000)) {
-                        console.log(`[Outbox Worker] 🗑️ Menghapus antrean kadaluarsa (>10 menit) ID: ${item.id}, Target: ${rawTarget}, Waktu: ${item.created_at || item.timestamp}`);
-                        processedIds.push(item.id);
-                        continue;
-                    }
+    console.log(`[FOLLOWUP BLAST] Memulai pengiriman (${modeH.toUpperCase()}) satu-satu untuk ${listPasien.length} target. Mode: ${overrideToSender ? 'SIMULASI SENDER' : 'REAL BLAST'}, Delay: ${effectiveDelayMs / 1000}s`);
 
-                    let targetJid = String(rawTarget).trim();
-                    if (!targetJid.includes('@')) {
-                        const cleanDigits = formatToInternational(targetJid) || sanitizeNumber(targetJid);
-                        if (!cleanDigits) {
-                            processedIds.push(item.id);
-                            continue;
-                        }
-                        targetJid = `${cleanDigits}@s.whatsapp.net`;
-                    }
-
-                    // 2. DYNAMIC URL SANITIZER: Otomatis ubah localhost:3000 menjadi domain resmi
-                    if (rawMessage.includes('localhost:3000')) {
-                        rawMessage = rawMessage.replace(/http:\/\/localhost:3000/g, WEB_PORTAL_URL)
-                                               .replace(/localhost:3000/g, WEB_PORTAL_URL.replace(/^https?:\/\//, ''));
-                    }
-
-                    // 3. Filter deduplikasi outbox 60 detik
-                    const outboxDedupKey = `${targetJid}_${rawMessage.slice(0, 50)}`;
-                    const lastOutboxSent = recentBroadcastMap.get(outboxDedupKey);
-                    if (lastOutboxSent && (Date.now() - lastOutboxSent) < 60000) {
-                        console.log(`[Outbox Worker] ⏭️ Menghapus item duplikat antrian ke ${targetJid} (cooldown 60s aktif).`);
-                        processedIds.push(item.id);
-                        continue;
-                    }
-                    recentBroadcastMap.set(outboxDedupKey, Date.now());
-
-                    // Pastikan socket masih siap sebelum sendMessage
-                    if (!isSocketReadyToSend(currentSock)) {
-                        console.warn(`[Outbox Worker] ⏳ Socket Baileys belum siap / disconnected saat memproses antrean outbox. Menunda pengiriman.`);
-                        break;
-                    }
-
-                    // Kirim pesan WhatsApp melalui Baileys
-                    await currentSock.sendMessage(targetJid, {
-                        text: formatForWhatsApp(rawMessage)
-                    });
-
-                    processedIds.push(item.id);
-                    console.log(`[Outbox Worker] ✅ Sukses mengirim notifikasi ke ${targetJid} (ID: ${item.id})`);
-                } catch (sendErr) {
-                    console.error(`[Outbox Worker] ❌ Gagal mengirim pesan ID ${item.id}:`, sendErr.message);
-                }
-            }
-
-            // Hapus batch pesan yang telah berhasil diproses dari Upstash Redis Cloud
-            if (processedIds.length > 0) {
-                await callWaAcknowledge(processedIds);
-                console.log(`[Outbox Worker] 🗑️ Berhasil menghapus ${processedIds.length} pesan terproses dari antrian cloud.`);
-            }
-        } catch (workerErr) {
-            // Silently ignore temporary network glitch
+    for (let pxIndex = 0; pxIndex < listPasien.length; pxIndex++) {
+        const px = listPasien[pxIndex];
+        const statusRujukan = String(px.statusRujukan || "").trim().toLowerCase();
+        if (statusRujukan.includes("habis") || !statusRujukan || statusRujukan === "-") {
+            console.log(`[SKIP FOLLOWUP] Pasien #${pxIndex + 1} ${px.namaPasien} (RM: ${px.noRm}) dilewati karena Status Rujukan Habis.`);
+            resultLog.pasienSkipRujukanHabis++;
+            continue;
         }
-    }, 5000);
+
+        // 1. SOCKET AKTIF: Gunakan socket WhatsApp aktif
+        const activeSock = currentSock || sock;
+
+        const cleanPhone = formatToInternational(px.noHp);
+        let resolvedLid = "";
+        let targetPatientJid = "";
+        let isWaRegistered = true;
+
+        if (overrideToSender && senderInfo.id) {
+            resolvedLid = senderInfo.id;
+            targetPatientJid = senderInfo.targetJid;
+        } else {
+            // 1. Cek apakah LID sudah tersimpan di memory map atau di px.noLid dari sheet
+            if (phoneToLidMap.has(cleanPhone)) {
+                resolvedLid = phoneToLidMap.get(cleanPhone);
+            } else if (px.noLid && px.noLid !== "-" && px.noLid !== cleanPhone && px.noLid.length > 10) {
+                resolvedLid = String(px.noLid).replace(/\D/g, '');
+                registerIdentityMapping(resolvedLid, cleanPhone);
+            }
+
+            try {
+                const waCheck = await activeSock.onWhatsApp(cleanPhone);
+                if (waCheck && waCheck.length > 0 && waCheck[0]?.exists) {
+                    targetPatientJid = waCheck[0].jid || sanitizeNumber(cleanPhone);
+                    if (waCheck[0].lid) {
+                        resolvedLid = String(waCheck[0].lid).replace(/\D/g, '');
+                    }
+                } else {
+                    isWaRegistered = false;
+                }
+            } catch (errCheck) {
+                targetPatientJid = sanitizeNumber(cleanPhone);
+            }
+
+            // 2. JIKA BELUM ADA LID RIIL, RESOLVE LANGSUNG DENGAN USYNC QUERY DARI SERVER WHATSAPP!
+            if (isWaRegistered && (!resolvedLid || resolvedLid === cleanPhone)) {
+                try {
+                    const serverLid = await resolveLidFromWhatsAppServer(activeSock, cleanPhone);
+                    if (serverLid) {
+                        resolvedLid = serverLid;
+                    }
+                } catch (e) { }
+            }
+
+            if (resolvedLid && resolvedLid !== cleanPhone) {
+                registerIdentityMapping(resolvedLid, cleanPhone);
+                px.noLid = resolvedLid;
+            }
+
+            // 3. CACHE DATA PASIEN SECARA PERSISTEN (24 JAM) DI SEMUA KUNCI (LID, PHONE, NO. RM)
+            if (resolvedLid && resolvedLid !== cleanPhone) cachePatientObject(resolvedLid, px);
+            cachePatientObject(cleanPhone, px);
+            if (px.noRm && px.noRm !== "-") cachePatientObject(px.noRm, px);
+        }
+
+        // 2. JIKA NOMOR PASIEN TIDAK TERDAFTAR DI WHATSAPP
+        if (!isWaRegistered) {
+            console.warn(`[WA TIDAK TERDAFTAR] Pasien #${pxIndex + 1} ${px.namaPasien} (${cleanPhone}) tidak memiliki akun WhatsApp aktif.`);
+            resultLog.pasienWaTidakTerdaftar++;
+            resultLog.pasienGagal++;
+
+            try {
+                await callSimgosApi("update_status", {
+                    row: px.rowNumber,
+                    type: "both",
+                    status: "Bukan Nomor WA",
+                    doctor_status: "Bukan Nomor WA",
+                    mode: modeH,
+                    noSender: cleanPhone,
+                    no_lid: (resolvedLid && resolvedLid !== cleanPhone) ? resolvedLid : "-"
+                });
+            } catch (uErr) { }
+
+            // Notifikasi transparan ke Dokter (SATU-SATU) agar dokter mengetahui nomor tidak ada WA
+            for (const docJid of currentDocTargets) {
+                try {
+                    await activeSock.sendMessage(docJid, {
+                        text: `⚠️ *[PERINGATAN DPJP: NO. WA TIDAK AKTIF]*\n\n` +
+                            `👤 *Nama Pasien:* ${px.namaPasien}\n` +
+                            `🔖 *No. RM:* ${px.noRm}\n` +
+                            `📱 *No. Telepon:* ${px.noHp}\n` +
+                            `📅 *Jadwal Kontrol:* ${px.tglKontrol}\n` +
+                            `📋 *Status Rujukan:* ${px.statusRujukan}\n\n` +
+                            `_Nomor di atas tidak terdaftar di WhatsApp. Status di Google Spreadsheet telah ditandai sebagai 'Bukan Nomor WA'. Mohon hubungi pasien melalui panggilan telepon seluler biasa._ 🙏`
+                    });
+                } catch (wErr) { }
+            }
+
+            if (pxIndex < listPasien.length - 1) {
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            continue;
+        }
+
+        // 3. KIRIM PESAN KE PASIEN (SATU-SATU)
+        let patientSentSuccess = false;
+        let pesanKirimPasien = px.pesan_wa_pasien;
+        if (overrideToSender) {
+            pesanKirimPasien = `🧪 *[SIMULASI BLAST ${modeH.toUpperCase()}: DIARAHKAN KE SENDER]*\n` +
+                `_(Target Pasien: ${px.namaPasien} | RM: ${px.noRm} | Rujukan: ${px.statusRujukan} | No. Asli: ${px.originalNoHp || px.noHp})_\n\n` +
+                pesanKirimPasien;
+        }
+
+        try {
+            try {
+                await activeSock.sendPresenceUpdate('composing', targetPatientJid);
+                await new Promise(r => setTimeout(r, 1200));
+            } catch (pErr) { }
+
+            await activeSock.sendMessage(targetPatientJid, { text: pesanKirimPasien });
+
+            try {
+                await activeSock.sendPresenceUpdate('paused', targetPatientJid);
+            } catch (pErr) { }
+
+            patientSentSuccess = true;
+            resultLog.pasienTerkirim++;
+            console.log(`[Blast ${modeH.toUpperCase()} Pasien (${resultLog.pasienTerkirim}/${listPasien.length})] ${px.namaPasien} (${px.statusRujukan}) -> JID: ${targetPatientJid}`);
+
+            if (!overrideToSender) {
+                if (resolvedLid && resolvedLid !== cleanPhone) {
+                    conversationSessions.set(resolvedLid, {
+                        history: [],
+                        lastSeen: Date.now(),
+                        patientData: px
+                    });
+                }
+                conversationSessions.set(cleanPhone, {
+                    history: [],
+                    lastSeen: Date.now(),
+                    patientData: px
+                });
+            }
+        } catch (pxErr) {
+            console.error(`[Gagal Kirim Pasien ${modeH.toUpperCase()}] ${px.namaPasien}:`, pxErr?.message || pxErr);
+            resultLog.pasienGagal++;
+            patientSentSuccess = false;
+        }
+
+        // 4. KIRIM LAPORAN DOKTER UNTUK PASIEN INI (SATU-SATU / REAL-TIME)
+        let docSentSuccess = false;
+        if (patientSentSuccess) {
+            // JEDA PACING 60 DETIK ANTARA PESAN PASIEN DAN LAPORAN DOKTER DPJP
+            const interMessageDelaySec = overrideToSender ? 3 : (delaySeconds || 60);
+            console.log(`[Pacing Delay ${interMessageDelaySec}s] Menunggu jeda ${interMessageDelaySec} detik sebelum mengirimkan laporan dokter (${px.namaPasien})...`);
+            await new Promise(r => setTimeout(r, interMessageDelaySec * 1000));
+
+            let pesanLaporanDokter = px.pesan_wa_laporan_dokter;
+            if (!pesanLaporanDokter) {
+                const docTplKey = modeH === "h1" 
+                    ? (sysConfig.templates?.["WA_LAPORAN_DOKTER_H1"] ? "WA_LAPORAN_DOKTER_H1" : "WA_LAPORAN_DOKTER")
+                    : (sysConfig.templates?.["WA_LAPORAN_DOKTER_H2"] ? "WA_LAPORAN_DOKTER_H2" : "WA_LAPORAN_DOKTER");
+                const docTpl = sysConfig.templates?.[docTplKey] || sysConfig.templates?.["WA_LAPORAN_DOKTER"] || "";
+                pesanLaporanDokter = compileTemplateText(docTpl, px, sysConfig);
+            }
+
+            if (overrideToSender) {
+                pesanLaporanDokter = `🧪 *[SIMULASI LAPORAN DPJP: DIARAHKAN KE SENDER]*\n` +
+                    `_(Laporan untuk Pasien: ${px.namaPasien} | RM: ${px.noRm} | Status: Rujukan Aktif)_\n\n` +
+                    pesanLaporanDokter;
+            }
+
+            for (let dIdx = 0; dIdx < currentDocTargets.length; dIdx++) {
+                const docJid = currentDocTargets[dIdx];
+                try {
+                    try {
+                        await activeSock.sendPresenceUpdate('composing', docJid);
+                        await new Promise(r => setTimeout(r, 800));
+                    } catch (pErr) { }
+
+                    await activeSock.sendMessage(docJid, { text: pesanLaporanDokter });
+
+                    try {
+                        await activeSock.sendPresenceUpdate('paused', docJid);
+                    } catch (pErr) { }
+
+                    docSentSuccess = true;
+                    console.log(`[Laporan DPJP Terkirim (Satu-Satu)] Pasien #${pxIndex + 1} (${px.namaPasien}) -> Dokter: ${docJid}`);
+                } catch (dErr) {
+                    console.error(`[Gagal Kirim Laporan Dokter] Pasien #${pxIndex + 1} (${px.namaPasien}) ke ${docJid}:`, dErr.message);
+                }
+            }
+
+            if (docSentSuccess) {
+                resultLog.laporanDokterTerkirim++;
+            } else {
+                resultLog.laporanDokterGagal++;
+            }
+        }
+
+        // 5. ATOMIC STATUS UPDATE KE GOOGLE SPREADSHEET (Pasien & Dokter Serentak)
+        try {
+            await callSimgosApi("update_status", {
+                row: px.rowNumber,
+                type: "both",
+                status: patientSentSuccess ? "Terkirim" : "Gagal",
+                doctor_status: docSentSuccess ? "Terkirim" : (patientSentSuccess ? "Gagal" : "Pending"),
+                mode: modeH,
+                noSender: cleanPhone,
+                no_lid: (resolvedLid && resolvedLid !== cleanPhone) ? resolvedLid : (px.noLid && px.noLid !== cleanPhone ? px.noLid : "-")
+            });
+        } catch (dbErr) {
+            console.error(`[Update Status Gagal] Baris ${px.rowNumber}:`, dbErr.message);
+        }
+
+        // 6. JEDA ANTI-SPAM (Default 60 Detik dari Sheet 'SETTING') antar pasien jika masih ada pasien berikutnya
+        if (pxIndex < listPasien.length - 1) {
+            const countdownSec = overrideToSender ? 3 : delaySeconds;
+            console.log(`[Anti-Spam Delay] Menunggu jeda ${countdownSec} detik sebelum pengiriman pasien & dokter berikutnya...`);
+            await new Promise(r => setTimeout(r, effectiveDelayMs));
+        }
+    }
+
+    // 7. SELESAI BLAST FOLLOW-UP
+    // Rekapitulasi summary TIDAK lagi dikirim ke dokter DPJP (dokter hanya menerima laporan pasien dari CUSTOM_FORMAT).
+    // Rekapitulasi dikembalikan lewat resultLog untuk dilaporkan kepada pengirim perintah (petugas/admin).
+    console.log(`[Blast ${modeH.toUpperCase()} Selesai] Total: ${resultLog.totalTarget} | Pasien Terkirim: ${resultLog.pasienTerkirim} | Laporan DPJP: ${resultLog.laporanDokterTerkirim} | Skip Rujukan Habis: ${resultLog.pasienSkipRujukanHabis}`);
+
+    return resultLog;
 }
 
 // =========================================================================
-// UNIVERSAL MESSAGE HANDLER ENTRY POINT (COMPATIBLE DENGAN SEMUA RUNNER)
+// MAIN MESSAGE HANDLER ENGINE
 // =========================================================================
-async function messageHandler(sock) {
+export default function setupMessageHandler(sock) {
     currentSock = sock;
 
-    // Pasang pendengar siklus hidup koneksi Baileys (memastikan kesiapan otentikasi)
-    if (sock?.ev && typeof sock.ev.on === 'function') {
-        sock.ev.on('connection.update', async (update) => {
-            const { connection } = update || {};
-            if (connection === 'open') {
-                currentSock = sock;
-                console.log("🌐 [Baileys Socket] Status KONEKSI: OPEN & TEROTENTIKASI (Siap kirim pesan WA) ✅");
+    prewarmDoctorAndOwnerLids(sock);
+
+    setTimeout(() => {
+        convertAllPatientsToLid(sock, false);
+    }, 3000);
+
+    setTimeout(async () => {
+        try {
+            const fixRes = await callSimgosApi("fix_sender_columns");
+            if (fixRes && fixRes.fixedCount > 0) {
+                console.log(`[Auto-Sync Kolom O] Sukses menstandarisasi ${fixRes.fixedCount} baris Kolom O menjadi No WA Asli (628xxx)!`);
+            }
+        } catch (e) { }
+    }, 5000);
+
+    if (!isIntervalStarted) {
+        // 1. Scheduler Auto Blast Jam 08:30 WITA
+        setInterval(async () => {
+            if (!currentSock) return;
+
+            const d = new Date();
+            const jam = d.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'Asia/Makassar' });
+            const menit = d.toLocaleString('en-US', { minute: '2-digit', timeZone: 'Asia/Makassar' });
+            const tanggalHariIniWita = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Makassar' }).format(d);
+
+            const targetJam = String(botSettings.autoFollowupHour || "08").padStart(2, "0");
+            const targetMenit = String(botSettings.autoFollowupMinute || "30").padStart(2, "0");
+
+            if (
+                botSettings.autoFollowupSimgos &&
+                jam === targetJam &&
+                menit === targetMenit &&
+                botSettings.lastAutoFollowupDate !== tanggalHariIniWita
+            ) {
                 try {
-                    await autonomousWitaSchedulerTick(sock);
-                } catch (tickErr) {
-                    console.error("[Baileys Post-Connect Tick Error]", tickErr.message);
+                    console.log(`[Auto SIMGOS] Menjalankan follow-up otomatis H-2 & H-1 jam ${targetJam}:${targetMenit} WITA (${tanggalHariIniWita})...`);
+
+                    const blastH2 = await executeFollowupBlast(currentSock, ownerNumber, "auto", false, "h2");
+                    const blastH1 = await executeFollowupBlast(currentSock, ownerNumber, "auto", false, "h1");
+
+                    botSettings.lastAutoFollowupDate = tanggalHariIniWita;
+                    saveSettings();
+
+                    if (blastH2.totalTarget > 0 || blastH1.totalTarget > 0) {
+                        await currentSock.sendMessage(ownerNumber, {
+                            text: `🤖 *AUTO FOLLOW-UP SIMGOS SELESAI (H-2 & H-1)*\n\n` +
+                                `📅 *Follow-up H-2 (${blastH2.targetDate}):*\n` +
+                                `• Terkirim (Aktif): ${blastH2.pasienTerkirim}\n` +
+                                `• Dilewati (Habis): ${blastH2.pasienSkipRujukanHabis}\n\n` +
+                                `📅 *Follow-up H-1 (${blastH1.targetDate}):*\n` +
+                                `• Terkirim (Aktif): ${blastH1.pasienTerkirim}\n` +
+                                `• Dilewati (Habis): ${blastH1.pasienSkipRujukanHabis}\n\n` +
+                                `👨‍⚕️ Laporan Dokter DPJP Utama Terkirim\n` +
+                                `⏱️ Waktu: ${getWitaTimeGreeting().fullWitaStr}`
+                        });
+                    }
+                } catch (autoErr) {
+                    console.error("[Auto SIMGOS Error]", autoErr);
                 }
             }
-        });
+        }, 30000);
+
+        // 2. Scheduler Rutin Sinkronisasi Pasien Setiap 30 Menit
+        setInterval(() => {
+            if (currentSock) {
+                convertAllPatientsToLid(currentSock, false);
+            }
+        }, 30 * 60 * 1000);
+
+        isIntervalStarted = true;
     }
 
-    // 1. Inisialisasi background dispatcher antrian outbox Web Absensi V7
-    startOutboxQueueWorker(sock);
-
-    // 2. Inisialisasi mesin cron penjadwal presensi otonom berbasis WITA (Zero-Spam Redis)
-    startAutonomousAttendanceScheduler(sock);
-
-    // 3. Pre-warming LID admin di latar belakang
-    setTimeout(() => {
-        prewarmAdminAndOwnerLids(sock);
-    }, 2000);
-
-    // 3. Pasang pendengar event messages.upsert Baileys
     sock.ev.on('messages.upsert', async (m) => {
         try {
-            const msg = m.messages?.[0];
-            if (!msg || !msg.message) return;
-            if (msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
+            const msg = m.messages[0];
+            if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
             const remoteJid = msg.key.remoteJid;
             if (!remoteJid) return;
 
-            // Abaikan grup WhatsApp & pesan broadcast massal
-            if (remoteJid.includes('@g.us') || remoteJid.includes('@broadcast')) {
+            if (remoteJid.includes('@g.us') || remoteJid.includes('@broadcast') || remoteJid === 'status@broadcast') {
                 return;
             }
 
-            const senderInfo = parseSenderInfo(remoteJid);
-            const pushName = msg.pushName || "Rekan Mahasiswa";
-
-            // Ekstraksi isi teks pesan (Conversation, Extended Text, atau Caption Gambar)
-            const textContent = msg.message.conversation ||
+            const text = msg.message.conversation ||
                 msg.message.extendedTextMessage?.text ||
                 msg.message.imageMessage?.caption ||
-                msg.message.videoMessage?.caption ||
-                "";
+                msg.message.videoMessage?.caption || '';
 
-            const trimmedText = textContent.trim();
-            if (!trimmedText && !msg.message.imageMessage && !msg.message.stickerMessage) return;
+            const isImage = !!(msg.message.imageMessage);
 
-            // Tangani pembuatan stiker jika diminta
-            if (handleStickerCommand && (trimmedText.startsWith('#sticker') || trimmedText.startsWith('.s') || trimmedText.startsWith('!s') || trimmedText.startsWith('!sticker') || (msg.message.imageMessage && trimmedText.toLowerCase() === 'sticker'))) {
-                try {
-                    await handleStickerCommand(sock, msg, senderInfo.targetJid);
-                    return;
-                } catch (stkErr) {
-                    console.error('[Sticker Handler Error]', stkErr);
+            if (!text.trim() && !isImage) return;
+
+            const rawParticipant = msg.key.participant || msg.key.participantPn || msg.participantPn || '';
+            if (rawParticipant && remoteJid.endsWith('@lid')) {
+                registerIdentityMapping(remoteJid, rawParticipant);
+            }
+
+            const senderInfo = parseSenderInfo(remoteJid);
+            const pushName = msg.pushName || "Pasien";
+
+            console.log(`[Chat 1-on-1] Dari: ${senderInfo.id} (${senderInfo.isLid ? 'LID' : 'Phone'}) | PushName: ${pushName} | Pesan: "${text.trim()}"`);
+
+            // =====================================================================
+            // 1. COMMAND ADMIN (PREFIX '!')
+            // =====================================================================
+            if (text.startsWith('!')) {
+                const args = text.slice(1).trim().split(/ +/);
+                const command = args.shift().toLowerCase();
+
+                switch (command) {
+                    case 'menu':
+                    case 'help':
+                        const menuText = `*🤖 BOT KONTROL RSKDGM (H-2 & H-1 SIMGOS) 🤖*\n\n` +
+                            `*🦷 SIMGOS FOLLOW-UP KONTROL:*\n` +
+                            `* !converstalltolid* - 🔄 Konversi satu-satu No WA ke Kolom 18 (No LID)\n` +
+                            `* !reschedulepx terbatalkan <No.RM/Nama> <YYYY-MM-DD>* - 🔁 Jadwal ulang tgl baru & simpan Kolom 19\n` +
+                            `* !followupnow* [h1/h2/all] [tgl/auto] [me] - 🚀 Kirim instan ('all' = H-2 & H-1, 'me' = kirim ke Anda)\n` +
+                            `* !followup* [h1/h2/h3/dst] [tgl/auto] - 📋 Cek antrean pasien kontrol (mendukung H-1, H-2, H-3, dst.)\n` +
+                            `* !gassfollowup* [h1/h2] [me] - Kirim WA massal ke Pasien & DPJP Utama\n` +
+                            `* !cekrujukanaktif* - 📋 Lihat pasien dengan Rujukan Aktif\n` +
+                            `* !cekrujukanhabis* - ⚠️ Lihat pasien dengan Rujukan Habis\n` +
+                            `* !bindpasien* <No.RM> - 🔗 Tautkan WhatsApp Anda ke No RM Pasien\n` +
+                            `* !caripasien* <No.RM/Nama/WA/LID> - Cari data pasien di Spreadsheet\n` +
+                            `* !reschedule* <No.RM> <YYYY-MM-DD> - Ubah tanggal kontrol manual\n` +
+                            `* !statskontrol* - Cek statistik kontrol & status rujukan\n` +
+                            `* !settingssimgos* - Cek konfigurasi sistem & dokter\n` +
+                            `* !templatesimgos* - Cek template format pesan WhatsApp\n` +
+                            `* !autofollowup on/off* - Pengaturan status blast harian otomatis\n` +
+                            `* !setjamfollowup* <HH:mm> - Ubah jam blast harian\n` +
+                            `* !setdelaychat* <detik> - ⏳ Ubah jeda anti-spam blast (default 60 detik / pasien & dokter)\n` +
+                            `* !fixsender* - 🛠️ Standarisasi Kolom O (No Sender) ke No WA Asli (628xxx)\n\n` +
+
+                            `*🧠 KREDENSIAL AI & 9ROUTER MULTI-GATEWAY:*\n` +
+                            `* !test9router* [model/ag] - 🧪 Uji respon AI (ketik '!test9router ag' untuk tes Antigravity)\n` +
+                            `* !getprompt* - Cek status 9Router VPS, Antigravity, Prompt & API Key\n` +
+                            `* !clearpromptcache* - Refresh cache prompt, template & API Key terbaru\n\n` +
+
+                            `*⚙️ UTILITAS & SPEED TEST:* \n` +
+                            `* !testapirskdgm* - ⚡ Uji kecepatan & latensi REST API RSKDGM Vercel (ms)\n` +
+                            `* !testapigas* - ☁️ Uji kecepatan & latensi REST API Google Apps Script (ms)\n` +
+                            `* !ping* - Cek kecepatan respon bot\n` +
+                            `* !runtime* - Cek waktu aktif bot & server\n` +
+                            `* !sticker* / *!s* - Konversi gambar ke stiker\n\n` +
+
+                            `_💬 Rumah Sakit Resmi: *RSKD Gigi dan Mulut Prov. Sulsel*._`;
+                        await sock.sendMessage(senderInfo.targetJid, { text: menuText }, { quoted: msg });
+                        return;
+
+                    case 'test9router':
+                    case 'ping9router':
+                    case 'cek9router':
+                        let overrideModelTest = null;
+                        if (args[0]) {
+                            const argModel = args[0].toLowerCase();
+                            if (argModel === 'ag' || argModel === 'antigravity') {
+                                overrideModelTest = 'ag/gemini-3.8-flash-high';
+                            } else if (argModel === 'gemini') {
+                                overrideModelTest = 'gemini-3.8-flash';
+                            } else if (argModel === 'auto') {
+                                overrideModelTest = 'auto';
+                            } else {
+                                overrideModelTest = args[0];
+                            }
+                        }
+
+                        await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Menghubungkan ke 9Router VPS (Model: ${overrideModelTest || 'Auto Cascade'})..._` }, { quoted: msg });
+                        try {
+                            const cfgNow = await fetchSystemAIConfig();
+                            const startT = Date.now();
+                            const testResult = await ask9RouterClinic(
+                                [{ role: 'user', parts: [{ text: 'Tes koneksi 9router vps rskdgm. Jawab singkat padat 1 kalimat.' }] }],
+                                'Anda adalah asisten AI RSKD Gigi dan Mulut Prov. Sulsel.',
+                                cfgNow,
+                                overrideModelTest
+                            );
+                            const latensi = Date.now() - startT;
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `✅ *KONEKSI 9ROUTER VPS SUKSES!*\n\n` +
+                                    `🌐 *Endpoint:* \`${cfgNow.nineRouterUrl}\`\n` +
+                                    `🤖 *Model Terjawab:* \`${testResult.resolvedModel}\`\n` +
+                                    `⚡ *Latensi Respon:* ${latensi} ms\n\n` +
+                                    `💬 *Balasan Model:*\n"${testResult.reply}"`
+                            }, { quoted: msg });
+                        } catch (err9Test) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `❌ *Koneksi 9Router Gagal:*\n${err9Test.message}\n\n💡 *Tips:* Ketik *!test9router ag* untuk menguji jalur Antigravity OAuth secara langsung.`
+                            }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'converstalltolid':
+                    case 'convertalltolid':
+                    case 'syncalllid':
+                    case 'syncalldb':
+                    case 'synclids':
+                    case 'syncpasien':
+                        await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Memulai konversi satu-satu No WA database ke Kolom 18 (No LID) via USync Server WhatsApp... Mohon tunggu sebentar._" }, { quoted: msg });
+                        const syncResult = await convertAllPatientsToLid(sock, true);
+                        await sock.sendMessage(senderInfo.targetJid, {
+                            text: `✅ *SINKRONISASI KOLOM 18 (NO LID) SELESAI!*\n\n` +
+                                `📁 Total Nomor WA Diperiksa: *${syncResult.total} Pasien*\n` +
+                                `🎯 Berhasil Dikonversi ke LID: *${syncResult.matched} Pasien*\n` +
+                                `💾 Status: Tersimpan permanen ke Kolom 18 (No LID) & Kolom 15 di Spreadsheet.\n\n` +
+                                `_Sekarang pasien yang chat melalui LID langsung dikenali nama & No RM aslinya secara akurat!_ 🚀`
+                        }, { quoted: msg });
+                        return;
+
+                    case 'reschedulepx':
+                    case 'rescheduleterbatalkan':
+                        let inputArgs = [...args];
+                        if (inputArgs[0] && inputArgs[0].toLowerCase() === 'terbatalkan') {
+                            inputArgs.shift();
+                        }
+
+                        if (inputArgs.length < 2) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `⚠️ Format salah!\nGunakan format:\n*!reschedulepx terbatalkan <No. RM / Nama Lengkap> <YYYY-MM-DD>*\n\nContoh:\n*!reschedulepx terbatalkan 00.06.32.89 2026-09-17*\natau\n*!reschedulepx terbatalkan M. AXA 2026-09-17*`
+                            }, { quoted: msg });
+                            break;
+                        }
+
+                        const newDateParam = inputArgs.pop();
+                        const extractedTargetDate = extractDateFromText(newDateParam) || newDateParam;
+                        const targetIdentifier = inputArgs.join(" ").replace(/\//g, "").trim();
+
+                        if (!/^\d{4}-\d{2}-\d{2}$/.test(extractedTargetDate)) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `❌ Tanggal tidak valid! Gunakan format *YYYY-MM-DD* (contoh: *2026-09-17*).`
+                            }, { quoted: msg });
+                            break;
+                        }
+
+                        await sock.sendMessage(senderInfo.targetJid, {
+                            text: `⏳ _Mencari data pasien "${targetIdentifier}" untuk dijadwalkan ulang ke ${extractedTargetDate}..._`
+                        }, { quoted: msg });
+
+                        try {
+                            const searchTarget = await callSimgosApi("search_patient", { query: targetIdentifier });
+                            if (searchTarget.status !== "success" || !Array.isArray(searchTarget.data) || searchTarget.data.length === 0) {
+                                await sock.sendMessage(senderInfo.targetJid, {
+                                    text: `❌ Data pasien dengan kata kunci *"${targetIdentifier}"* tidak ditemukan di spreadsheet.`
+                                }, { quoted: msg });
+                                break;
+                            }
+
+                            const targetPx = searchTarget.data[0];
+                            const sysCfg = await fetchSystemAIConfig();
+
+                            await callSimgosApi("reschedule_patient", {
+                                noRm: targetPx.noRm,
+                                newDate: extractedTargetDate,
+                                customStatus: `Reschedule DPJP (${extractedTargetDate})`
+                            });
+
+                            const updatedPxObj = {
+                                ...targetPx,
+                                tglReschedule: extractedTargetDate,
+                                statusReschedule: `Reschedule DPJP (${extractedTargetDate})`
+                            };
+
+                            cachePatientObject(targetPx.noRm, updatedPxObj);
+                            if (targetPx.noLid) cachePatientObject(targetPx.noLid, updatedPxObj);
+                            if (targetPx.noHp) cachePatientObject(formatToInternational(targetPx.noHp), updatedPxObj);
+
+                            const templateJknConfirm = sysCfg.templates["WA_PX_RESCHEDULE_JKN_CONFIRM"];
+                            const msgToPatient = compileTemplateText(templateJknConfirm, updatedPxObj, sysCfg);
+                            const targetPatientJid = sanitizeNumber(targetPx.noHp);
+
+                            await sock.sendMessage(targetPatientJid, { text: msgToPatient });
+
+                            const successReport = `✅ *RESCHEDULE PASIEN TERBATALKAN BERHASIL!*\n\n` +
+                                `👤 *Nama Pasien:* ${targetPx.namaPasien}\n` +
+                                `🔖 *No. RM:* ${targetPx.noRm}\n` +
+                                `📅 *Jadwal Semula (Awal):* ${targetPx.tglKontrol}\n` +
+                                `📅 *Tanggal Reschedule Baru:* ${extractedTargetDate}\n` +
+                                `📱 *WhatsApp Pasien:* ${targetPx.noHp}\n` +
+                                `📋 *Status Kolom 16:* Reschedule DPJP (${extractedTargetDate})\n` +
+                                `💾 *Status Kolom 19 (Tanggal Reschedule):* ${extractedTargetDate}\n\n` +
+                                `_Pesan konfirmasi jadwal baru telah otomatis dikirimkan ke WhatsApp pasien._ 🙏✨`;
+
+                            await sock.sendMessage(senderInfo.targetJid, { text: successReport }, { quoted: msg });
+
+                        } catch (errReschedPx) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal eksekusi reschedule pasien:* ${errReschedPx.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'cekrujukanaktif':
+                    case 'rujukanaktif':
+                        await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Mengambil data pasien dengan Status Rujukan Aktif dari Google Spreadsheet..._" }, { quoted: msg });
+                        try {
+                            const pasienAktif = await fetchPatientsByRujukanStatus("aktif");
+                            if (pasienAktif.length === 0) {
+                                await sock.sendMessage(senderInfo.targetJid, { text: "ℹ️ Tidak ditemukan pasien dengan status *Rujukan Aktif* di antrean kontrol." }, { quoted: msg });
+                                break;
+                            }
+
+                            let textAktif = `📋 *DAFTAR PASIEN RUJUKAN AKTIF (${pasienAktif.length} Pasien)*\n` +
+                                `🏥 RSKD Gigi dan Mulut Prov. Sulsel\n` +
+                                `🦷 Poli Konservasi dan Endodonsi\n\n`;
+
+                            pasienAktif.forEach((p, idx) => {
+                                textAktif += `${idx + 1}. *${p.namaPasien}*\n` +
+                                    `   🔖 No. RM: ${p.noRm}\n` +
+                                    `   📅 Tgl Kontrol: ${p.tglKontrol}\n` +
+                                    `   📱 WA Pasien: ${p.noHp}\n` +
+                                    `   📋 Status: ✅ *Rujukan Aktif*\n\n`;
+                            });
+
+                            await sock.sendMessage(senderInfo.targetJid, { text: textAktif }, { quoted: msg });
+                        } catch (errAktif) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal mengambil data rujukan aktif:* ${errAktif.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'cekrujukanhabis':
+                    case 'rujukanhabis':
+                        await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Mengambil data pasien dengan Status Rujukan Habis dari Google Spreadsheet..._" }, { quoted: msg });
+                        try {
+                            const pasienHabis = await fetchPatientsByRujukanStatus("habis");
+                            if (pasienHabis.length === 0) {
+                                await sock.sendMessage(senderInfo.targetJid, { text: "ℹ️ Tidak ditemukan pasien dengan status *Rujukan Habis* di antrean kontrol." }, { quoted: msg });
+                                break;
+                            }
+
+                            let textHabis = `⚠️ *DAFTAR PASIEN RUJUKAN HABIS (${pasienHabis.length} Pasien)*\n` +
+                                `🏥 RSKD Gigi dan Mulut Prov. Sulsel\n` +
+                                `🦷 Poli Konservasi dan Endodonsi\n` +
+                                `_(Pasien-pasien ini otomatis di-skip dari blast follow-up)_\n\n`;
+
+                            pasienHabis.forEach((p, idx) => {
+                                textHabis += `${idx + 1}. *${p.namaPasien}*\n` +
+                                    `   🔖 No. RM: ${p.noRm}\n` +
+                                    `   📅 Tgl Kontrol: ${p.tglKontrol}\n` +
+                                    `   📱 WA Pasien: ${p.noHp}\n` +
+                                    `   📋 Status: 🚫 *Rujukan Habis*\n\n`;
+                            });
+
+                            await sock.sendMessage(senderInfo.targetJid, { text: textHabis }, { quoted: msg });
+                        } catch (errHabis) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal mengambil data rujukan habis:* ${errHabis.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'bindpasien':
+                    case 'linkpasien':
+                        if (args.length === 0) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `⚠️ Format salah!\nGunakan: *!bindpasien <No.RM>*\nContoh: *!bindpasien 00.06.32.89*`
+                            }, { quoted: msg });
+                            break;
+                        }
+                        const targetRmBind = args[0].trim();
+                        await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Menautkan identitas ${senderInfo.isLid ? 'LID' : 'WA'} (${senderInfo.id}) ke No. RM ${targetRmBind}..._` }, { quoted: msg });
+                        try {
+                            await callSimgosApi("update_status", {
+                                noRm: targetRmBind,
+                                type: "pasien",
+                                status: "Pending",
+                                no_lid: senderInfo.id
+                            });
+
+                            const searchCheck = await callSimgosApi("search_patient", { query: targetRmBind, lid: senderInfo.id });
+                            const pxName = (searchCheck.status === "success" && searchCheck.data?.[0]?.namaPasien) ? searchCheck.data[0].namaPasien : targetRmBind;
+
+                            if (searchCheck.data?.[0]?.noHp) {
+                                registerIdentityMapping(senderInfo.id, searchCheck.data[0].noHp);
+                                cachePatientObject(senderInfo.id, searchCheck.data[0]);
+                            }
+
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `✅ *Tautan Berhasil!*\n\nIdentitas ${senderInfo.isLid ? 'LID' : 'WA'} Anda (*${senderInfo.id}*) kini resmi terdaftar pada pasien:\n👤 *Nama:* ${pxName}\n🔖 *No. RM:* ${targetRmBind}\n\nKetik *"HADIR"* atau *"RESCHEDULE"* dan nama lengkap pasien akan otomatis tercantum!`
+                            }, { quoted: msg });
+                        } catch (errBind) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal menautkan pasien:* ${errBind.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'followupnow':
+                    case 'follownow':
+                        let tglTarget = "auto";
+                        let toSender = false;
+                        let modeHNow = "h2";
+                        let isAllModes = false;
+
+                        for (const arg of args) {
+                            const lowerArg = arg.toLowerCase();
+                            if (lowerArg === 'me' || lowerArg === 'test' || lowerArg === 'myself') {
+                                toSender = true;
+                            } else if (lowerArg === 'h1') {
+                                modeHNow = "h1";
+                            } else if (lowerArg === 'h2') {
+                                modeHNow = "h2";
+                            } else if (lowerArg === 'all') {
+                                isAllModes = true;
+                            } else if (lowerArg !== 'auto') {
+                                tglTarget = arg;
+                            }
+                        }
+
+                        const modesToRun = isAllModes ? ["h2", "h1"] : [modeHNow];
+                        const sysCfgNow = await fetchSystemAIConfig();
+                        const delaySecInfo = sysCfgNow.delayChat || 60;
+                        const infoNotice = toSender
+                            ? `⚡ *[FOLLOWUP NOW]* Memulai penarikan data (${modesToRun.map(m => m.toUpperCase()).join(" & ")})... ⚠️ *Mode Simulasi:* Pesan pasien & laporan DPJP dialihkan *satu per satu* ke WhatsApp Anda (*${senderInfo.id}*).`
+                            : `⚡ *[FOLLOWUP NOW]* Memulai pengiriman (${modesToRun.map(m => m.toUpperCase()).join(" & ")}) secara *Satu-Satu* (Pesan Pasien ➔ Laporan DPJP)...\n⏳ *Jeda Anti-Spam:* ${delaySecInfo} detik / pasien (Rujukan Habis otomatis diskip).`;
+
+                        await sock.sendMessage(senderInfo.targetJid, { text: infoNotice }, { quoted: msg });
+
+                        try {
+                            for (const currentMode of modesToRun) {
+                                const blastResult = await executeFollowupBlast(sock, remoteJid, tglTarget, toSender, currentMode);
+
+                                if (blastResult.totalTarget === 0) {
+                                    await sock.sendMessage(senderInfo.targetJid, {
+                                        text: `ℹ️ Tidak ada antrean pasien kontrol berstatus *Pending* untuk target ${currentMode.toUpperCase()} tanggal ${blastResult.targetDate}.`
+                                    }, { quoted: msg });
+                                    continue;
+                                }
+
+                                let rekapSekarang = `🚀 *[FOLLOWUP NOW ${currentMode.toUpperCase()} SELESAI]*\n\n` +
+                                    `📅 *Target Kontrol:* ${blastResult.targetDate}\n` +
+                                    `👥 *Total Pasien Terjadwal:* ${blastResult.totalTarget}\n` +
+                                    `📲 *Pesan Pasien Terkirim (Aktif):* ${blastResult.pasienTerkirim}\n` +
+                                    `🚫 *Dilewati (Rujukan Habis):* ${blastResult.pasienSkipRujukanHabis}\n` +
+                                    `⚠️ *Nomor WA Tidak Terdaftar:* ${blastResult.pasienWaTidakTerdaftar}\n` +
+                                    `⚠️ *Pesan Pasien Gagal:* ${blastResult.pasienGagal}\n` +
+                                    `👨‍⚕️ *Laporan DPJP Terkirim:* ${blastResult.laporanDokterTerkirim} Laporan (Satu-Satu)\n`;
+
+                                if (blastResult.isSenderConverted) {
+                                    rekapSekarang += `🎯 *Penerima Diarahkan ke:* ${blastResult.convertedToPhone} (Tersimpan di Kolom 15 & 18)\n`;
+                                }
+
+                                rekapSekarang += `\n_Status Pasien dan Dokter di Google Spreadsheet telah diperbarui ke Terkirim._ 📊`;
+                                await sock.sendMessage(senderInfo.targetJid, { text: rekapSekarang }, { quoted: msg });
+                            }
+                        } catch (errNow) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal eksekusi Followup Now:* ${errNow.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'setjamfollowup':
+                        if (args.length === 0 || !args[0].includes(':')) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `⚠️ Format salah!\nGunakan format: *!setjamfollowup <HH:mm>*\nContoh: *!setjamfollowup 08:30*`
+                            }, { quoted: msg });
+                            break;
+                        }
+                        const [inputJam, inputMenit] = args[0].split(':');
+                        const parsedJam = parseInt(inputJam, 10);
+                        const parsedMenit = parseInt(inputMenit, 10);
+
+                        if (isNaN(parsedJam) || isNaN(parsedMenit) || parsedJam < 0 || parsedJam > 23 || parsedMenit < 0 || parsedMenit > 59) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: "❌ Jam atau menit tidak valid! Rentang 00:00 - 23:59." }, { quoted: msg });
+                            break;
+                        }
+
+                        botSettings.autoFollowupHour = String(parsedJam).padStart(2, '0');
+                        botSettings.autoFollowupMinute = String(parsedMenit).padStart(2, '0');
+                        saveSettings();
+
+                        await sock.sendMessage(senderInfo.targetJid, {
+                            text: `⏰ *Jadwal Auto Follow-up Diubah!*\n\nJam: *${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA*\nStatus: *${botSettings.autoFollowupSimgos ? 'AKTIF (ON)' : 'NONAKTIF (OFF)'}*`
+                        }, { quoted: msg });
+                        return;
+
+                    case 'followup':
+                    case 'cekfollowup':
+                        let modeHFU = "h2";
+                        let tglArg = "auto";
+
+                        for (const a of args) {
+                            const lowerA = a.toLowerCase();
+                            const hMatch = lowerA.match(/^h(\d+)$/);
+                            if (hMatch) {
+                                modeHFU = lowerA;
+                            } else if (lowerA !== 'auto') {
+                                tglArg = a;
+                            }
+                        }
+
+                        await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Mengambil data pasien kontrol siap follow-up (${modeHFU.toUpperCase()}) dari Google Spreadsheet..._` }, { quoted: msg });
+                        try {
+                            const resFollowup = await callSimgosApi("get_followup", { tgl: tglArg, mode: modeHFU });
+
+                            if (resFollowup.status !== "success" || !resFollowup.data || resFollowup.data.length === 0) {
+                                await sock.sendMessage(senderInfo.targetJid, {
+                                    text: `ℹ️ *Tidak ada antrean pasien kontrol berstatus Pending untuk target ${modeHFU.toUpperCase()} tanggal:* ${resFollowup.target_control_date || tglArg}.`
+                                }, { quoted: msg });
+                                break;
+                            }
+
+                            let textHasil = `📋 *DAFTAR PASIEN KONTROL (${modeHFU.toUpperCase()})*\n` +
+                                `📅 *Target Kontrol:* ${resFollowup.target_control_date}\n` +
+                                `👥 *Total Pasien:* ${resFollowup.total} orang\n\n`;
+
+                            resFollowup.data.forEach((px, idx) => {
+                                const iconRujuk = String(px.statusRujukan || "").toLowerCase().includes("habis") ? "🚫 Habis" : "✅ Aktif";
+                                textHasil += `${idx + 1}. *${px.namaPasien}* (RM: ${px.noRm})\n` +
+                                    `   📱 WA Pasien: ${px.noHp}\n` +
+                                    `   📋 Rujukan: *${iconRujuk}*\n` +
+                                    `   🏥 Status WA: ${px.statusWa} | Dokter: ${px.statusDokter}\n\n`;
+                            });
+
+                            if (modeHFU === "h1" || modeHFU === "h2") {
+                                textHasil += `👉 _Ketik *!followupnow ${modeHFU} me* untuk test ke Anda, atau *!followupnow ${modeHFU}* untuk blast._`;
+                            } else {
+                                textHasil += `👉 _Catatan: Pengecekan antrean kontrol ${modeHFU.toUpperCase()}. Blast WhatsApp otomatis dikhususkan untuk H-2 dan H-1 (!followupnow h2 / !followupnow h1)._`;
+                            }
+                            await sock.sendMessage(senderInfo.targetJid, { text: textHasil }, { quoted: msg });
+                        } catch (e) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal mengambil data:* ${e.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'gassfollowup':
+                    case 'kirimfollowup':
+                        let modeHGass = "h2";
+                        let tglKirim = "auto";
+                        let toSenderGass = false;
+
+                        for (const a of args) {
+                            const lowerG = a.toLowerCase();
+                            if (lowerG === 'me' || lowerG === 'test') toSenderGass = true;
+                            else if (lowerG === 'h1') modeHGass = "h1";
+                            else if (lowerG === 'h2') modeHGass = "h2";
+                            else if (lowerG !== 'auto') tglKirim = a;
+                        }
+
+                        const sysCfgGass = await fetchSystemAIConfig();
+                        const delaySecGass = sysCfgGass.delayChat || 60;
+                        await sock.sendMessage(senderInfo.targetJid, { 
+                            text: `🚀 _Memulai pengiriman pesan WhatsApp massal (${modeHGass.toUpperCase()}) secara *Satu-Satu* (Pesan Pasien ➔ Laporan DPJP)..._\n⏳ *Jeda Anti-Spam:* ${delaySecGass} detik / pasien agar aman dari pemblokiran WA.` 
+                        }, { quoted: msg });
+                        try {
+                            const blastResult = await executeFollowupBlast(sock, remoteJid, tglKirim, toSenderGass, modeHGass);
+
+                            if (blastResult.totalTarget === 0) {
+                                await sock.sendMessage(senderInfo.targetJid, { text: `ℹ️ Tidak ada antrean pasien Pending untuk target ${modeHGass.toUpperCase()} tanggal ${blastResult.targetDate}.` }, { quoted: msg });
+                                break;
+                            }
+
+                            let rekapAkhir = `✅ *EKSEKUSI FOLLOW-UP (${modeHGass.toUpperCase()}) SELESAI!*\n\n` +
+                                `📅 *Tgl Kontrol:* ${blastResult.targetDate}\n` +
+                                `👥 *Total Target Pasien:* ${blastResult.totalTarget}\n` +
+                                `📲 *Pasien Berhasil Dikirimi (Aktif):* ${blastResult.pasienTerkirim}\n` +
+                                `🚫 *Dilewati (Rujukan Habis):* ${blastResult.pasienSkipRujukanHabis}\n` +
+                                `⚠️ *Nomor WA Tidak Terdaftar:* ${blastResult.pasienWaTidakTerdaftar}\n` +
+                                `⚠️ *Pasien Gagal:* ${blastResult.pasienGagal}\n` +
+                                `👨‍⚕️ *Laporan DPJP Terkirim:* ${blastResult.laporanDokterTerkirim} Laporan (Satu-Satu)\n`;
+
+                            if (blastResult.isSenderConverted) {
+                                rekapAkhir += `🎯 *Catatan:* Pesan dialihkan ke WhatsApp pengirim (${blastResult.convertedToPhone}).\n`;
+                            }
+
+                            rekapAkhir += `\n_Seluruh status Pasien dan Dokter di Google Spreadsheet berhasil diperbarui ke Terkirim._ 📊`;
+                            await sock.sendMessage(senderInfo.targetJid, { text: rekapAkhir }, { quoted: msg });
+                        } catch (e) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Terjadi Kesalahan saat eksekusi:* ${e.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'caripasien':
+                        if (args.length === 0) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: "⚠️ Masukkan kata kunci pencarian!\nContoh: *!caripasien 00.06.32.89* atau *!caripasien M. AXA*" }, { quoted: msg });
+                            break;
+                        }
+                        const queryCari = args.join(" ");
+                        await sock.sendMessage(senderInfo.targetJid, { text: `🔍 _Mencari data pasien "${queryCari}"..._` }, { quoted: msg });
+                        try {
+                            const hasilCari = await callSimgosApi("search_patient", { query: queryCari });
+                            if (hasilCari.status !== "success" || !hasilCari.data || hasilCari.data.length === 0) {
+                                await sock.sendMessage(senderInfo.targetJid, { text: `❌ Data pasien dengan kata kunci *"${queryCari}"* tidak ditemukan.` }, { quoted: msg });
+                                break;
+                            }
+
+                            let txtMatch = `🎯 *HASIL PENCARIAN PASIEN (${hasilCari.total}):*\n\n`;
+                            hasilCari.data.slice(0, 5).forEach((p, idx) => {
+                                const iconRujuk = String(p.statusRujukan || "").toLowerCase().includes("habis") ? "🚫 Rujukan Habis" : "✅ Rujukan Aktif";
+                                txtMatch += `${idx + 1}. *${p.namaPasien}*\n` +
+                                    `   🔖 No. RM: ${p.noRm}\n` +
+                                    `   📅 Tgl Masuk: ${p.tglMasuk}\n` +
+                                    `   📅 Tgl Kontrol Semula: ${p.tglKontrol}\n` +
+                                    `   📅 Tgl Reschedule Baru: *${p.tglReschedule || '-'}*\n` +
+                                    `   📱 No. WA: ${p.noHp}\n` +
+                                    `   📋 Status Rujukan: *${iconRujuk}*\n` +
+                                    `   🔄 Status Reschedule: *${p.statusReschedule || '-'}*\n` +
+                                    `   🆔 No. LID: *${p.noLid || '-'}*\n` +
+                                    `   🎂 Umur / JK: ${p.umur} / ${p.jenisKelamin}\n\n`;
+                            });
+
+                            await sock.sendMessage(senderInfo.targetJid, { text: txtMatch }, { quoted: msg });
+                        } catch (e) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal mencari pasien:* ${e.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'reschedule':
+                        if (args.length < 2) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: "⚠️ Format salah!\nGunakan: *!reschedule <No.RM> <YYYY-MM-DD>*\nContoh: *!reschedule 00.06.32.89 2026-10-15*"
+                            }, { quoted: msg });
+                            break;
+                        }
+                        const rmResched = args[0];
+                        const dateResched = args[1];
+
+                        await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Memproses penjadwalan ulang No. RM ${rmResched} ke tanggal ${dateResched}..._` }, { quoted: msg });
+                        try {
+                            const reschedApi = await callSimgosApi("reschedule_patient", { noRm: rmResched, newDate: dateResched, no_lid: senderInfo.id });
+                            if (reschedApi.status === "success") {
+                                patientCacheMap.clear();
+                                await sock.sendMessage(senderInfo.targetJid, {
+                                    text: `✅ *Reschedule Berhasil!*\n\n` +
+                                        `🔖 No. RM: *${rmResched}*\n` +
+                                        `📅 Tanggal Reschedule Baru: *${dateResched}*\n` +
+                                        `📋 Status Database: *Reschedule (${dateResched})*\n` +
+                                        `💾 Kolom 19 (Tanggal Reschedule) berhasil diperbarui ke ${dateResched}.`
+                                }, { quoted: msg });
+                            } else {
+                                throw new Error(reschedApi.message);
+                            }
+                        } catch (e) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal Reschedule:* ${e.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'statskontrol':
+                    case 'statssimgos':
+                        await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Menghitung statistik follow-up klinik..._" }, { quoted: msg });
+                        try {
+                            const statsRes = await callSimgosApi("get_summary_stats");
+                            if (statsRes.status === "success") {
+                                const s = statsRes.statistics;
+                                const repStats = `📊 *STATISTIK KONTROL POLI SIMGOS*\n` +
+                                    `📅 Tanggal Server: ${statsRes.date}\n\n` +
+                                    `📁 Total Pasien Terdata: *${s.total_pasien_terdata} Pasien*\n` +
+                                    `📥 Di-scrape Hari Ini: *${s.scraped_hari_ini} Pasien*\n\n` +
+                                    `*Status Rujukan:* \n` +
+                                    `✅ Rujukan Aktif: ${s.rujukan_aktif || 0} Pasien\n` +
+                                    `🚫 Rujukan Habis: ${s.rujukan_habis || 0} Pasien\n` +
+                                    `🔄 Total Reschedule: ${s.total_reschedule || 0} Pasien\n\n` +
+                                    `*Status Follow-up H-2:*\n` +
+                                    `⏳ Pending: ${s.h2_wa_pending} | ✅ Terkirim/Hadir: ${s.h2_wa_terkirim}\n\n` +
+                                    `*Status Follow-up H-1 (Pengingat Besok):*\n` +
+                                    `⏳ Pending: ${s.h1_wa_pending} | ✅ Terkirim/Hadir: ${s.h1_wa_terkirim}\n\n` +
+                                    `🏥 *Faskes:* ${statsRes.config.instansi}\n` +
+                                    `🦷 *Klinik:* ${statsRes.config.poli}\n` +
+                                    `⏰ *Jadwal Auto Blast:* Jam ${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA`;
+                                await sock.sendMessage(senderInfo.targetJid, { text: repStats }, { quoted: msg });
+                            } else throw new Error(statsRes.message);
+                        } catch (e) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal mengambil statistik:* ${e.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'settingssimgos':
+                        try {
+                            const cfg = await callSimgosApi("get_active_prompt");
+                            if (cfg.status === "success") {
+                                const c = cfg.config;
+                                let txtCfg = `⚙️ *KONFIGURASI SISTEM SIMGOS KONTROL*\n\n` +
+                                    `🕒 Jam Auto Blast: *${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA*\n` +
+                                    `🔄 Status Auto Follow-up: *${botSettings.autoFollowupSimgos ? 'AKTIF (ON)' : 'NONAKTIF (OFF)'}*\n` +
+                                    `⏳ Jeda Anti-Spam Blast: *${c.delayChat || 60} Detik / Pasien & Dokter*\n` +
+                                    `🏥 Instansi: ${c.instansi}\n` +
+                                    `🦷 Poli: ${c.poli}\n\n` +
+                                    `*Dokter DPJP Terdaftar:*\n`;
+                                c.doctors.forEach((doc, i) => {
+                                    txtCfg += `${i + 1}. ${doc.name} (${doc.wa})\n`;
+                                });
+                                await sock.sendMessage(senderInfo.targetJid, { text: txtCfg }, { quoted: msg });
+                            }
+                        } catch (e) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Error:* ${e.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'templatesimgos':
+                        try {
+                            const sysCfg = await fetchSystemAIConfig();
+                            let tplTxt = `📝 *TEMPLATE PESAN SPREADSHEET (CUSTOM_FORMAT):*\n\n`;
+                            for (const [kode, isi] of Object.entries(sysCfg.templates)) {
+                                tplTxt += `🔖 *Kode:* \`${kode}\`\n${isi}\n\n-------------------------\n\n`;
+                            }
+                            await sock.sendMessage(senderInfo.targetJid, { text: tplTxt }, { quoted: msg });
+                        } catch (e) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Error:* ${e.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'autofollowup':
+                        if (args[0] === 'on' || args[0] === 'off') {
+                            botSettings.autoFollowupSimgos = args[0] === 'on';
+                            saveSettings();
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `⚙️ Fitur *Auto Follow-up Kontrol (${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA)* disetel ke: *${args[0].toUpperCase()}*`
+                            }, { quoted: msg });
+                        } else {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `Status Auto Follow-up: *${botSettings.autoFollowupSimgos ? 'AKTIF (ON)' : 'NONAKTIF (OFF)'}*\nJam Blast: *${botSettings.autoFollowupHour}:${botSettings.autoFollowupMinute} WITA*\nGunakan: *!autofollowup on*, *!autofollowup off*, atau *!setjamfollowup <HH:mm>*`
+                            }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'setdelaychat':
+                    case 'setdelay':
+                    case 'delaychat':
+                        if (args.length === 0 || isNaN(parseInt(args[0], 10))) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `⚠️ Format salah!\nGunakan format: *!setdelaychat <detik>*\nContoh: *!setdelaychat 60* (Disarankan 45-60 detik agar aman dari spam WA).`
+                            }, { quoted: msg });
+                            break;
+                        }
+                        const newDelaySec = Math.max(5, parseInt(args[0], 10));
+                        try {
+                            await callSimgosApi("update_setting", { param: "DELAY_CHAT", value: String(newDelaySec) });
+                            cachedSystemConfig.delayChat = newDelaySec;
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `✅ *JEDA ANTI-SPAM CHAT BLAST BERHASIL DIUPDATE!*\n\n⏳ *Delay Baru:* *${newDelaySec} detik* / pasien & dokter.\n💾 *Penyimpanan:* Tersimpan di Sheet 'SETTING' (Parameter: DELAY_CHAT).`
+                            }, { quoted: msg });
+                        } catch (errDelay) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal memperbarui delay di Sheet:* ${errDelay.message}` }, { quoted: msg });
+                        }
+                    case 'fixsender':
+                    case 'syncsender':
+                        await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Menyinkronkan Kolom O (No Sender) di Google Spreadsheet ke format No WA Asli (628xxx)..._" }, { quoted: msg });
+                        try {
+                            const fixRes = await callSimgosApi("fix_sender_columns");
+                            if (fixRes && fixRes.status === "success") {
+                                await sock.sendMessage(senderInfo.targetJid, {
+                                    text: `✅ *STANDARISASI KOLOM O (NO SENDER) BERHASIL!*\n\n` +
+                                        `📊 *Total Baris Pasien Dirapikan:* ${fixRes.fixedCount} baris\n` +
+                                        `📱 *Kolom O (15):* Resmi menyimpan No WA Asli (*628xxxxxxxxxx*)\n` +
+                                        `🆔 *Kolom R (18):* Tetap aman menyimpan No LID WhatsApp (*1106...*) 📊`
+                                }, { quoted: msg });
+                            } else throw new Error(fixRes?.message || "Gagal sinkronisasi");
+                        } catch (e) {
+                            await sock.sendMessage(senderInfo.targetJid, { text: `❌ *Gagal menyinkronkan Kolom O:* ${e.message}` }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'getprompt':
+                        const activeCfg = await fetchSystemAIConfig();
+                        const geminiMasked = activeCfg.geminiApiKey ? `${activeCfg.geminiApiKey.substring(0, 8)}...${activeCfg.geminiApiKey.slice(-4)}` : "TIDAK TERPASANG";
+                        const groqMasked = activeCfg.groqApiKey ? `${activeCfg.groqApiKey.substring(0, 8)}...${activeCfg.groqApiKey.slice(-4)}` : "TIDAK TERPASANG";
+
+                        await sock.sendMessage(senderInfo.targetJid, {
+                            text: `📋 *SYSTEM PROMPT AKTIF (RSKD GIGI DAN MULUT PROV. SULSEL):*\n\n"${activeCfg.prompt}"\n\n` +
+                                `🤖 *KREDENSIAL AI & MULTI-CASCADE PIPELINE:*\n` +
+                                `• Engine Utama (VPS 9Router): *${activeCfg.nineRouterUrl}*\n` +
+                                `• Model Utama: *${activeCfg.nineRouterModel}*\n` +
+                                `• Model Fallback Antigravity: *${activeCfg.nineRouterFallbackModel}*\n` +
+                                `• Cadangan 1 (Gemini Direct): *${activeCfg.geminiModel}* (${geminiMasked})\n` +
+                                `• Cadangan 2 (Groq AI): *${activeCfg.groqModel}* (${groqMasked})\n` +
+                                `• Total Template: *${Object.keys(activeCfg.templates).length} Template*\n\n` +
+                                `_Ketik *!test9router* untuk memeriksa koneksi atau *!test9router ag* untuk menguji Antigravity._`
+                        }, { quoted: msg });
+                        return;
+
+                    case 'clearpromptcache':
+                        cachedSystemConfig = {
+                            prompt: '',
+                            templates: {},
+                            instansi: 'RSKD Gigi dan Mulut Prov. Sulsel',
+                            poli: 'Poli Konservasi dan Endodonsi',
+                            dpjpUtama: 'drg. Hj. Kurniawaty, Sp.KG',
+                            dpjpUtamaWa: '6282291675363',
+                            dpjpPendamping: 'drg. M. Aksa Arsyad',
+                            geminiApiKey: '',
+                            geminiModel: 'gemini-3.5-flash',
+                            groqApiKey: '',
+                            groqModel: 'openai/gpt-oss-120b',
+                            nineRouterUrl: normalize9RouterUrl(process.env.NINEROUTER_URL),
+                            nineRouterApiKey: (process.env.NINEROUTER_API_KEY || '9router').trim().replace(/^["']|["']$/g, ''),
+                            nineRouterModel: sanitize9RouterModel(process.env.NINEROUTER_MODEL || 'gemini-3.8-flash'),
+                            nineRouterFallbackModel: sanitize9RouterModel(process.env.NINEROUTER_FALLBACK_MODEL || 'ag/gemini-3.8-flash-high'),
+                            doctors: [],
+                            delayChat: 60,
+                            timestamp: 0
+                        };
+                        lidToPhoneMap.clear();
+                        phoneToLidMap.clear();
+                        patientCacheMap.clear();
+                        conversationSessions.clear();
+                        if (fs.existsSync(lidCacheFile)) {
+                            try { fs.unlinkSync(lidCacheFile); } catch (e) { }
+                        }
+                        await prewarmDoctorAndOwnerLids(sock);
+                        await convertAllPatientsToLid(sock, true);
+                        await sock.sendMessage(senderInfo.targetJid, { text: "🔄 Seluruh Cache Prompt, Template, Data Pasien & Konfigurasi 9Router VPS (Gemini & Antigravity) berhasil disegarkan!" }, { quoted: msg });
+                        return;
+
+                    case 'testapirskdgm':
+                    case 'testapivercel':
+                    case 'testrskdgm':
+                    case 'pingrskdgm':
+                        await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Menguji kecepatan respon REST API RSKDGM Vercel..._` }, { quoted: msg });
+                        try {
+                            const startT = Date.now();
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+                            const pingUrl = `${SIMGOS_API_URL}?action=ping&_t=${Date.now()}`;
+                            const res = await fetch(pingUrl, {
+                                method: 'GET',
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'User-Agent': 'RSKDGM-WhatsApp-Bot-V8'
+                                },
+                                signal: controller.signal
+                            });
+                            clearTimeout(timeoutId);
+
+                            const latensi = Date.now() - startT;
+                            const textData = await res.text();
+                            let data = {};
+                            try { data = JSON.parse(textData); } catch (e) { }
+
+                            let speedCategory = "⚡⚡⚡ [ULTRA SUPER FAST]";
+                            if (latensi > 300) speedCategory = "⏳ [CLOUD LATENCY / COLD START]";
+                            else if (latensi > 100) speedCategory = "⚡ [SUPER FAST]";
+
+                            const reportMsg =
+                                `⚡ *HASIL TEST KECEPATAN REST API RSKDGM (VERCEL)* ⚡\n\n` +
+                                `⏱️ *Kecepatan Respon:* *${latensi} ms* ${speedCategory}\n` +
+                                `📶 *HTTP Status:* *${res.status} ${res.statusText || 'OK'}*\n` +
+                                `🌐 *Endpoint:* \`${SIMGOS_API_URL}\`\n\n` +
+                                `📋 *Informasi Server Portal:*\n` +
+                                `🏥 *Instansi:* ${data.instansi || 'RSKD Gigi dan Mulut Prov. Sulsel'}\n` +
+                                `🦷 *Unit:* ${data.unit || 'Poli Konservasi dan Endodonsi'}\n` +
+                                `💾 *Layer 1 (Upstash Redis):* ${data.layer1_redis || 'Active'}\n` +
+                                `☁️ *Layer 2 (Google Sheets):* ${data.layer2_gas || 'Configured'}\n` +
+                                `👥 *Total Pasien Terindeks:* *${data.totalPatients || 0} Pasien*\n` +
+                                `⚡ *Server Time:* ${data.server_time || getWitaTimeGreeting().fullWitaStr}\n\n` +
+                                `_Koneksi database RSKDGM Vercel berjalan sangat gesit dan stabil!_ 🚀`;
+
+                            await sock.sendMessage(senderInfo.targetJid, { text: reportMsg }, { quoted: msg });
+                        } catch (errApi) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `❌ *Gagal Menguji REST API RSKDGM Vercel:*\n${errApi.message}\n\n🌐 *URL:* \`${SIMGOS_API_URL}\``
+                            }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'testapigas':
+                    case 'testgas':
+                    case 'pinggas':
+                        await sock.sendMessage(senderInfo.targetJid, { text: `⏳ _Menguji kecepatan respon REST API Google Apps Script (GAS)..._` }, { quoted: msg });
+                        try {
+                            const startTGas = Date.now();
+                            const controllerGas = new AbortController();
+                            const timeoutIdGas = setTimeout(() => controllerGas.abort(), 35000);
+
+                            const gasPingUrl = `${GAS_URL_SIMGOS_FALLBACK}${GAS_URL_SIMGOS_FALLBACK.includes('?') ? '&' : '?'}action=ping&_t=${Date.now()}`;
+                            const resGas = await fetch(gasPingUrl, {
+                                method: 'GET',
+                                redirect: 'follow',
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'User-Agent': 'RSKDGM-WhatsApp-Bot-V8'
+                                },
+                                signal: controllerGas.signal
+                            });
+                            clearTimeout(timeoutIdGas);
+
+                            const latensiGas = Date.now() - startTGas;
+                            const textDataGas = await resGas.text();
+
+                            if (!textDataGas || textDataGas.trim().startsWith("<")) {
+                                throw new Error(`Google Apps Script mengembalikan halaman HTML. Pastikan Web App GAS di-deploy dengan akses 'Anyone' (Siapa Saja).`);
+                            }
+
+                            let dataGas = {};
+                            try { dataGas = JSON.parse(textDataGas); } catch (e) { }
+
+                            let speedCategoryGas = "⚡ [NORMAL GAS]";
+                            if (latensiGas > 3000) speedCategoryGas = "⏳ [GAS COLD START]";
+                            else if (latensiGas < 1000) speedCategoryGas = "⚡⚡ [FAST GAS]";
+
+                            const reportGasMsg =
+                                `☁️ *HASIL TEST KECEPATAN REST API GOOGLE APPS SCRIPT (GAS)* ☁️\n\n` +
+                                `⏱️ *Kecepatan Respon:* *${latensiGas} ms* ${speedCategoryGas}\n` +
+                                `📶 *HTTP Status:* *${resGas.status} ${resGas.statusText || 'OK'}*\n` +
+                                `🌐 *Endpoint:* \`${GAS_URL_SIMGOS_FALLBACK.substring(0, 60)}...\`\n\n` +
+                                `📋 *Informasi Google Spreadsheet:*\n` +
+                                `🏥 *Instansi:* ${dataGas.instansi || 'RSKD Gigi dan Mulut Prov. Sulsel'}\n` +
+                                `💾 *Penyimpanan:* Google Spreadsheet (Layer 2)\n` +
+                                `📊 *Status Service:* ${dataGas.service || 'Online'}\n` +
+                                `⚡ *Waktu Server:* ${dataGas.server_time || getWitaTimeGreeting().fullWitaStr}\n\n` +
+                                `_Gunakan REST API Vercel (!testapirskdgm) untuk performa hingga 10x lebih cepat!_ 💡`;
+
+                            await sock.sendMessage(senderInfo.targetJid, { text: reportGasMsg }, { quoted: msg });
+                        } catch (errGas) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `❌ *Gagal Menguji REST API GAS:*\n${errGas.message}\n\n🌐 *URL:* \`${GAS_URL_SIMGOS_FALLBACK}\``
+                            }, { quoted: msg });
+                        }
+                        return;
+
+                    case 'ping':
+                        const pingProcess = Date.now() - (msg.messageTimestamp * 1000);
+                        await sock.sendMessage(senderInfo.targetJid, { text: `🏓 *Pong!*\n⚡ *Kecepatan:* ${pingProcess} ms` }, { quoted: msg });
+                        return;
+
+                    case 'runtime':
+                        const uptime = process.uptime();
+                        await sock.sendMessage(senderInfo.targetJid, {
+                            text: `⏳ *Bot Uptime:* ${getRelativeTime(uptime)}\n🖥️ *OS Memory:* ${Math.round(os.freemem() / 1024 / 1024)}MB / ${Math.round(os.totalmem() / 1024 / 1024)}MB\n⚡ Server Time: ${getWitaTimeGreeting().fullWitaStr}`
+                        }, { quoted: msg });
+                        return;
+
+                    case 'sticker':
+                    case 's':
+                        if (typeof handleStickerCommand === 'function') {
+                            await handleStickerCommand(sock, msg);
+                        }
+                        return;
+
+                    default:
+                        await sock.sendMessage(senderInfo.targetJid, {
+                            text: `❓ *Perintah Tidak Dikenali: \`!${command}\`*\n\nKetik *!menu* atau *!help* untuk melihat daftar seluruh perintah resmi bot RSKDGM.`
+                        }, { quoted: msg });
+                        return;
                 }
             }
 
-            // Tampilkan indikator mengetik di WhatsApp
-            try {
-                await sock.sendPresenceUpdate('composing', senderInfo.targetJid);
-            } catch (e) { }
-
-            // Verifikasi identitas mahasiswa dari database Redis
-            const studentObj = await smartVerifyStudent(sock, senderInfo, trimmedText);
-            const intent = detectStudentIntent(trimmedText);
-            const isAdmin = ADMIN_JID_LIST.some(adminJid => {
-                const adminId = adminJid.replace(/@.*$/, '');
-                return senderInfo.id.includes(adminId);
-            });
-
-            // =====================================================================
-            // ROUTING PERINTAH INTERAKTIF
-            // =====================================================================
-            switch (intent) {
-                case 'menu': {
-                    const wita = getWitaTimeGreeting();
-                    const greetingLine = studentObj
-                        ? `Halo, *${studentObj.name}* (*${studentObj.nim}*) - Kelompok *${studentObj.clusterId || studentObj.cluster || '-'}*`
-                        : `Halo, *${pushName}*!`;
-
-                    const menuText = `🏛️ *PUSAT LAYANAN RESMI DEPT. RADIOLOGI KEDOKTERAN GIGI*\n` +
-                        `*Fakultas Kedokteran Gigi - Universitas Muslim Indonesia*\n\n` +
-                        `${wita.greeting}! ${greetingLine}\n\n` +
-                        `Berikut adalah daftar perintah interaktif bot presensi:\n\n` +
-                        `📋 *PERINTAH MAHASISWA:*\n` +
-                        `• *!absen* : Cek status & countdown presensi hari ini\n` +
-                        `• *!jadwal* : Jadwal live & jam operasional sesi praktikum\n` +
-                        `• *!lokasi* : Koordinat GPS resmi kampus (Geofence)\n` +
-                        `• *!rekap* : Ringkasan kehadiran stase Anda\n` +
-                        `• *!kalender* : Jadwal kalender akademik & hari libur\n` +
-                        `• *!logout* : Pelepasan ikatan perangkat (jika ganti HP)\n` +
-                        `• *!sesi* : Detail teknis data sesi praktikum terkini\n` +
-                        `• *!reset* : Reset percakapan dengan Asisten AI RKG\n\n` +
-                        (isAdmin ? `👑 *PERINTAH ADMINISTRATOR:*\n• *!sync* : Muat ulang jadwal sesi seketika dari Redis Cloud\n• *!broadcast <teks>* : Kirim pengumuman ke semua mahasiswa\n• *!broadcastjadwal* : Broadcast jadwal sesi terbaru ke semua mahasiswa\n• *!stats* : Rekapitulasi kehadiran harian\n• *!ping* : Cek latensi dan status bot\n\n` : '') +
-                        `💬 *Tanya Jawab AI:*\n` +
-                        `Anda dapat langsung mengetikkan pertanyaan seputar radiografi gigi, interpretasi lesi, SOP stase, atau kendala portal.\n\n` +
-                        `🌐 *Portal Web Absensi:* ${WEB_PORTAL_URL}`;
-
-                    await sock.sendMessage(senderInfo.targetJid, { text: menuText });
-                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+            // Command Guarding: Jika pesan tidak diawali '!', periksa apakah kata pertamanya adalah command di menu !help
+            // Mencegah perintah bot dijawab oleh AI secara keliru!
+            const cleanRawText = text.trim();
+            const firstWord = cleanRawText.split(/[\s\n]+/)[0]?.toLowerCase().replace(/^[!./]/, '');
+            if (firstWord && BOT_COMMAND_SET.has(firstWord)) {
+                if (firstWord === 'menu' || firstWord === 'help') {
+                    const helpHint = `*🤖 BOT KONTROL RSKDGM (H-2 & H-1 SIMGOS) 🤖*\n\n` +
+                        `*Gunakan tanda seru (!)* di awal perintah untuk menjalankan command sistem, contoh:\n` +
+                        `* !menu / !help* - Menampilkan daftar perintah\n` +
+                        `* !followup h1 / h2 / h3* - Cek antrean pasien kontrol\n` +
+                        `* !followupnow h1 / h2* - Eksekusi blast kontrol H-1 / H-2\n` +
+                        `* !statskontrol* - Cek ringkasan statistik kontrol\n` +
+                        `* !settingssimgos* - Cek status konfigurasi & DPJP\n` +
+                        `* !caripasien <Nama/RM>* - Pencarian data pasien\n\n` +
+                        `Ketik *!menu* untuk melihat panduan perintah lengkap.`;
+                    await sock.sendMessage(senderInfo.targetJid, { text: helpHint }, { quoted: msg });
                     return;
-                }
-
-                case 'absen': {
-                    const wita = getWitaTimeGreeting();
-                    const rawSessions = await callDbGet('axaxyz_sessions') || [];
-                    const enriched = Array.isArray(rawSessions)
-                        ? rawSessions.map(s => enrichSessionWithWitaStatus(s, wita.hours, parseInt(wita.minutes, 10)))
-                        : [];
-
-                    const activeRunning = enriched.find(s => s.isRunningNow);
-                    const upcoming = enriched.find(s => s.isUpcoming);
-
-                    let sessionStatus = "";
-                    if (activeRunning) {
-                        sessionStatus = `🟢 *SESI PRESENSI SEDANG DIBUKA!*\n` +
-                            `• *Nama Sesi:* ${activeRunning.name}\n` +
-                            `• *Jam Operasional:* ${activeRunning.startStr} - ${activeRunning.endStr} WITA\n` +
-                            `• *Batas Akhir Presensi (Toleransi):* ${activeRunning.closingTimeStr} WITA\n` +
-                            `• *Sisa Waktu:* ⏳ *${activeRunning.remainingMinutes} Menit Tersisa!* Segera lakukan presensi sekarang!`;
-                    } else if (upcoming) {
-                        sessionStatus = `🟡 *SESI BELUM DIBUKA*\n` +
-                            `Sesi berikutnya (*${upcoming.name}*) akan dibuka pada pukul *${upcoming.startStr} WITA* (kurang lebih ${upcoming.minutesToStart} menit lagi).\n` +
-                            `_Silakan bersiap di area kampus FKG sebelum sesi dibuka._`;
-                    } else {
-                        sessionStatus = `🔴 *TIDAK ADA SESI AKTIF SAAT INI*\n` +
-                            `Sesi praktikum saat ini belum dibuka atau telah berakhir pada jam ${wita.timeStr}.\n` +
-                            `Ketik *!jadwal* untuk melihat seluruh agenda sesi praktikum hari ini.`;
-                    }
-
-                    const absenText = `📝 *PANDUAN & STATUS PRESENSI DEPT. RKG*\n` +
-                        `*Fakultas Kedokteran Gigi - Universitas Muslim Indonesia*\n\n` +
-                        `⏰ *Waktu Sekarang:* ${wita.fullWitaStr}\n\n` +
-                        `${sessionStatus}\n\n` +
-                        `📌 *Langkah Melakukan Presensi:*\n` +
-                        `1. Pastikan GPS HP Anda aktif dengan akurasi tinggi.\n` +
-                        `2. Buka portal resmi: ${WEB_PORTAL_URL}\n` +
-                        `3. Masukkan NIM Anda dan ambil foto selfie verifikasi di lokasi kampus.\n` +
-                        `4. Klik tombol *Kirim Absensi*.\n\n` +
-                        `_Catatan: Presensi wajib dilakukan di dalam radius geofence resmi gedung kampus FKG UMI._`;
-
-                    await sock.sendMessage(senderInfo.targetJid, { text: absenText });
-                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
-                    return;
-                }
-
-                case 'jadwal': {
-                    const wita = getWitaTimeGreeting();
-                    const rawSessions = await callDbGet('axaxyz_sessions') || [];
-                    if (!Array.isArray(rawSessions) || rawSessions.length === 0) {
-                        await sock.sendMessage(senderInfo.targetJid, {
-                            text: "⚠️ *BELUM ADA JADWAL SESI*\n\nSaat ini belum ada data jadwal sesi praktikum yang terdaftar di portal web."
-                        });
-                        return;
-                    }
-
-                    const enriched = rawSessions.map(s => enrichSessionWithWitaStatus(s, wita.hours, parseInt(wita.minutes, 10)));
-                    const activeRunning = enriched.find(s => s.isRunningNow);
-                    const upcoming = enriched.find(s => s.isUpcoming);
-
-                    let scheduleList = `📅 *JADWAL SESI & WAKTU PRESENSI DEPT. RKG*\n` +
-                        `*Fakultas Kedokteran Gigi - Universitas Muslim Indonesia*\n\n` +
-                        `⏰ *Waktu Saat Ini:* ${wita.timeStr}\n` +
-                        `📆 *Hari & Tanggal:* ${wita.fullWitaStr.split(' Pukul ')[0]}\n\n`;
-
-                    if (activeRunning) {
-                        scheduleList += `🟢 *SESI SEDANG BERLANGSUNG:*\n` +
-                            `• *${activeRunning.name}*\n` +
-                            `• Jam Sesi: *${activeRunning.startStr} - ${activeRunning.endStr} WITA*\n` +
-                            `• Batas Toleransi: *${activeRunning.closingTimeStr} WITA*\n` +
-                            `• Sisa Waktu: *⏳ ${activeRunning.remainingMinutes} Menit Lagi!*\n\n`;
-                    } else if (upcoming) {
-                        scheduleList += `🟡 *SESI BERIKUTNYA SEGERA DIBUKA:*\n` +
-                            `• *${upcoming.name}*\n` +
-                            `• Jam Sesi: *${upcoming.startStr} - ${upcoming.endStr} WITA*\n` +
-                            `• Mulai dalam: *${upcoming.minutesToStart} menit lagi*\n\n`;
-                    } else {
-                        scheduleList += `⚪ *STATUS:* Saat ini tidak ada sesi praktikum yang sedang berlangsung.\n\n`;
-                    }
-
-                    scheduleList += `📋 *DAFTAR SELURUH SESI PRAKTIKUM:*\n`;
-                    enriched.forEach((s, idx) => {
-                        let badge = s.isRunningNow ? "🟢 [SEDANG BUKA]" : (s.isUpcoming ? "🟡 [SEGERA BUKA]" : (s.active ? "🔴 [SELESAI]" : "⚪ [NON-AKTIF]"));
-                        scheduleList += `${idx + 1}. *${s.name}* ${badge}\n` +
-                            `   • Jam Sesi: ${s.startStr} - ${s.endStr} WITA\n` +
-                            `   • Batas Toleransi: ${s.closingTimeStr} WITA\n`;
-                    });
-                    scheduleList += `\n🌐 *Portal Absensi:* ${WEB_PORTAL_URL}\n` +
-                        `_Ketik *!absen* untuk panduan & status presensi langsung._`;
-
-                    await sock.sendMessage(senderInfo.targetJid, { text: scheduleList });
-                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
-                    return;
-                }
-
-                case 'sesi': {
-                    const rawSessions = await callDbGet('axaxyz_sessions') || [];
-                    const wita = getWitaTimeGreeting();
-                    const enriched = Array.isArray(rawSessions)
-                        ? rawSessions.map(s => enrichSessionWithWitaStatus(s, wita.hours, parseInt(wita.minutes, 10)))
-                        : [];
-
-                    const jsonStr = JSON.stringify(enriched, null, 2);
-                    const displayText = `📋 *DATA JSON SESI PRAKTIKUM (WITA: ${wita.timeStr})*\n\n` +
-                        `\`\`\`json\n${jsonStr.length > 1500 ? jsonStr.substring(0, 1490) + '...\n}' : jsonStr}\`\`\``;
-
-                    await sock.sendMessage(senderInfo.targetJid, { text: displayText });
-                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
-                    return;
-                }
-
-                case 'lokasi': {
-                    const gf = await callDbGet('axaxyz_geofence');
-                    if (!gf) {
-                        await sock.sendMessage(senderInfo.targetJid, { text: "⚠️ Titik koordinat lokasi kampus belum dikonfigurasi di database." });
-                        return;
-                    }
-
-                    const mapsUrl = `https://www.google.com/maps?q=${gf.lat},${gf.lng}`;
-                    const locText = `📍 *TITIK KOORDINAT GEOFENCE RESMI KAMPUS*\n\n` +
-                        `🏢 *Nama Lokasi:* ${gf.name || 'Gedung FKG Kampus Pusat'}\n` +
-                        `🌐 *Koordinat GPS:* \`${gf.lat}, ${gf.lng}\`\n` +
-                        `🎯 *Radius Maksimal:* *${gf.radius} Meter*\n` +
-                        `🗺️ *Tautan Google Maps:* ${mapsUrl}\n\n` +
-                        `_Pastikan GPS pada perangkat Anda aktif dan memiliki tingkat akurasi tinggi saat membuka portal web._`;
-
-                    await sock.sendMessage(senderInfo.targetJid, { text: locText });
-                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
-                    return;
-                }
-
-                case 'rekap': {
-                    if (!studentObj) {
-                        await sock.sendMessage(senderInfo.targetJid, {
-                            text: `⚠️ Nomor WhatsApp Anda (*${senderInfo.id}*) belum terhubung dengan akun mahasiswa Dept. RKG.\n` +
-                                `Silakan kirimkan pesan berupa *NIM Anda* (contoh: \`16120200021\`) untuk mengaitkan akun Anda terlebih dahulu.`
-                        });
-                        return;
-                    }
-
-                    const logs = await callDbGet('axaxyz_logs') || [];
-                    const myLogs = logs.filter(l => l.nim === studentObj.nim || l.studentId === studentObj.id);
-
-                    const hadirTepat = myLogs.filter(l => l.status === 'Hadir' || l.status === 'Tepat Waktu').length;
-                    const terlambat = myLogs.filter(l => l.status === 'Terlambat').length;
-                    const alfa = myLogs.filter(l => l.status === 'Alfa' || l.status === 'Tidak Hadir').length;
-
-                    const rekapText = `📊 *REKAPITULASI KEHADIRAN MAHASISWA*\n\n` +
-                        `👤 *Nama:* ${studentObj.name}\n` +
-                        `🔢 *NIM:* ${studentObj.nim}\n` +
-                        `🏷️ *Kelompok Stase:* ${studentObj.clusterId || studentObj.cluster || '-'}\n\n` +
-                        `📈 *Statistik Kehadiran:*\n` +
-                        `• Hadir Tepat Waktu: *${hadirTepat}* Sesi ✅\n` +
-                        `• Terlambat: *${terlambat}* Sesi 🟡\n` +
-                        `• Tidak Hadir (Alfa): *${alfa}* Sesi ❌\n` +
-                        `• Total Log Terdata: *${myLogs.length}* Rekaman\n\n` +
-                        `Lihat riwayat presensi detail di: ${WEB_PORTAL_URL}`;
-
-                    await sock.sendMessage(senderInfo.targetJid, { text: rekapText });
-                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
-                    return;
-                }
-
-                case 'logout': {
-                    if (!studentObj) {
-                        await sock.sendMessage(senderInfo.targetJid, {
-                            text: `⚠️ Akun mahasiswa Anda belum terdata. Silakan ketik NIM Anda terlebih dahulu.`
-                        });
-                        return;
-                    }
-
-                    // Reset deviceId di database Redis
-                    const allStudents = await callDbGet('axaxyz_students') || [];
-                    const updated = allStudents.map(st => {
-                        if (st.id === studentObj.id || st.nim === studentObj.nim) {
-                            return { ...st, deviceId: null };
-                        }
-                        return st;
-                    });
-
-                    await callDbSet('axaxyz_students', updated);
-                    cacheStudentObject(studentObj.nim, { ...studentObj, deviceId: null });
-
-                    const logoutMsg = `🔓 *PELEPASAN PERANGKAT (LOGOUT) BERHASIL*\n\n` +
-                        `Halo *${studentObj.name}* (*${studentObj.nim}*),\n` +
-                        `Kunci perangkat (DeviceId) pada akun presensi Anda telah berhasil direset.\n\n` +
-                        `Anda sekarang dapat melakukan login dan presensi kembali menggunakan perangkat/browser baru di: ${WEB_PORTAL_URL}`;
-
-                    await sock.sendMessage(senderInfo.targetJid, { text: logoutMsg });
-                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
-                    return;
-                }
-
-                case 'kalender': {
-                    const holidays = await callDbGet('axaxyz_holidays') || [];
-                    if (holidays.length === 0) {
-                        await sock.sendMessage(senderInfo.targetJid, { text: "📅 Belum ada agenda libur khusus atau jadwal penyesuaian di kalender akademik." });
-                        return;
-                    }
-
-                    let holidayText = `📅 *AGENDA LIBUR & PENYESUAIAN STASE RKG*\n\n`;
-                    holidays.slice(0, 10).forEach((h, idx) => {
-                        holidayText += `${idx + 1}. *${h.date}* : ${h.description || h.name}\n`;
-                    });
-                    holidayText += `\nPortal Absensi: ${WEB_PORTAL_URL}`;
-
-                    await sock.sendMessage(senderInfo.targetJid, { text: holidayText });
-                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
-                    return;
-                }
-
-                case 'reset': {
-                    userSessions.delete(senderInfo.id);
+                } else {
                     await sock.sendMessage(senderInfo.targetJid, {
-                        text: "🔄 *Memori sesi percakapan Anda telah direset bersih.* Silakan ajukan pertanyaan atau perintah baru!"
-                    });
-                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
-                    return;
-                }
-
-                case 'broadcast': {
-                    if (!isAdmin) {
-                        await sock.sendMessage(senderInfo.targetJid, { text: "⛔ Perintah ini hanya dapat diakses oleh Staf Pengajar / Administrator Dept. RKG." });
-                        return;
-                    }
-
-                    const broadcastContent = trimmedText.replace(/^!broadcast\s+/i, '').trim();
-                    if (!broadcastContent) {
-                        await sock.sendMessage(senderInfo.targetJid, { text: "⚠️ Format salah. Gunakan: `!broadcast <isi pesan pengumuman>`" });
-                        return;
-                    }
-
-                    const allStudents = await callDbGet('axaxyz_students') || [];
-                    const targets = allStudents.filter(s => s.phone);
-
-                    if (targets.length === 0) {
-                        await sock.sendMessage(senderInfo.targetJid, { text: "⚠️ Tidak ditemukan mahasiswa yang memiliki nomor telepon terdaftar." });
-                        return;
-                    }
-
-                    let sentCount = 0;
-                    const wita = getWitaTimeGreeting();
-                    const formattedAnnouncement = `📢 *PENGUMUMAN RESMI DEPT. RADIOLOGI KEDOKTERAN GIGI*\n` +
-                        `*Fakultas Kedokteran Gigi - Universitas Muslim Indonesia*\n\n` +
-                        `${broadcastContent}\n\n` +
-                        `_Diumumkan pada: ${wita.fullWitaStr}_\n` +
-                        `_Portal Presensi: ${WEB_PORTAL_URL}_`;
-
-                    for (const st of targets) {
-                        const cleanDigits = sanitizeNumber(st.phone);
-                        if (cleanDigits) {
-                            try {
-                                await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, { text: formattedAnnouncement });
-                                sentCount++;
-                            } catch (e) { }
-                        }
-                    }
-
-                    await sock.sendMessage(senderInfo.targetJid, {
-                        text: `✅ *Broadcast Berhasil Dikirim!*\nTotal terkirim: *${sentCount}* mahasiswa dari total ${targets.length} data.`
-                    });
-                    return;
-                }
-
-                case 'broadcastjadwal': {
-                    if (!isAdmin) {
-                        await sock.sendMessage(senderInfo.targetJid, { text: "⛔ Perintah ini hanya dapat diakses oleh Staf Pengajar / Administrator Dept. RKG." });
-                        return;
-                    }
-
-                    const wita = getWitaTimeGreeting();
-                    const rawSessions = await callDbGet('axaxyz_sessions') || [];
-                    const allStudents = await callDbGet('axaxyz_students') || [];
-                    const targets = allStudents.filter(s => s.phone);
-
-                    if (targets.length === 0) {
-                        await sock.sendMessage(senderInfo.targetJid, { text: "⚠️ Tidak ditemukan mahasiswa yang memiliki nomor telepon terdaftar." });
-                        return;
-                    }
-
-                    let sessionDetail = "";
-                    if (rawSessions.length > 0) {
-                        sessionDetail = rawSessions.map((s, idx) => {
-                            const tol = s.calculatedClosingTime || s.lateLimit || s.endTime || s.end;
-                            return `${idx + 1}. *${s.name || s.title}* (${s.active ? '🟢 Aktif' : '⚪ Non-Aktif'}):\n` +
-                                `   • Jam Sesi: ${s.startTime || s.start} - ${s.endTime || s.end} WITA\n` +
-                                `   • Batas Toleransi: ${tol} WITA`;
-                        }).join('\n\n');
-                    } else {
-                        sessionDetail = "Belum ada sesi praktikum terdaftar di database portal.";
-                    }
-
-                    const formattedAnnouncement = `📢 *PENGUMUMAN JADWAL PRESENSI PRAKTIKUM DEPT. RKG*\n` +
-                        `*Fakultas Kedokteran Gigi - Universitas Muslim Indonesia*\n\n` +
-                        `Yth. Seluruh Rekan Mahasiswa Preklinik/Klinik RKG,\n` +
-                        `Berikut adalah update susunan jam sesi praktikum terbaru yang berlaku:\n\n` +
-                        `${sessionDetail}\n\n` +
-                        `⏰ *Diperbarui pada:* ${wita.fullWitaStr}\n` +
-                        `🌐 *Portal Web Absensi:* ${WEB_PORTAL_URL}\n\n` +
-                        `_Mohon hadir tepat waktu dan melakukan presensi di dalam radius lokasi resmi kampus FKG UMI._`;
-
-                    let sentCount = 0;
-                    for (const st of targets) {
-                        const cleanDigits = sanitizeNumber(st.phone);
-                        if (cleanDigits) {
-                            try {
-                                await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, { text: formattedAnnouncement });
-                                sentCount++;
-                            } catch (e) { }
-                        }
-                    }
-
-                    await sock.sendMessage(senderInfo.targetJid, {
-                        text: `✅ *Broadcast Jadwal Berhasil Dikirim!*\nTotal terkirim: *${sentCount}* mahasiswa dari total ${targets.length} data.`
-                    });
-                    return;
-                }
-
-                case 'stats': {
-                    if (!isAdmin) {
-                        await sock.sendMessage(senderInfo.targetJid, { text: "⛔ Perintah ini hanya dapat diakses oleh Administrator Dept. RKG." });
-                        return;
-                    }
-
-                    const students = await callDbGet('axaxyz_students') || [];
-                    const logs = await callDbGet('axaxyz_logs') || [];
-
-                    const totalHadir = logs.filter(l => l.status === 'Hadir' || l.status === 'Tepat Waktu').length;
-                    const totalTerlambat = logs.filter(l => l.status === 'Terlambat').length;
-
-                    const statsText = `📈 *STATISTIK KEHADIRAN HARIAN DEPT. RKG*\n\n` +
-                        `👥 *Total Mahasiswa Terdata:* ${students.length} Orang\n` +
-                        `✅ *Total Hadir Tepat Waktu:* ${totalHadir} Sesi\n` +
-                        `🟡 *Total Terlambat:* ${totalTerlambat} Sesi\n` +
-                        `📊 *Total Akumulasi Log:* ${logs.length} Data\n\n` +
-                        `Dashboard Lengkap: ${WEB_PORTAL_URL}`;
-
-                    await sock.sendMessage(senderInfo.targetJid, { text: statsText });
-                    return;
-                }
-
-                case 'ping': {
-                    const startTime = Date.now();
-                    await callDbGet('axaxyz_geofence');
-                    const latency = Date.now() - startTime;
-
-                    const pingText = `⚡ *STATUS BOT ABSENSI DEPT. RKG*\n\n` +
-                        `• *Status Koneksi:* Online & Terhubung 🟢\n` +
-                        `• *Latensi Upstash Redis Cloud:* ${latency}ms\n` +
-                        `• *Node.js Runtime:* ${process.version} (${os.platform()} ${os.arch()})\n` +
-                        `• *Penggunaan RAM Heap:* ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB\n` +
-                        `• *Portal Absensi Web:* ${WEB_PORTAL_URL}`;
-
-                    await sock.sendMessage(senderInfo.targetJid, { text: pingText });
-                    return;
-                }
-
-                case 'sync': {
-                    await refreshMemoryCacheFromRedis(true);
-                    if (sock && isSocketReadyToSend(sock)) {
-                        await autonomousWitaSchedulerTick(sock);
-                    }
-                    const count = Array.isArray(cachedSessions) ? cachedSessions.length : 0;
-                    await sock.sendMessage(senderInfo.targetJid, {
-                        text: `⚡ *SINKRONISASI JADWAL SUKSES* ⚡\n\nJadwal sesi praktikum berhasil dimuat ulang langsung dari Upstash Redis Cloud.\n• *Total Sesi Terkonfigurasi:* ${count}\n• *Scheduler WITA:* Telah dievaluasi ulang untuk sesi aktif saat ini.\n• *Beban Server:* 0% (In-Memory RAM Engine).`
-                    });
-                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+                        text: `⚠️ *Format Perintah Terdeteksi*\n\nAnda mengetik perintah *${firstWord}*. Untuk mengeksekusi perintah bot sistem, mohon awali dengan tanda seru (*!*):\n👉 Contoh: *!${cleanRawText}*\n\nKetik *!menu* untuk melihat daftar perintah resmi.`
+                    }, { quoted: msg });
                     return;
                 }
             }
 
             // =====================================================================
-            // ASISTEN AI VIRTUAL DEPT. RKG (PERCAKAPAN AKADEMIK & KENDALA MAHASISWA)
+            // 2. HYBRID INTELLIGENT CHAT ENGINE DENGAN AUTO-VERIFIED IDENTITY
             // =====================================================================
-            cleanExpiredSessions();
+            await sock.sendPresenceUpdate('composing', senderInfo.targetJid);
 
-            let session = userSessions.get(senderInfo.id);
-            if (!session) {
-                session = { history: [], lastActivity: Date.now() };
-                userSessions.set(senderInfo.id, session);
+            const sysConfig = await fetchSystemAIConfig();
+            const targetDpjpUtamaWa = sysConfig.doctors?.[0]?.wa || sysConfig.dpjpUtamaWa || "6282291675363";
+            const targetDpjpUtamaJid = sanitizeNumber(targetDpjpUtamaWa);
+
+            // VERIFIKASI IDENTITAS PASIEN SECARA CERDAS LINTAS LID <-> HP <-> NAMA <-> RM (REAL-TIME)
+            const patientData = await smartVerifyPatient(sock, senderInfo, pushName, text);
+            if (patientData && patientData.noRm && patientData.noRm !== "-") {
+                console.log(`[Pasien Terverifikasi] Nama Resmi: ${patientData.namaPasien} | RM: ${patientData.noRm} | Tgl Kontrol: ${patientData.tglKontrol} | Reschedule Baru: ${patientData.tglReschedule || '-'}`);
+            } else {
+                console.log(`[Pengirim Belum Terdaftar] Sender ID: ${senderInfo.id} | PushName: ${pushName}`);
             }
-            session.lastActivity = Date.now();
 
-            session.history.push({
+            const officialPatientName = (patientData && patientData.namaPasien && patientData.namaPasien !== "-")
+                ? patientData.namaPasien
+                : pushName;
+
+            const isPatientVerified = !!(patientData && patientData.noRm && patientData.noRm !== "-" && patientData.tglKontrol && patientData.tglKontrol !== "Terjadwal");
+
+            const pObj = isPatientVerified ? patientData : {
+                namaPasien: officialPatientName,
+                noRm: "-",
+                tglKontrol: "Terjadwal",
+                tglMasuk: "-",
+                umur: "-",
+                agama: "-",
+                jenisKelamin: "-",
+                noHp: senderInfo.resolvedPhone || senderInfo.id,
+                noSender: senderInfo.id,
+                statusReschedule: "-",
+                statusRujukan: "Rujukan Aktif",
+                noLid: senderInfo.id,
+                tglReschedule: "-"
+            };
+
+            let intent = detectPatientIntent(text);
+
+            // Cek apakah ada konfirmasi yang tertunda dari chat sebelumnya
+            const sessionKey = senderInfo.id || senderInfo.targetJid;
+            let userSession = conversationSessions.get(sessionKey);
+            if (isPatientVerified && userSession && userSession.pendingIntent && intent.type === 'OTHER') {
+                intent = userSession.pendingIntent;
+                delete userSession.pendingIntent;
+                console.log(`[Auto-Resume Intent] Melanjutkan konfirmasi tertunda: ${intent.type} untuk pasien ${patientData.namaPasien} (RM: ${patientData.noRm})`);
+            }
+
+            // PROTEKSI MUTLAK: JIKA PASIEN MENCOBA KONFIRMASI (HADIR, RESCHEDULE, JKN) NAMUN BELUM TERVERIFIKASI
+            if ((intent.type === 'HADIR' || intent.type === 'RESCHEDULE' || intent.type === 'TERBATALKAN_JKN') && !isPatientVerified) {
+                if (!userSession) {
+                    userSession = { history: [], lastSeen: Date.now() };
+                    conversationSessions.set(sessionKey, userSession);
+                }
+                userSession.pendingIntent = intent;
+                userSession.lastSeen = Date.now();
+
+                const wita = getWitaTimeGreeting();
+                const intentLabel = intent.type === 'HADIR' ? 'KEHADIRAN' : (intent.type === 'RESCHEDULE' ? 'JADWAL ULANG (RESCHEDULE)' : 'MOBILE JKN');
+                const askVerificationMsg = `${wita.greeting}, Bapak/Ibu *${pushName || 'Pasien'}*. 🙏\n\n` +
+                    `Terima kasih atas konfirmasi Anda. Mohon maaf, nomor WhatsApp Anda belum terhubung otomatis dengan data jadwal kontrol di *RSKD Gigi dan Mulut Prov. Sulsel*.\n\n` +
+                    `Agar konfirmasi *${intentLabel}* Anda dapat kami catat dengan benar di sistem, mohon balas pesan ini dengan mengetikkan:\n` +
+                    `📌 *Nomor Rekam Medis (No. RM)* Anda (Contoh: *123456*)\n` +
+                    `atau\n` +
+                    `📌 *Nama Lengkap Pasien* sesuai kartu berobat/pendaftaran.\n\n` +
+                    `Tim poli kami akan segera mencocokkan jadwal kontrol Anda bersama Dokter Penanggung Jawab (*${sysConfig.dpjpUtama}*). Terima kasih banyak. 🙏🦷`;
+
+                await sock.sendMessage(senderInfo.targetJid, { text: askVerificationMsg });
+                await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+                return;
+            }
+
+            // JALUR KHUSUS: PASIEN MENYATAKAN "TERBATALKAN DI APLIKASI MOBILE JKN"
+            if (intent.type === 'TERBATALKAN_JKN') {
+                if (patientData && patientData.noRm) {
+                    try {
+                        await callSimgosApi("update_status", {
+                            noRm: patientData.noRm,
+                            type: "reschedule",
+                            status: "Terbatalkan Mobile JKN",
+                            no_lid: senderInfo.id
+                        });
+                        patientData.statusReschedule = "Terbatalkan Mobile JKN";
+                        if (patientData.noRm) cachePatientObject(patientData.noRm, patientData);
+                        if (senderInfo.id) cachePatientObject(senderInfo.id, patientData);
+                        if (patientData.noHp) cachePatientObject(formatToInternational(patientData.noHp), patientData);
+                    } catch (e) { }
+                }
+
+                const templateLaporanJkn = sysConfig.templates["WA_LAPORAN_TERBATALKAN_JKN"];
+                if (templateLaporanJkn) {
+                    const notifDokterJkn = compileTemplateText(templateLaporanJkn, pObj, sysConfig);
+                    try {
+                        await sock.sendMessage(targetDpjpUtamaJid, { text: notifDokterJkn });
+                        console.log(`[Laporan Terbatalkan JKN Terkirim ke DPJP Utama] ${targetDpjpUtamaJid}`);
+                    } catch (docErr) { }
+                }
+
+                const templateBalasJkn = sysConfig.templates["WA_PX_TERBATALKAN_JKN_CONFIRM"];
+                let replyJknPasien = "";
+                if (templateBalasJkn) {
+                    replyJknPasien = compileTemplateText(templateBalasJkn, pObj, sysConfig);
+                } else {
+                    replyJknPasien = `Baik Bapak/Ibu *${officialPatientName}* (No. RM: ${pObj.noRm}), terima kasih banyak atas konfirmasinya. 🙏\n\n` +
+                        `Laporan bahwa jadwal kontrol Anda terbatalkan oleh sistem di aplikasi *Mobile JKN* telah kami teruskan langsung ke Dokter Penanggung Jawab (*${sysConfig.dpjpUtama}*).\n\n` +
+                        `Tim poli kami akan segera mengoordinasikan jadwal kontrol pengganti dan kami akan mengabarkan tanggal pastinya kepada Anda di nomor WhatsApp ini ya.\n\n` +
+                        `Mohon ditunggu ya, Bapak/Ibu. Salam sehat selalu dari *${sysConfig.poli} - ${sysConfig.instansi}*. 🦷✨`;
+                }
+
+                await sock.sendMessage(senderInfo.targetJid, { text: replyJknPasien });
+                await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+                return;
+            }
+
+            // JALUR KHUSUS: PENGIRIM MENYATAKAN "SALAH ORANG / SALAH NOMOR"
+            if (intent.type === 'SALAH_ORANG') {
+                const witaTime = getWitaTimeGreeting();
+                const wrongPersonReply = `${witaTime.greeting}, Bapak/Ibu *${officialPatientName}*. Mohon maaf yang sebesar-besarnya atas ketidaknyamanan pesan sebelumnya. 🙏\n\n` +
+                    `Kemungkinan nomor telepon ini salah tercatat pada antrean pendaftaran pasien kami di *RSKD Gigi dan Mulut Prov. Sulsel*.\n\n` +
+                    `Silakan abaikan pesan pengingat tersebut jika Anda tidak memiliki jadwal perawatan di Poli Konservasi. Terima kasih banyak atas konfirmasinya. Salam sehat selalu! 🙏✨`;
+
+                await sock.sendMessage(senderInfo.targetJid, { text: wrongPersonReply }, { quoted: msg });
+                await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+                return;
+            }
+
+            // JALUR 1: PASIEN KONFIRMASI "HADIR"
+            if (intent.type === 'HADIR') {
+                if (patientData && patientData.noRm) {
+                    try {
+                        await callSimgosApi("update_status", {
+                            noRm: patientData.noRm,
+                            type: "pasien",
+                            status: "Hadir (Terkonfirmasi)",
+                            mode: "h2",
+                            no_lid: senderInfo.id
+                        });
+                        await callSimgosApi("update_status", {
+                            noRm: patientData.noRm,
+                            type: "pasien",
+                            status: "Hadir (Terkonfirmasi)",
+                            mode: "h1",
+                            no_lid: senderInfo.id
+                        });
+                        patientData.statusWaH2 = "Hadir (Terkonfirmasi)";
+                        patientData.statusWaH1 = "Hadir (Terkonfirmasi)";
+                        patientData.statusWa = "Hadir (Terkonfirmasi)";
+                        if (patientData.noRm) cachePatientObject(patientData.noRm, patientData);
+                        if (senderInfo.id) cachePatientObject(senderInfo.id, patientData);
+                        if (patientData.noHp) cachePatientObject(formatToInternational(patientData.noHp), patientData);
+                    } catch (e) { }
+                }
+
+                const templateLaporanHadir = sysConfig.templates["WA_LAPORAN_HADIR_DOKTER"];
+                if (templateLaporanHadir) {
+                    const notifDokterHadir = compileTemplateText(templateLaporanHadir, pObj, sysConfig);
+                    try {
+                        await sock.sendMessage(targetDpjpUtamaJid, { text: notifDokterHadir });
+                    } catch (docErr) { }
+                }
+
+                const templateBalasHadir = sysConfig.templates["WA_PX_HADIR_CONFIRM"];
+                if (templateBalasHadir) {
+                    const replyHadir = compileTemplateText(templateBalasHadir, pObj, sysConfig);
+                    await sock.sendMessage(senderInfo.targetJid, { text: replyHadir });
+                }
+
+                await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+                return;
+            }
+
+            // JALUR 2: PASIEN INGIN "RESCHEDULE"
+            if (intent.type === 'RESCHEDULE') {
+                if (intent.date) {
+                    const newDate = intent.date;
+                    if (patientData && patientData.noRm) {
+                        try {
+                            await callSimgosApi("reschedule_patient", {
+                                noRm: patientData.noRm,
+                                newDate: newDate,
+                                no_lid: senderInfo.id
+                            });
+                            patientData.tglReschedule = newDate;
+                            patientData.statusReschedule = `Reschedule (${newDate})`;
+                            if (patientData.noRm) cachePatientObject(patientData.noRm, patientData);
+                            if (senderInfo.id) cachePatientObject(senderInfo.id, patientData);
+                            if (patientData.noHp) cachePatientObject(formatToInternational(patientData.noHp), patientData);
+                        } catch (e) { }
+                    }
+
+                    const updatedPatientObj = {
+                        ...pObj,
+                        tglReschedule: newDate,
+                        statusReschedule: `Reschedule (${newDate})`,
+                        noSender: senderInfo.id,
+                        noLid: senderInfo.id
+                    };
+
+                    const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
+                    if (templateLaporanResched) {
+                        const notifResched = compileTemplateText(templateLaporanResched, updatedPatientObj, sysConfig);
+                        try {
+                            await sock.sendMessage(targetDpjpUtamaJid, { text: notifResched });
+                        } catch (docErr) { }
+                    }
+
+                    const templateBalasResched = sysConfig.templates["WA_PX_RESCHEDULE"];
+                    if (templateBalasResched) {
+                        const replyResched = compileTemplateText(templateBalasResched, updatedPatientObj, sysConfig);
+                        await sock.sendMessage(senderInfo.targetJid, { text: replyResched });
+                    }
+
+                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+                    return;
+                }
+
+                if (patientData && patientData.noRm) {
+                    try {
+                        await callSimgosApi("update_status", {
+                            noRm: patientData.noRm,
+                            type: "reschedule",
+                            status: "Reschedule Diajukan",
+                            no_lid: senderInfo.id
+                        });
+                        patientData.statusReschedule = "Reschedule Diajukan";
+                        if (patientData.noRm) cachePatientObject(patientData.noRm, patientData);
+                        if (senderInfo.id) cachePatientObject(senderInfo.id, patientData);
+                        if (patientData.noHp) cachePatientObject(formatToInternational(patientData.noHp), patientData);
+                    } catch (e) { }
+                }
+
+                const templateTanyaTanggal = sysConfig.templates["WA_PX_RESCHEDULE_ASK"];
+                if (templateTanyaTanggal) {
+                    const replyAskDate = compileTemplateText(templateTanyaTanggal, pObj, sysConfig);
+                    await sock.sendMessage(senderInfo.targetJid, { text: replyAskDate });
+                }
+
+                await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
+                return;
+            }
+
+            // JALUR 3: PERCAKAPAN UMUM, TANYA NOMOR RM & KONSULTASI GIGI DENGAN AI
+            if (!userSession) {
+                userSession = conversationSessions.get(sessionKey) || { history: [], lastSeen: Date.now() };
+                conversationSessions.set(sessionKey, userSession);
+            }
+            userSession.lastSeen = Date.now();
+
+            userSession.history.push({
                 role: 'user',
-                parts: [{ text: trimmedText }]
+                parts: [{ text: text.trim() || "(Mengirimkan lampiran dokumen/gambar)" }]
             });
 
-            // Batasi panjang histori percakapan (maksimal 10 putaran)
-            if (session.history.length > 20) {
-                session.history = session.history.slice(-20);
+            if (userSession.history.length > 10) {
+                userSession.history = userSession.history.slice(-10);
             }
 
-            const aiReply = await askAIRkgUnified(session.history, studentObj, pushName, senderInfo);
+            const typingTimer = setInterval(async () => {
+                try { await sock.sendPresenceUpdate('composing', senderInfo.targetJid); } catch (e) { }
+            }, 4000);
 
-            session.history.push({
+            let rawAiResponse = "";
+            try {
+                rawAiResponse = await askAIClinicUnified(userSession.history, patientData, pushName, senderInfo);
+            } catch (aiErr) {
+                console.error("[Multi-Gateway AI Fatal Error]", aiErr.message);
+                const witaTime = getWitaTimeGreeting();
+                if (patientData && patientData.noRm) {
+                    let hasResched = (patientData.tglReschedule && patientData.tglReschedule !== "-");
+                    let finalReschedDate = hasResched ? patientData.tglReschedule : "";
+                    if (!finalReschedDate && patientData.statusReschedule) {
+                        const mMatch = patientData.statusReschedule.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+                        if (mMatch) { finalReschedDate = mMatch[1]; hasResched = true; }
+                    }
+
+                    if (hasResched) {
+                        rawAiResponse = `${witaTime.greeting}, Bapak/Ibu ${officialPatientName}. Berdasarkan catatan sistem rekam medis RSKD Gigi dan Mulut Prov. Sulsel, jadwal kontrol perawatan gigi Anda yang semula pada tanggal ${patientData.tglKontrol} telah resmi dialihkan/dijadwalkan ulang ke tanggal *${finalReschedDate}* bersama DPJP Utama kami, ${sysConfig.dpjpUtama}. Nomor Rekam Medis (RM) Anda adalah *${patientData.noRm}*. Mohon untuk hadir tepat waktu ya, Pak/Bu. Terima kasih. 🙏`;
+                    } else {
+                        rawAiResponse = `${witaTime.greeting}, Bapak/Ibu ${officialPatientName}. Nomor Rekam Medis (RM) Anda yang terdaftar di Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel adalah *${patientData.noRm}* dengan jadwal kontrol pada tanggal *${patientData.tglKontrol}*. Ada yang dapat kami bantu terkait administrasi perawatan gigi Anda? 🙏`;
+                    }
+                } else {
+                    rawAiResponse = `${witaTime.greeting}, Bapak/Ibu ${officialPatientName}. Terima kasih telah menghubungi Layanan Informasi Medis Poli Konservasi RSKD Gigi dan Mulut Prov. Sulsel. Pesan Anda telah kami terima, ada hal yang dapat kami bantu terkait jadwal kontrol atau perawatan gigi Anda? 🙏`;
+                }
+            } finally {
+                clearInterval(typingTimer);
+            }
+
+            // Deteksi Tag Aksi [ACTION:TERBATALKAN_JKN] dari AI
+            if (rawAiResponse.includes('[ACTION:TERBATALKAN_JKN]')) {
+                rawAiResponse = rawAiResponse.replace(/\[ACTION:TERBATALKAN_JKN\]/gi, '').trim();
+
+                if (patientData && patientData.noRm) {
+                    await callSimgosApi("update_status", {
+                        noRm: patientData.noRm,
+                        type: "reschedule",
+                        status: "Terbatalkan Mobile JKN",
+                        no_lid: senderInfo.id
+                    }).catch(() => { });
+                    patientCacheMap.delete(patientData.noRm);
+                    patientCacheMap.delete(senderInfo.id);
+                }
+
+                const templateLaporanJkn = sysConfig.templates["WA_LAPORAN_TERBATALKAN_JKN"];
+                if (templateLaporanJkn) {
+                    const notifDokterJkn = compileTemplateText(templateLaporanJkn, pObj, sysConfig);
+                    try {
+                        await sock.sendMessage(targetDpjpUtamaJid, { text: notifDokterJkn });
+                    } catch (e) { }
+                }
+            }
+
+            // Deteksi Tag Aksi [ACTION:HADIR] dari AI
+            if (rawAiResponse.includes('[ACTION:HADIR]')) {
+                rawAiResponse = rawAiResponse.replace(/\[ACTION:HADIR\]/gi, '').trim();
+
+                if (patientData && patientData.noRm) {
+                    await callSimgosApi("update_status", {
+                        noRm: patientData.noRm,
+                        type: "pasien",
+                        status: "Hadir (Terkonfirmasi)",
+                        no_lid: senderInfo.id
+                    }).catch(() => { });
+                    patientCacheMap.delete(patientData.noRm);
+                    patientCacheMap.delete(senderInfo.id);
+                }
+
+                const templateLaporanHadir = sysConfig.templates["WA_LAPORAN_HADIR_DOKTER"];
+                if (templateLaporanHadir) {
+                    const notifDokter = compileTemplateText(templateLaporanHadir, pObj, sysConfig);
+                    try {
+                        await sock.sendMessage(targetDpjpUtamaJid, { text: notifDokter });
+                    } catch (e) { }
+                }
+            }
+
+            // Deteksi Tag Aksi [ACTION:RESCHEDULE:YYYY-MM-DD] dari AI
+            const rescheduleMatch = rawAiResponse.match(/\[ACTION:RESCHEDULE:(\d{4}-\d{2}-\d{2})\]/i);
+            let finalClientReply = rawAiResponse.replace(/\[ACTION:RESCHEDULE:\d{4}-\d{2}-\d{2}\]/gi, '').trim();
+
+            if (rescheduleMatch) {
+                const newRescheduleDate = rescheduleMatch[1];
+                if (patientData && patientData.noRm) {
+                    try {
+                        await callSimgosApi("reschedule_patient", {
+                            noRm: patientData.noRm,
+                            newDate: newRescheduleDate,
+                            no_lid: senderInfo.id
+                        });
+                        patientCacheMap.delete(patientData.noRm);
+                        patientCacheMap.delete(senderInfo.id);
+                    } catch (reschedErr) { }
+                }
+
+                const updatedPx = {
+                    ...pObj,
+                    tglReschedule: newRescheduleDate,
+                    statusReschedule: `Reschedule (${newRescheduleDate})`,
+                    noSender: senderInfo.id,
+                    noLid: senderInfo.id
+                };
+
+                const templateLaporanResched = sysConfig.templates["WA_LAPORAN_RESCHEDULE_DOKTER"];
+                if (templateLaporanResched) {
+                    const notifResched = compileTemplateText(templateLaporanResched, updatedPx, sysConfig);
+                    try {
+                        await sock.sendMessage(targetDpjpUtamaJid, { text: notifResched });
+                    } catch (e) { }
+                }
+            }
+
+            userSession.history.push({
                 role: 'model',
-                parts: [{ text: aiReply }]
+                parts: [{ text: finalClientReply }]
             });
 
-            const formattedReply = formatForWhatsApp(aiReply);
+            const formattedReply = formatForWhatsApp(finalClientReply);
             await sock.sendMessage(senderInfo.targetJid, { text: formattedReply });
             await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
 
         } catch (error) {
-            console.error('[Error Pemrosesan Pesan WhatsApp]', error);
+            console.error('Error proses pesan:', error);
         }
     });
-}
-
-// =========================================================================
-// UNIVERSAL EXPORTS & RUNTIME GLOBAL DECLARATIONS
-// (Mencegah ReferenceError: messageHandler is not defined di Semua Lingkungan)
-// =========================================================================
-export default messageHandler;
-export { messageHandler, messageHandler as setupMessageHandler };
-
-if (typeof globalThis !== 'undefined') {
-    globalThis.messageHandler = messageHandler;
-    globalThis.setupMessageHandler = messageHandler;
-}
-if (typeof global !== 'undefined') {
-    global.messageHandler = messageHandler;
-    global.setupMessageHandler = messageHandler;
 }
