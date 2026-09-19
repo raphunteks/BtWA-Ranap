@@ -498,6 +498,9 @@ function detectStudentIntent(rawText) {
     if (t.startsWith('!stats') || t.startsWith('/stats')) {
         return 'stats';
     }
+    if (t.startsWith('!sync') || t.startsWith('/sync') || t.startsWith('!reloadsessions') || t.startsWith('/reloadsessions')) {
+        return 'sync';
+    }
     return 'ai_chat';
 }
 
@@ -1170,7 +1173,7 @@ function calculateCloseTimeStr(eH, eM, tolMins = 0) {
 
 // Refresh lambat data sesi & geofence dari Redis (Setiap 3 Menit)
 // Menjamin Nol Spam Request ke Upstash Redis
-async function refreshMemoryCacheFromRedis() {
+async function refreshMemoryCacheFromRedis(forceReload = false) {
     try {
         const [sessions, geofence, formats] = await Promise.all([
             callDbGet('axaxyz_sessions'),
@@ -1180,7 +1183,7 @@ async function refreshMemoryCacheFromRedis() {
 
         if (Array.isArray(sessions) && sessions.length > 0) {
             const newHash = JSON.stringify(sessions);
-            if (lastKnownSessionsHash && lastKnownSessionsHash !== newHash && currentSock) {
+            if (!forceReload && lastKnownSessionsHash && lastKnownSessionsHash !== newHash && currentSock) {
                 console.log("⏰ [Auto-Scheduler] 🔄 Terdeteksi perubahan jadwal sesi praktikum dari Admin! Menyiarkan Skenario 8...");
                 broadcastScheduleChange(currentSock, sessions).catch(() => {});
             }
@@ -1190,10 +1193,8 @@ async function refreshMemoryCacheFromRedis() {
 
         if (geofence && typeof geofence === 'object') {
             const newGfHash = JSON.stringify(geofence);
-            if (lastKnownGeofenceHash && lastKnownGeofenceHash !== newGfHash && currentSock) {
-                console.log("📍 [Auto-Scheduler] 🌐 Terdeteksi pembaruan koordinat geofence kampus dari Admin! Menyiarkan Skenario 13...");
-                broadcastGeofenceChange(currentSock, geofence).catch(() => {});
-            }
+            // Nonaktifkan auto-broadcast implisit Skenario 13 di background cache refresh
+            // untuk mencegah false-positive pengiriman Skenario 13 saat sinkronisasi jadwal.
             lastKnownGeofenceHash = newGfHash;
             cachedGeofence = geofence;
         }
@@ -1485,6 +1486,18 @@ function startOutboxQueueWorker(sock) {
 
             for (const item of pendingMessages) {
                 try {
+                    // Cek sinyal kontrol instan (SYNC_SCHEDULE) dari Web Dashboard
+                    if (item.type === 'SYNC_SCHEDULE' || item.action === 'reload_sessions') {
+                        console.log("⚡ [Live-Trigger] 🔔 Menerima sinyal instan update jadwal dari Admin Web! Memuat ulang cache sesi...");
+                        await refreshMemoryCacheFromRedis(true);
+                        sentEventsToday.clear(); // Hapus flag event lama agar sesi yang sedang aktif langsung dievaluasi ulang
+                        if (currentSock) {
+                            await autonomousWitaSchedulerTick(currentSock);
+                        }
+                        processedIds.push(item.id);
+                        continue;
+                    }
+
                     // Ekstraksi nomor tujuan yang fleksibel (target_number / phone / targetJid / to)
                     const rawTarget = item.target_number || item.phone || item.targetJid || item.target || item.to || '';
                     // Ekstraksi pesan (formatted_message / message / text)
@@ -1619,7 +1632,7 @@ async function messageHandler(sock) {
                         `• *!logout* : Pelepasan ikatan perangkat (jika ganti HP)\n` +
                         `• *!sesi* : Detail teknis data sesi praktikum terkini\n` +
                         `• *!reset* : Reset percakapan dengan Asisten AI RKG\n\n` +
-                        (isAdmin ? `👑 *PERINTAH ADMINISTRATOR:*\n• *!broadcast <teks>* : Kirim pengumuman ke semua mahasiswa\n• *!broadcastjadwal* : Broadcast jadwal sesi terbaru ke semua mahasiswa\n• *!stats* : Rekapitulasi kehadiran harian\n• *!ping* : Cek latensi dan status bot\n\n` : '') +
+                        (isAdmin ? `👑 *PERINTAH ADMINISTRATOR:*\n• *!sync* : Muat ulang jadwal sesi seketika dari Redis Cloud\n• *!broadcast <teks>* : Kirim pengumuman ke semua mahasiswa\n• *!broadcastjadwal* : Broadcast jadwal sesi terbaru ke semua mahasiswa\n• *!stats* : Rekapitulasi kehadiran harian\n• *!ping* : Cek latensi dan status bot\n\n` : '') +
                         `💬 *Tanya Jawab AI:*\n` +
                         `Anda dapat langsung mengetikkan pertanyaan seputar radiografi gigi, interpretasi lesi, SOP stase, atau kendala portal.\n\n` +
                         `🌐 *Portal Web Absensi:* ${WEB_PORTAL_URL}`;
@@ -1980,6 +1993,20 @@ async function messageHandler(sock) {
                         `• *Portal Absensi Web:* ${WEB_PORTAL_URL}`;
 
                     await sock.sendMessage(senderInfo.targetJid, { text: pingText });
+                    return;
+                }
+
+                case 'sync': {
+                    await refreshMemoryCacheFromRedis(true);
+                    sentEventsToday.clear();
+                    if (sock) {
+                        await autonomousWitaSchedulerTick(sock);
+                    }
+                    const count = Array.isArray(cachedSessions) ? cachedSessions.length : 0;
+                    await sock.sendMessage(senderInfo.targetJid, {
+                        text: `⚡ *SINKRONISASI JADWAL SUKSES* ⚡\n\nJadwal sesi praktikum berhasil dimuat ulang langsung dari Upstash Redis Cloud.\n• *Total Sesi Terkonfigurasi:* ${count}\n• *Scheduler WITA:* Telah dievaluasi ulang untuk sesi aktif saat ini.\n• *Beban Server:* 0% (In-Memory RAM Engine).`
+                    });
+                    await sock.sendPresenceUpdate('paused', senderInfo.targetJid);
                     return;
                 }
             }
