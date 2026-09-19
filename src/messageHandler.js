@@ -19,8 +19,37 @@ import handleStickerCommand from './commands/sticker.js';
 // =========================================================================
 // KONFIGURASI GLOBAL, STATE & PERSISTENSI
 // =========================================================================
-const ownerNumber = "6285256739684@s.whatsapp.net";
-const ownerPureJid = ownerNumber.includes(':') ? ownerNumber.split(':')[0] + '@s.whatsapp.net' : ownerNumber; 
+// Helper Sanitasi JID WhatsApp (Mencegah Corrupted Domain @lid@s.whatsapp.net)
+function cleanJid(jid) {
+    if (!jid) return '';
+    let clean = String(jid).trim().replace(/:[0-9]+/g, '');
+    if (clean.includes('@lid')) return clean.split('@lid')[0] + '@lid';
+    if (clean.includes('@s.whatsapp.net')) return clean.split('@s.whatsapp.net')[0] + '@s.whatsapp.net';
+    if (clean.includes('@g.us')) return clean.split('@g.us')[0] + '@g.us';
+    if (!clean.includes('@')) {
+        clean = clean.replace(/[^0-9]/g, '');
+        if (clean.startsWith('0')) clean = '62' + clean.slice(1);
+        if (clean.startsWith('8')) clean = '62' + clean;
+        return clean + '@s.whatsapp.net';
+    }
+    return jidNormalizedUser(clean);
+}
+
+function formatPhoneToJid(phone) {
+    if (!phone) return '';
+    let clean = String(phone).trim().replace(/:[0-9]+/g, '');
+    if (clean.endsWith('@lid') || clean.endsWith('@s.whatsapp.net') || clean.endsWith('@g.us')) return clean;
+    let p = clean.replace(/[^0-9]/g, '');
+    if (p.startsWith('0')) p = '62' + p.slice(1);
+    if (p.startsWith('8')) p = '62' + p;
+    return p + "@s.whatsapp.net";
+}
+
+// Konfigurasi Owner Eksplisit (Nomor Telepon & Akun LID Baileys v7 Sesuai Memori Skrip V4/V5)
+const ownerNumber = process.env.OWNER_NUMBER || "6285256739684@s.whatsapp.net";
+const ownerLid = process.env.OWNER_LID || "247922893566044@lid";
+const ownerPureJid = cleanJid(ownerNumber); 
+const ownerPureLid = cleanJid(ownerLid);
 
 const GAS_URL = "https://script.google.com/macros/s/AKfycbzhDou1e-e4QXDILWfM_mkyagViYOvcpLLv7xL-kJ6cVhpR_R5_bVICdnUYxp0AA90/exec";
 const botStartTime = new Date(); 
@@ -28,8 +57,43 @@ const botStartTime = new Date();
 const sessionPath = './session';
 const schedulesFile = `${sessionPath}/schedules.json`; 
 const settingsFile = `${sessionPath}/settings.json`; 
+const adminsFile = `${sessionPath}/admins.json`;
 
 if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
+
+// Load Binary JPEG Thumbnail untuk Baileys externalAdReply (Mencegah Crash/Stanza Drop di WhatsApp iOS)
+const thumbPath = path.resolve('./thumb.jpg');
+let thumbBuffer = null;
+if (fs.existsSync(thumbPath)) {
+    try {
+        thumbBuffer = fs.readFileSync(thumbPath);
+    } catch(e) {
+        console.error("[Thumbnail] Gagal membaca thumb.jpg:", e);
+    }
+}
+
+// Bot Admins Memory & Persistence (Memori V4/V5 + LID)
+let botAdmins = [
+    ownerNumber, 
+    ownerLid, 
+    "6285256739684@s.whatsapp.net", 
+    "247922893566044@lid"
+];
+
+if (fs.existsSync(adminsFile)) {
+    try { 
+        const savedAdmins = JSON.parse(fs.readFileSync(adminsFile, 'utf-8')); 
+        if (Array.isArray(savedAdmins)) {
+            botAdmins = [...new Set([...botAdmins, ...savedAdmins])];
+        }
+    } catch(e) {}
+} else {
+    try { fs.writeFileSync(adminsFile, JSON.stringify(botAdmins, null, 2)); } catch(e) {}
+}
+
+function saveAdmins() {
+    try { fs.writeFileSync(adminsFile, JSON.stringify(botAdmins, null, 2)); } catch(e) {}
+}
 
 let botSchedules = [];
 let botSettings = { 
@@ -75,29 +139,24 @@ function saveSettings() {
     try { fs.writeFileSync(settingsFile, JSON.stringify(botSettings, null, 2)); } catch(e) {}
 }
 
-// Helper Sanitasi JID WhatsApp (Mencegah Corrupted Domain @lid@s.whatsapp.net)
-function cleanJid(jid) {
-    if (!jid) return '';
-    let clean = String(jid).trim().replace(/:[0-9]+/g, '');
-    if (clean.includes('@lid')) return clean.split('@lid')[0] + '@lid';
-    if (clean.includes('@s.whatsapp.net')) return clean.split('@s.whatsapp.net')[0] + '@s.whatsapp.net';
-    if (clean.includes('@g.us')) return clean.split('@g.us')[0] + '@g.us';
-    if (!clean.includes('@')) {
-        clean = clean.replace(/[^0-9]/g, '');
-        if (clean.startsWith('0')) clean = '62' + clean.slice(1);
-        return clean + '@s.whatsapp.net';
-    }
-    return jidNormalizedUser(clean);
-}
-
-// Helper verifikasi identitas Owner Baileys v7 (Mendukung PN & LID)
+// Helper verifikasi identitas Owner Baileys v7 (Mendukung PN, LID, & Multi-Admin)
 function isOwner(sender, sock) {
     if (!sender) return false;
     try {
         const cSender = cleanJid(sender);
-        const cOwner = cleanJid(ownerPureJid);
-        if (cSender === cOwner || areJidsSameUser(cSender, cOwner)) return true;
+        const cOwnerNum = cleanJid(ownerNumber);
+        const cOwnerLid = cleanJid(ownerLid);
+
+        if (cSender === cOwnerNum || cSender === cOwnerLid) return true;
+        if (areJidsSameUser(cSender, cOwnerNum) || areJidsSameUser(cSender, cOwnerLid)) return true;
+
         if (cSender.includes('6285256739684') || cSender.includes('247922893566044')) return true;
+
+        if (Array.isArray(botAdmins) && botAdmins.some(admin => {
+            const cAdmin = cleanJid(admin);
+            return cSender === cAdmin || areJidsSameUser(cSender, cAdmin) || cSender.includes(cAdmin.split('@')[0]);
+        })) return true;
+
         const myJid = sock?.user?.id ? cleanJid(sock.user.id) : null;
         if (myJid && areJidsSameUser(cSender, myJid)) return true;
     } catch(e) {}
@@ -923,7 +982,10 @@ Aku *Dents Web BOT*, siap membantu kamu.
 ├ !ephemeral <on|off|24h|7d|90d> - Pesan sementara
 ╰ !carousel - Contoh kartu geser interaktif (GBR 1)
 
-*─── 👥 GROUP MANAGEMENT ───*
+*─── 👥 GROUP & ADMIN MANAGEMENT ───*
+├ !addadmin <nomor/lid> - Tambah admin bot baru (Owner)
+├ !deladmin <nomor/lid> - Hapus admin bot (Owner)
+├ !listadmin - Lihat daftar admin bot terdaftar
 ├ !creategroup <nama> <nomor1> [nomor2] - Buat grup
 ├ !add <nomor> - Masukkan member ke grup
 ├ !kick <nomor|tag> - Keluarkan member dari grup
@@ -969,27 +1031,34 @@ Aku *Dents Web BOT*, siap membantu kamu.
 
 _Ketik perintah di atas untuk menggunakan fitur._`;
 
-                    // Mengirim sebagai Extended Text Message dengan Rich Card Preview (GBR 2 Visual Effect)
+                    // Mengirim sebagai Extended Text Message dengan Rich Card Preview (Paripurna untuk iOS & Android)
                     try {
+                        const cardContext = {
+                            mentionedJid: [ownerPureJid, ownerPureLid].filter(Boolean),
+                            externalAdReply: {
+                                title: "Dents Web WhatsApp Gateway",
+                                body: "RSUD Kota Kendari • Multi-Device Portal",
+                                mediaType: 1,
+                                previewType: 0,
+                                renderLargerThumbnail: true,
+                                ...(thumbBuffer ? { thumbnail: thumbBuffer } : {}),
+                                thumbnailUrl: "https://dentsweb-portal.vercel.app/axalogo.png",
+                                sourceUrl: "https://dentsweb-portal.vercel.app/"
+                            }
+                        };
+
                         await sock.sendMessage(sender, {
                             text: bodyText,
-                            mentions: [ownerPureJid],
-                            contextInfo: {
-                                mentionedJid: [ownerPureJid],
-                                externalAdReply: {
-                                    title: "Dents Web WhatsApp Gateway",
-                                    body: "RSUD Kota Kendari • Multi-Device Portal",
-                                    mediaType: 1,
-                                    previewType: 0,
-                                    renderLargerThumbnail: true,
-                                    thumbnailUrl: "https://dentsweb-portal.vercel.app/axalogo.png",
-                                    sourceUrl: "https://dentsweb-portal.vercel.app/"
-                                }
-                            }
+                            mentions: [ownerPureJid, ownerPureLid].filter(Boolean),
+                            contextInfo: cardContext
                         }, { quoted: msg });
                     } catch(e) {
+                        console.error("[Menu/Help] Error sending rich card, falling back to simple text:", e);
                         // Fallback teks standar jika render kartu bermasalah
-                        await sock.sendMessage(sender, { text: bodyText, mentions: [ownerPureJid] }, { quoted: msg });
+                        await sock.sendMessage(sender, { 
+                            text: bodyText, 
+                            mentions: [ownerPureJid, ownerPureLid].filter(Boolean) 
+                        }, { quoted: msg });
                     }
                     break;
                 }
@@ -1020,11 +1089,12 @@ _Status Protocol: Baileys v7.0.0-rc14 Interactive Message Supported._`;
                             isForwarded: true,
                             forwardingScore: 999,
                             externalAdReply: {
-                                title: "XenzioHub - Modern WhatsApp Engine",
+                                title: "Dents Web BOT Engine",
                                 body: "Baileys v7 Multi-Device Enterprise Gateway",
                                 mediaType: 1,
-                                thumbnailUrl: "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/WhatsApp.svg/512px-WhatsApp.svg.png",
-                                sourceUrl: "https://github.com/WhiskeySockets/Baileys",
+                                ...(thumbBuffer ? { thumbnail: thumbBuffer } : {}),
+                                thumbnailUrl: "https://dentsweb-portal.vercel.app/axalogo.png",
+                                sourceUrl: "https://dentsweb-portal.vercel.app/",
                                 showAdAttribution: true
                             }
                         }
@@ -1424,6 +1494,61 @@ _Status Protocol: Baileys v7.0.0-rc14 Interactive Message Supported._`;
                 case 'offline': {
                     await sock.sendPresenceUpdate('unavailable');
                     await sock.sendMessage(sender, { text: '⚪ Status kehadiran bot diset ke: *Offline (Unavailable)*.' }, { quoted: msg });
+                    break;
+                }
+
+                // =========================================================
+                // MULTI-ADMIN SYSTEM (MEMORI V4 / V5 + LID SUPPORT)
+                // =========================================================
+                case 'addadmin': {
+                    if (!isOwner(pureSender, sock)) {
+                        return await sock.sendMessage(sender, { text: '❌ Khusus untuk Owner bot utama.' }, { quoted: msg });
+                    }
+                    if (!args[0]) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Format: `!addadmin <nomor/lid>`\nContoh: `!addadmin 6281234567890` atau `!addadmin 247922893566044@lid`' }, { quoted: msg });
+                    }
+                    const newAdmin = formatPhoneToJid(args[0]);
+                    if (!botAdmins.includes(newAdmin)) {
+                        botAdmins.push(newAdmin);
+                        saveAdmins();
+                        await sock.sendMessage(sender, { text: `✅ Berhasil! ID *${newAdmin}* sukses ditambahkan sebagai Admin bot.` }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(sender, { text: `⚠️ Nomor/ID *${newAdmin}* sudah terdaftar sebagai Admin.` }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'deladmin': {
+                    if (!isOwner(pureSender, sock)) {
+                        return await sock.sendMessage(sender, { text: '❌ Khusus untuk Owner bot utama.' }, { quoted: msg });
+                    }
+                    if (!args[0]) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Format: `!deladmin <nomor/lid>`\nContoh: `!deladmin 6281234567890` atau `!deladmin 247922893566044@lid`' }, { quoted: msg });
+                    }
+                    const delTarget = formatPhoneToJid(args[0]);
+                    if (delTarget === ownerNumber || delTarget === ownerPureJid || delTarget === ownerLid || delTarget === ownerPureLid || delTarget.includes('6285256739684') || delTarget.includes('247922893566044')) {
+                        return await sock.sendMessage(sender, { text: '❌ Anda tidak bisa menghapus ID Owner utama!' }, { quoted: msg });
+                    }
+                    if (botAdmins.includes(delTarget)) {
+                        botAdmins = botAdmins.filter(a => a !== delTarget);
+                        saveAdmins();
+                        await sock.sendMessage(sender, { text: `✅ Berhasil! ID *${delTarget}* sukses dihapus dari Admin bot.` }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(sender, { text: `⚠️ Nomor/ID *${delTarget}* tidak ditemukan dalam daftar admin.` }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'listadmin': {
+                    let adList = '👑 *DAFTAR ADMIN & OWNER BOT*\n\n';
+                    adList += `👑 *Owner Utama:* ${ownerNumber} (LID: ${ownerLid})\n\n`;
+                    adList += `👥 *Daftar Admin Aktif:*\n`;
+                    const uniqueAdmins = [...new Set(botAdmins)];
+                    uniqueAdmins.forEach((a, i) => {
+                        adList += `${i + 1}. ${a}\n`;
+                    });
+                    adList += `\n_Total: ${uniqueAdmins.length} Admin terdaftar._`;
+                    await sock.sendMessage(sender, { text: adList }, { quoted: msg });
                     break;
                 }
 
