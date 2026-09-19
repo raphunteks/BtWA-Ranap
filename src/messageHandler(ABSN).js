@@ -14,7 +14,6 @@ try {
         handleStickerCommand = stickerModule.default || stickerModule.handleStickerCommand;
     }
 } catch (e) {
-    // Graceful fallback jika commands/sticker.js tidak ada di direktori
     handleStickerCommand = null;
 }
 
@@ -41,6 +40,76 @@ const GROQ_ALLOWED_MODELS = [
     "groq/compound",
     "groq/compound-mini"
 ];
+
+// =========================================================================
+// DIRECT CLOUD UPSTASH REDIS CLIENT (KONEKSI RESMI MULTI-PLATFORM / RAILWAY)
+// =========================================================================
+const KV_REST_API_URL = process.env.KV_REST_API_URL || 
+    process.env.UPSTASH_REDIS_REST_URL || 
+    process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_URL ||
+    "https://electric-pangolin-87989.upstash.io";
+
+const KV_REST_API_TOKEN = process.env.KV_REST_API_TOKEN || 
+    process.env.UPSTASH_REDIS_REST_TOKEN || 
+    process.env.NEXT_PUBLIC_UPSTASH_REDIS_REST_TOKEN ||
+    "gQAAAAAAAVe1AAIgcDJiYzYzOGIzNmQ5ZTQ0Yzg1OWQwZmYxNjU2MWY3NDMwNQ";
+
+function safeParseJson(data) {
+    if (data === null || data === undefined) return null;
+    let parsed = data;
+    let depth = 0;
+    while (typeof parsed === 'string' && depth < 3) {
+        try {
+            parsed = JSON.parse(parsed);
+        } catch (e) {
+            break;
+        }
+        depth++;
+    }
+    return parsed;
+}
+
+async function redisDirectGet(key) {
+    if (!KV_REST_API_URL || !KV_REST_API_TOKEN) return null;
+    const cleanUrl = KV_REST_API_URL.replace(/\/+$/, '');
+    try {
+        const res = await fetch(cleanUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${KV_REST_API_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(["GET", key]),
+            cache: 'no-store'
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data.error || data.result === null || data.result === undefined) return null;
+        return safeParseJson(data.result);
+    } catch (e) {
+        return null;
+    }
+}
+
+async function redisDirectSet(key, value) {
+    if (!KV_REST_API_URL || !KV_REST_API_TOKEN) return false;
+    const cleanUrl = KV_REST_API_URL.replace(/\/+$/, '');
+    try {
+        const strVal = typeof value === 'string' ? value : JSON.stringify(value);
+        const res = await fetch(cleanUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${KV_REST_API_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(["SET", key, strVal])
+        });
+        const data = await res.json();
+        return !data.error;
+    } catch (e) {
+        return false;
+    }
+}
 
 // =========================================================================
 // NORMALISASI & SANITASI ROUTER AI
@@ -308,7 +377,6 @@ function extractDateFromText(text) {
 
 function extractNimFromText(text) {
     if (!text) return null;
-    // Format NIM FKG UMI umum: 16120... atau 16220... (8-12 digit)
     const match = text.match(/\b(16[12]20\d{5,7}|\d{9,11})\b/);
     return match ? match[0] : null;
 }
@@ -354,80 +422,110 @@ function detectStudentIntent(rawText) {
 }
 
 // =========================================================================
-// REST API CLIENT LAYER (WEB ABSENSI V7: /api/db & /api/wa)
+// REST API & DIRECT CLOUD REDIS CLIENT LAYER (HYBRID DUAL-ENGINE)
 // =========================================================================
+
+// Mengambil data dari Upstash Cloud secara langsung, dengan fallback ke REST API lokal
 async function callDbGet(key) {
-    try {
-        const res = await fetch(`${WEB_ABSENSI_API_URL}/db?key=${encodeURIComponent(key)}`, {
-            method: 'GET',
-            headers: { 'Accept': 'application/json' },
-            cache: 'no-store'
-        });
-        if (!res.ok) return null;
-        const json = await res.json();
-        return json.success ? json.data : null;
-    } catch (e) {
-        console.error(`[DB Get Error] Key: ${key}:`, e.message);
-        return null;
+    // 1. Coba koneksi langsung ke Upstash Redis Cloud (Tanpa Ketergantungan Localhost)
+    const redisResult = await redisDirectGet(key);
+    if (redisResult !== null && redisResult !== undefined) {
+        return redisResult;
     }
+
+    // 2. Fallback: Coba HTTP API Web Absensi jika sedang di lingkungan lokal
+    if (WEB_ABSENSI_API_URL && !WEB_ABSENSI_API_URL.includes('localhost:3000')) {
+        try {
+            const res = await fetch(`${WEB_ABSENSI_API_URL}/db?key=${encodeURIComponent(key)}`, {
+                method: 'GET',
+                headers: { 'Accept': 'application/json' },
+                cache: 'no-store'
+            });
+            if (res.ok) {
+                const json = await res.json();
+                if (json.success && json.data !== undefined) return json.data;
+            }
+        } catch (e) { }
+    }
+
+    return null;
 }
 
+// Menyimpan data langsung ke Upstash Cloud, dengan fallback ke REST API lokal
 async function callDbSet(key, value) {
+    // 1. Tulis langsung ke Upstash Redis Cloud
+    const successDirect = await redisDirectSet(key, value);
+    if (successDirect) return true;
+
+    // 2. Fallback: Tulis via HTTP API
     try {
         const res = await fetch(`${WEB_ABSENSI_API_URL}/db`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
             body: JSON.stringify({ key, value })
         });
-        if (!res.ok) return false;
-        const json = await res.json();
-        return json.success === true;
-    } catch (e) {
-        console.error(`[DB Set Error] Key: ${key}:`, e.message);
-        return false;
-    }
+        if (res.ok) {
+            const json = await res.json();
+            return json.success === true;
+        }
+    } catch (e) { }
+
+    return false;
 }
 
+// Menarik antrian pesan outbox (Mendukung Upstash Cloud key 'axaxyz_wa_queue')
 async function callWaPull() {
+    // 1. Coba baca antrian langsung dari Upstash Redis Cloud (Key: axaxyz_wa_queue)
+    const cloudQueue = await redisDirectGet('axaxyz_wa_queue');
+    if (Array.isArray(cloudQueue) && cloudQueue.length > 0) {
+        return cloudQueue;
+    }
+
+    // 2. Fallback: Coba request ke endpoint /api/wa?action=pull
     try {
         const res = await fetch(`${WEB_ABSENSI_API_URL}/wa?action=pull`, {
             method: 'GET',
             headers: { 'Accept': 'application/json' },
             cache: 'no-store'
         });
-        if (!res.ok) return [];
-        const json = await res.json();
-        return json.success && Array.isArray(json.messages) ? json.messages : [];
-    } catch (e) {
-        return [];
-    }
+        if (res.ok) {
+            const json = await res.json();
+            if (json.success && Array.isArray(json.queue)) {
+                return json.queue;
+            }
+            if (json.success && Array.isArray(json.messages)) {
+                return json.messages;
+            }
+        }
+    } catch (e) { }
+
+    return [];
 }
 
-async function callWaDeleteBatch(ids = []) {
-    if (!Array.isArray(ids) || ids.length === 0) return true;
+// Menghapus pesan dari antrian setelah berhasil dikirim
+async function callWaAcknowledge(processedIds = []) {
+    if (!Array.isArray(processedIds) || processedIds.length === 0) return true;
+
+    // 1. Hapus langsung dari Upstash Redis Cloud
     try {
-        const res = await fetch(`${WEB_ABSENSI_API_URL}/wa`, {
+        let currentQueue = await redisDirectGet('axaxyz_wa_queue');
+        if (Array.isArray(currentQueue)) {
+            const idSet = new Set(processedIds);
+            const remaining = currentQueue.filter(msg => !idSet.has(msg.id));
+            await redisDirectSet('axaxyz_wa_queue', remaining);
+        }
+    } catch (e) { }
+
+    // 2. Kirim juga request DELETE ke REST API jika tersedia
+    try {
+        await fetch(`${WEB_ABSENSI_API_URL}/wa`, {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify({ ids })
+            body: JSON.stringify({ message_ids: processedIds })
         });
-        return res.ok;
-    } catch (e) {
-        return false;
-    }
-}
+    } catch (e) { }
 
-async function callWaPush(payload) {
-    try {
-        const res = await fetch(`${WEB_ABSENSI_API_URL}/wa`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        return res.ok;
-    } catch (e) {
-        return false;
-    }
+    return true;
 }
 
 // =========================================================================
@@ -939,7 +1037,7 @@ ${studentProfile}
 }
 
 // =========================================================================
-// BACKGROUND WORKER: DISPATCHER ANTRIAN OUTBOX (/api/wa?action=pull)
+// BACKGROUND WORKER: DISPATCHER ANTRIAN OUTBOX CLOUD (axaxyz_wa_queue)
 // =========================================================================
 let isOutboxWorkerRunning = false;
 let currentSock = null;
@@ -949,7 +1047,7 @@ function startOutboxQueueWorker(sock) {
     isOutboxWorkerRunning = true;
     currentSock = sock;
 
-    console.log("🚀 [Outbox Worker] Background dispatcher antrian pesan WhatsApp Web Absensi V7 AKTIF (interval 5s).");
+    console.log("🚀 [Outbox Worker] Background dispatcher antrian pesan WhatsApp Web Absensi V7 AKTIF (Interval 5s, Direct Cloud Redis).");
 
     setInterval(async () => {
         if (!currentSock) return;
@@ -962,15 +1060,19 @@ function startOutboxQueueWorker(sock) {
 
             for (const item of pendingMessages) {
                 try {
-                    const rawTarget = item.phone || item.targetJid || item.target || item.to;
-                    if (!rawTarget || !item.message) {
+                    // Ekstraksi nomor tujuan yang fleksibel (target_number / phone / targetJid / to)
+                    const rawTarget = item.target_number || item.phone || item.targetJid || item.target || item.to || '';
+                    // Ekstraksi pesan (formatted_message / message / text)
+                    const rawMessage = item.formatted_message || item.message || item.text || '';
+
+                    if (!rawTarget || !rawMessage) {
                         processedIds.push(item.id);
                         continue;
                     }
 
-                    let targetJid = rawTarget;
+                    let targetJid = String(rawTarget).trim();
                     if (!targetJid.includes('@')) {
-                        const cleanDigits = sanitizeNumber(rawTarget);
+                        const cleanDigits = formatToInternational(targetJid) || sanitizeNumber(targetJid);
                         if (!cleanDigits) {
                             processedIds.push(item.id);
                             continue;
@@ -980,22 +1082,23 @@ function startOutboxQueueWorker(sock) {
 
                     // Kirim pesan WhatsApp melalui Baileys
                     await currentSock.sendMessage(targetJid, {
-                        text: formatForWhatsApp(item.message)
+                        text: formatForWhatsApp(rawMessage)
                     });
 
                     processedIds.push(item.id);
-                    console.log(`[Outbox Worker] Pesan terkirim ke ${targetJid} (ID: ${item.id})`);
+                    console.log(`[Outbox Worker] ✅ Sukses mengirim notifikasi ke ${targetJid} (ID: ${item.id})`);
                 } catch (sendErr) {
-                    console.error(`[Outbox Worker] Gagal mengirim pesan ID ${item.id}:`, sendErr.message);
+                    console.error(`[Outbox Worker] ❌ Gagal mengirim pesan ID ${item.id}:`, sendErr.message);
                 }
             }
 
-            // Hapus batch pesan yang telah berhasil diproses dari server
+            // Hapus batch pesan yang telah berhasil diproses dari Upstash Redis Cloud
             if (processedIds.length > 0) {
-                await callWaDeleteBatch(processedIds);
+                await callWaAcknowledge(processedIds);
+                console.log(`[Outbox Worker] 🗑️ Berhasil menghapus ${processedIds.length} pesan terproses dari antrian cloud.`);
             }
         } catch (workerErr) {
-            // Silently ignore network hiccup to prevent terminal noise
+            // Silently ignore temporary network glitch
         }
     }, 5000);
 }
@@ -1328,7 +1431,7 @@ async function messageHandler(sock) {
 
                     const pingText = `⚡ *STATUS BOT ABSENSI DEPT. RKG*\n\n` +
                         `• *Status Koneksi:* Online & Terhubung 🟢\n` +
-                        `• *Latensi Database Redis:* ${latency}ms\n` +
+                        `• *Latensi Upstash Redis Cloud:* ${latency}ms\n` +
                         `• *Node.js Runtime:* ${process.version} (${os.platform()} ${os.arch()})\n` +
                         `• *Penggunaan RAM Heap:* ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB\n` +
                         `• *Portal Absensi Web:* ${WEB_PORTAL_URL}`;
