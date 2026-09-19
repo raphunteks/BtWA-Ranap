@@ -1,12 +1,24 @@
 import fs from 'fs';
 import process from 'process';
 import os from 'os';
+import path from 'path';
+import { 
+    jidNormalizedUser, 
+    isPnUser, 
+    isLidUser, 
+    areJidsSameUser, 
+    jidDecode, 
+    jidEncode,
+    downloadMediaMessage,
+    getContentType,
+    WA_DEFAULT_EPHEMERAL
+} from '@whiskeysockets/baileys';
 import handleAiCommand from './commands/ai.js';
 import handleStickerCommand from './commands/sticker.js';
 
-// ==========================================
-// KONFIGURASI GLOBAL & STATE
-// ==========================================
+// =========================================================================
+// KONFIGURASI GLOBAL, STATE & PERSISTENSI
+// =========================================================================
 const ownerNumber = "6285256739684@s.whatsapp.net";
 const ownerPureJid = ownerNumber.includes(':') ? ownerNumber.split(':')[0] + '@s.whatsapp.net' : ownerNumber; 
 
@@ -20,7 +32,15 @@ const settingsFile = `${sessionPath}/settings.json`;
 if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
 
 let botSchedules = [];
-let botSettings = { autoRanap: [], autoRajal: [], autoSholat: [], autoWeather: [] };
+let botSettings = { 
+    autoRanap: [], 
+    autoRajal: [], 
+    autoSholat: [], 
+    autoWeather: [],
+    antiCall: false,
+    lastDailySholatSent: null,
+    lastDailyWeatherSent: null
+};
 
 if (fs.existsSync(schedulesFile)) {
     try { botSchedules = JSON.parse(fs.readFileSync(schedulesFile, 'utf-8')); } catch (e) { }
@@ -29,12 +49,15 @@ if (fs.existsSync(settingsFile)) {
     try { botSettings = { ...botSettings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf-8')) }; } catch (e) { }
 }
 
-// MEMASTIKAN FITUR DEFAULT ON UNTUK OWNER (JIKA KOSONG)
+// Memastikan field pengaturan selalu terinisialisasi
 if (!botSettings.autoSholat) botSettings.autoSholat = [];
 if (!botSettings.autoWeather) botSettings.autoWeather = [];
+if (!botSettings.autoRanap) botSettings.autoRanap = [];
+if (!botSettings.autoRajal) botSettings.autoRajal = [];
+if (typeof botSettings.antiCall !== 'boolean') botSettings.antiCall = false;
 
 let configChanged = false;
-// Memastikan Owner terdaftar tanpa suffix JID
+// Memastikan Owner terdaftar tanpa suffix JID untuk fitur default
 if (!botSettings.autoSholat.includes(ownerPureJid) && !botSettings.autoSholat.includes(ownerNumber)) {
     botSettings.autoSholat.push(ownerPureJid);
     configChanged = true;
@@ -45,22 +68,64 @@ if (!botSettings.autoWeather.includes(ownerPureJid) && !botSettings.autoWeather.
 }
 if (configChanged) saveSettings();
 
-function saveSchedules() { fs.writeFileSync(schedulesFile, JSON.stringify(botSchedules, null, 2)); }
-function saveSettings() { fs.writeFileSync(settingsFile, JSON.stringify(botSettings, null, 2)); }
+function saveSchedules() { 
+    try { fs.writeFileSync(schedulesFile, JSON.stringify(botSchedules, null, 2)); } catch(e) {}
+}
+function saveSettings() { 
+    try { fs.writeFileSync(settingsFile, JSON.stringify(botSettings, null, 2)); } catch(e) {}
+}
+
+// Helper Sanitasi JID WhatsApp (Mencegah Corrupted Domain @lid@s.whatsapp.net)
+function cleanJid(jid) {
+    if (!jid) return '';
+    let clean = String(jid).trim().replace(/:[0-9]+/g, '');
+    if (clean.includes('@lid')) return clean.split('@lid')[0] + '@lid';
+    if (clean.includes('@s.whatsapp.net')) return clean.split('@s.whatsapp.net')[0] + '@s.whatsapp.net';
+    if (clean.includes('@g.us')) return clean.split('@g.us')[0] + '@g.us';
+    if (!clean.includes('@')) {
+        clean = clean.replace(/[^0-9]/g, '');
+        if (clean.startsWith('0')) clean = '62' + clean.slice(1);
+        return clean + '@s.whatsapp.net';
+    }
+    return jidNormalizedUser(clean);
+}
+
+// Helper verifikasi identitas Owner Baileys v7 (Mendukung PN & LID)
+function isOwner(sender, sock) {
+    if (!sender) return false;
+    try {
+        const cSender = cleanJid(sender);
+        const cOwner = cleanJid(ownerPureJid);
+        if (cSender === cOwner || areJidsSameUser(cSender, cOwner)) return true;
+        if (cSender.includes('6285256739684') || cSender.includes('247922893566044')) return true;
+        const myJid = sock?.user?.id ? cleanJid(sock.user.id) : null;
+        if (myJid && areJidsSameUser(cSender, myJid)) return true;
+    } catch(e) {}
+    return false;
+}
 
 function getRelativeTime(seconds) {
     const m = Math.floor(seconds / 60); const h = Math.floor(seconds / 3600); const d = Math.floor(seconds / 86400);
-    if (d > 0) return `${d} days ago`; if (h > 0) return `${h} hours ago`; if (m > 0) return `${m} minutes ago`;
-    return `${Math.floor(seconds)} seconds ago`;
+    if (d > 0) return `${d} hari lalu`; if (h > 0) return `${h} jam lalu`; if (m > 0) return `${m} menit lalu`;
+    return `${Math.floor(seconds)} detik lalu`;
 }
 
 function formatWITA(dateObj) {
-    return new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Makassar', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: true }).format(dateObj);
+    return new Intl.DateTimeFormat('id-ID', { 
+        timeZone: 'Asia/Makassar', 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric', 
+        hour: 'numeric', 
+        minute: 'numeric', 
+        hour12: false 
+    }).format(dateObj);
 }
 
-// ==========================================
-// STATE & FUNGSI JADWAL SHOLAT KENDARI
-// ==========================================
+// =========================================================================
+// 1. STATE & FUNGSI JADWAL SHOLAT KENDARI (ALADHAN API)
+// =========================================================================
 let todaySholatTimes = null;
 let lastDailySholatSent = null; 
 let notifiedPrayers = { Fajr: false, Dhuhr: false, Asr: false, Maghrib: false, Isha: false, date: null };
@@ -77,9 +142,9 @@ async function fetchSholatKendari() {
     }
 }
 
-// ==========================================
-// FUNGSI PINTAR: CUACA KENDARI (OPEN-METEO API)
-// ==========================================
+// =========================================================================
+// 2. FUNGSI PINTAR: CUACA KENDARI (OPEN-METEO API)
+// =========================================================================
 let lastDailyWeatherSent = null;
 
 function getWeatherDesc(code) {
@@ -174,7 +239,7 @@ async function fetchAdvancedWeather(startDate, endDate, label) {
         const res = await fetch(url);
         const data = await res.json();
 
-        if (!data.daily || !data.daily.time) return `❌ Data cuaca untuk tanggal tersebut tidak tersedia. Pastikan jarak tanggal tidak lebih dari masa berlaku API (maksimal -/+ 3 bulan).`;
+        if (!data.daily || !data.daily.time) return `❌ Data cuaca untuk tanggal tersebut tidak tersedia. Pastikan jarak tanggal tidak lebih dari masa berlaku API.`;
 
         let msg = `☁️ *DATA CUACA KENDARI*\n📅 *Periode:* ${label}\n\n`;
         for (let i = 0; i < data.daily.time.length; i++) {
@@ -195,9 +260,9 @@ async function fetchAdvancedWeather(startDate, endDate, label) {
     }
 }
 
-// ==========================================
-// FUNGSI EXTRA: GEMPA BMKG TERKINI
-// ==========================================
+// =========================================================================
+// 3. FUNGSI EXTRA: GEMPA BMKG TERKINI
+// =========================================================================
 async function fetchGempa() {
     try {
         const res = await fetch('https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json');
@@ -218,9 +283,9 @@ async function fetchGempa() {
     }
 }
 
-// ==========================================
-// FUNGSI PINTAR: FETCH WITH FALLBACK (VERCEL -> GAS)
-// ==========================================
+// =========================================================================
+// 4. FUNGSI PINTAR: FETCH WITH FALLBACK (VERCEL -> GAS) RSUD KENDARI
+// =========================================================================
 async function fetchWithFallback(endpointName, queryParams = "") {
     try {
         const vercelUrl = `https://ishiprsud.vercel.app/api/${endpointName}${queryParams ? '?' + queryParams : ''}`;
@@ -260,9 +325,9 @@ async function fetchWithFallback(endpointName, queryParams = "") {
     }
 }
 
-// ==========================================
-// SMART CHRONOLOGICAL SORTING & DIFF ALGORITHM
-// ==========================================
+// =========================================================================
+// 5. SMART CHRONOLOGICAL SORTING & DIFF ALGORITHM RSUD KENDARI
+// =========================================================================
 let lastRanapData = null;
 let lastRajalEndoData = null;
 let lastRajalBMData = null;
@@ -305,9 +370,6 @@ function getDifferences(oldList, newList) {
     return { added, removed, changed, hasDiff: added.length > 0 || removed.length > 0 || changed.length > 0 };
 }
 
-// ==========================================
-// FORMATTING LIST RAJAL
-// ==========================================
 function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     let resultTxt = `${iconKlinik} *Klinik ${namaKlinik}*:\n`;
     let countBaru = 0;
@@ -358,9 +420,6 @@ function formatKlinikList(namaKlinik, iconKlinik, currentList, removedList) {
     return { txt: resultTxt, baru: countBaru, selesai: countSelesai };
 }
 
-// ==========================================
-// FUNGSI PENGIRIMAN DATA PRIMER (SAAT ON)
-// ==========================================
 async function forceSendRanapPrimer(sock, jid) {
     try {
         await sock.sendMessage(jid, { text: `⏳ _Menyiapkan Data Primer Rawat Inap..._` });
@@ -430,9 +489,7 @@ async function forceSendRajalPrimer(sock, jid) {
     }
 }
 
-// ==========================================
-// POLLING API AUTO-UPDATE
-// ==========================================
+// Polling otomatis RSUD Kendari
 async function checkApiUpdates(sock) {
     if (!sock) return;
     try {
@@ -442,9 +499,7 @@ async function checkApiUpdates(sock) {
             await sock.sendMessage(ownerPureJid, { text: dataTrigger.notify });
         }
 
-        // =======================================
         // 1. AUTO INFO: RANAP
-        // =======================================
         if (botSettings.autoRanap.length > 0) {
             const dataRanap = await fetchWithFallback('Ranap');
             if (dataRanap.status) {
@@ -465,16 +520,16 @@ async function checkApiUpdates(sock) {
                             msg += `\n`;
                         }
                         msg += `📊 *Total Saat Ini:* ${currentRanap.length} Pasien`;
-                        for (const jid of botSettings.autoRanap) await sock.sendMessage(jid, { text: msg });
+                        for (const jid of botSettings.autoRanap) {
+                            try { await sock.sendMessage(jid, { text: msg }); } catch(e){}
+                        }
                     }
                 }
                 lastRanapData = currentRanap;
             }
         }
 
-        // =======================================
         // 2. AUTO INFO: RAJAL (4 KLINIK)
-        // =======================================
         if (botSettings.autoRajal.length > 0) {
             const dateWITA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
             
@@ -517,7 +572,9 @@ async function checkApiUpdates(sock) {
                     msg += `📊 *Total Antrean (BARU: BELUM DIKERJA):* Endo (${formatEndo.baru}), BM (${formatBM.baru}), Perio (${formatPerio.baru}), Umum (${formatUmum.baru})\n`;
                     msg += `📊 *Total Antrean (SELESAI/BATAL):* Endo (${formatEndo.selesai}), BM (${formatBM.selesai}), Perio (${formatPerio.selesai}), Umum (${formatUmum.selesai})`;
                     
-                    for (const jid of botSettings.autoRajal) await sock.sendMessage(jid, { text: msg });
+                    for (const jid of botSettings.autoRajal) {
+                        try { await sock.sendMessage(jid, { text: msg }); } catch(e){}
+                    }
                 }
             }
             lastRajalEndoData = currentEndo;
@@ -536,16 +593,14 @@ async function checkSholatAndWeather(sock) {
         const dateWITA = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Makassar' }); 
         const timeWITA = now.toLocaleTimeString('en-GB', { timeZone: 'Asia/Makassar', hour: '2-digit', minute: '2-digit' });
 
-        // ==============================
         // 1. CEK WAKTU & INFO SHOLAT
-        // ==============================
         if (botSettings.autoSholat.length > 0) {
             if (notifiedPrayers.date !== dateWITA) {
                 notifiedPrayers = { Fajr: false, Dhuhr: false, Asr: false, Maghrib: false, Isha: false, date: dateWITA };
                 todaySholatTimes = await fetchSholatKendari();
             }
 
-            if (lastDailySholatSent !== dateWITA && todaySholatTimes) {
+            if (botSettings.lastDailySholatSent !== dateWITA && todaySholatTimes) {
                 const sholatMsg = `🕌 *JADWAL SHOLAT KENDARI & SEKITARNYA*\n🗓️ *Tanggal:* ${dateWITA}\n\n` +
                                   `🌅 Imsak: ${todaySholatTimes.Imsak} WITA\n` +
                                   `🌄 *Subuh:* ${todaySholatTimes.Fajr} WITA\n` +
@@ -557,9 +612,10 @@ async function checkSholatAndWeather(sock) {
                                   `_Bot akan memberikan notifikasi saat memasuki waktu sholat._`;
                 
                 for (const jid of botSettings.autoSholat) {
-                    try { await sock.sendMessage(jid, { text: sholatMsg }); } catch(e){}
+                    try { await sock.sendMessage(cleanJid(jid), { text: sholatMsg }); } catch(e){}
                 }
-                lastDailySholatSent = dateWITA;
+                botSettings.lastDailySholatSent = dateWITA;
+                saveSettings();
             }
 
             if (todaySholatTimes) {
@@ -578,7 +634,7 @@ async function checkSholatAndWeather(sock) {
                                          `_Mari sejenak hentikan aktivitas dan laksanakan sholat._`;
                         
                         for (const jid of botSettings.autoSholat) {
-                            try { await sock.sendMessage(jid, { text: alertMsg }); } catch(e){}
+                            try { await sock.sendMessage(cleanJid(jid), { text: alertMsg }); } catch(e){}
                         }
                         notifiedPrayers[prayer.id] = true; 
                     }
@@ -586,20 +642,19 @@ async function checkSholatAndWeather(sock) {
             }
         }
 
-        // ==============================
-        // 2. CEK INFO CUACA HARIAN
-        // ==============================
+        // 2. CEK INFO CUACA HARIAN (JAM 06:00 WITA)
         if (botSettings.autoWeather.length > 0) {
             const currentHour = parseInt(timeWITA.split(':')[0]);
             
-            if (lastDailyWeatherSent !== dateWITA && currentHour >= 6) {
+            if (botSettings.lastDailyWeatherSent !== dateWITA && currentHour >= 6) {
                 const wMsg = await fetchWeatherKendari();
                 if (wMsg) {
                     const finalWeatherMsg = `🌅 *SELAMAT PAGI*\nBerikut prakiraan cuaca hari ini:\n\n${wMsg}`;
                     for (const jid of botSettings.autoWeather) {
-                        try { await sock.sendMessage(jid, { text: finalWeatherMsg }); } catch(e){}
+                        try { await sock.sendMessage(cleanJid(jid), { text: finalWeatherMsg }); } catch(e){}
                     }
-                    lastDailyWeatherSent = dateWITA;
+                    botSettings.lastDailyWeatherSent = dateWITA;
+                    saveSettings();
                 }
             }
         }
@@ -609,15 +664,16 @@ async function checkSholatAndWeather(sock) {
     }
 }
 
-// ==========================================
-// EXPORT HANDLER
-// ==========================================
+// =========================================================================
+// 6. EXPORT MESSAGE HANDLER & EVENT LISTENERS
+// =========================================================================
 let isIntervalStarted = false;
 let currentSock = null;
 
 export default function setupMessageHandler(sock) {
     currentSock = sock; 
 
+    // Mencegah duplikasi interval saat socket reconnect
     if (!isIntervalStarted) {
         setInterval(async () => {
             if (!currentSock) return;
@@ -625,11 +681,20 @@ export default function setupMessageHandler(sock) {
             for (let i = 0; i < botSchedules.length; i++) {
                 const jadwal = botSchedules[i];
                 if (jadwal.status === 'pending' && now >= jadwal.timestamp) {
-                    try { await currentSock.sendMessage(jadwal.target, { text: jadwal.pesan }); jadwal.status = 'sent'; hasChanges = true; } 
-                    catch (err) { jadwal.status = 'failed'; hasChanges = true; }
+                    try { 
+                        await currentSock.sendMessage(jadwal.target, { text: jadwal.pesan }); 
+                        jadwal.status = 'sent'; 
+                        hasChanges = true; 
+                    } catch (err) { 
+                        jadwal.status = 'failed'; 
+                        hasChanges = true; 
+                    }
                 }
             }
-            if (hasChanges) { botSchedules = botSchedules.filter(s => s.status === 'pending'); saveSchedules(); }
+            if (hasChanges) { 
+                botSchedules = botSchedules.filter(s => s.status === 'pending'); 
+                saveSchedules(); 
+            }
         }, 30000); 
 
         setInterval(() => {
@@ -643,32 +708,79 @@ export default function setupMessageHandler(sock) {
         isIntervalStarted = true;
     }
 
+    // =====================================================================
+    // ADVANCED: LISTENER PANGGILAN SUARA/VIDEO (ANTI-CALL HANDLER)
+    // =====================================================================
+    sock.ev.on('call', async (calls) => {
+        if (!botSettings.antiCall || !Array.isArray(calls)) return;
+        for (const call of calls) {
+            if (call.status === 'offer') {
+                try {
+                    await sock.rejectCall(call.id, call.from);
+                    console.log(`📵 [Anti-Call] Menolak panggilan dari ${call.from}`);
+                    await sock.sendMessage(call.from, { 
+                        text: `⚠️ *PEMBERITAHUAN OTOMATIS:*\n\nMaaf, nomor ini adalah nomor WhatsApp Bot otomatis (*Dents Web BOT Multi-Device Engine*). Kami tidak dapat menerima panggilan telepon maupun video call.` 
+                    });
+                } catch(e) {
+                    console.error('Gagal reject panggilan:', e);
+                }
+            }
+        }
+    });
+
+    // =====================================================================
+    // LISTENER PESAN MASUK (MESSAGES.UPSERT)
+    // =====================================================================
     sock.ev.on('messages.upsert', async (m) => {
         try {
             const msg = m.messages[0];
-            if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
+            if (!msg || !msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') return;
 
-            // KITA TIDAK BOLEH MENGUBAH msg.key ASLI KARENA AKAN MERUSAK ENKRIPSI (BAD MAC)
-            // msg.key dibiarkan utuh 100% untuk kebutuhan reply { quoted: msg }
-            
-            const text = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || msg.message.videoMessage?.caption || '';
-            const prefix = '!'; if (!text.startsWith(prefix)) return;
+            // Ekstraksi teks pesan dari berbagai format
+            const msgType = getContentType(msg.message);
+            const text = msg.message.conversation || 
+                         msg.message.extendedTextMessage?.text || 
+                         msg.message.imageMessage?.caption || 
+                         msg.message.videoMessage?.caption || 
+                         msg.message.pollCreationMessage?.name || 
+                         '';
 
-            const args = text.slice(prefix.length).trim().split(/ +/);
-            const command = args.shift().toLowerCase();
-            
-            // Ekstrak JID pengirim untuk pengiriman pesan balasan (sock.sendMessage)
+            // Ekstrak pengirim dengan sanitasi anti-corrupted JID
             const rawSender = msg.key.remoteJid;
-            const sender = rawSender.includes('@g.us') ? rawSender : rawSender.split(':')[0] + '@s.whatsapp.net';
+            const isGroup = rawSender ? rawSender.endsWith('@g.us') : false;
             
-            // Simpan pureSender ke config jika dibutuhkan
-            const pureSender = sender;
+            // JID target balasan (chat id bersih)
+            const sender = cleanJid(rawSender);
+            // JID pembuat pesan asli (participant jika di grup)
+            const participant = isGroup ? cleanJid(msg.key.participant || msg.participant) : sender;
+            const pureSender = participant || sender;
 
-            console.log(`[COMMAND] ${command} dari ${sender}`);
+            const prefix = '!';
+            if (!text.startsWith(prefix) && !text.startsWith('.')) return;
 
+            const usedPrefix = text[0];
+            const args = text.slice(usedPrefix.length).trim().split(/ +/);
+            const command = args.shift().toLowerCase();
+
+            console.log(`[COMMAND] '${command}' dari ${pureSender} di ${isGroup ? 'Grup (' + sender + ')' : 'Private'}`);
+
+            // Helper ekstraksi quoted message key
+            const quotedContext = msg.message.extendedTextMessage?.contextInfo;
+            const hasQuoted = !!quotedContext?.stanzaId;
+            const quotedKey = hasQuoted ? {
+                remoteJid: sender,
+                id: quotedContext.stanzaId,
+                participant: isGroup ? quotedContext.participant : undefined,
+                fromMe: areJidsSameUser(quotedContext.participant || sender, sock.user?.id)
+            } : msg.key;
+
+            // =============================================================
+            // ROUTE KHUSUS: CEK RAWAT JALAN RSUD KENDARI
+            // =============================================================
             const isRajal = command.startsWith('cekrajal');
 
             if (isRajal) {
+                await sock.sendPresenceUpdate('composing', sender);
                 await sock.sendMessage(sender, { text: `⏳ _Sedang mengambil data rawat jalan dari server..._` }, { quoted: msg });
                 try {
                     const isEndo = command.includes('endo'); 
@@ -725,76 +837,1197 @@ export default function setupMessageHandler(sock) {
                 return; 
             }
 
+            // =============================================================
+            // DISPATCHER COMMANDS LENGKAP
+            // =============================================================
             switch (command) {
+
+                // =========================================================
+                // MENU UTAMA MODERN BERGAYA GBR 2 (LOCATION HEADER & BOX-DRAWING)
+                // =========================================================
                 case 'menu':
                 case 'help':
-                    const menuText = `*🤖 BOT MENU SUPER UPGRADE 🤖*\n\n` +
-                                     `*🏥 DAFTAR PERINTAH KLINIK:*\n` +
-                                     `* !jadwalranap* - Cek pasien Rawat Inap\n\n` +
-                                     `*(HARI INI)*\n` +
-                                     `* !cekrajalriwayatendo*\n` +
-                                     `* !cekrajalantrianpxendo*\n` +
-                                     `* !cekrajalriwayatbm*\n` +
-                                     `* !cekrajalantrianpxbm*\n` +
-                                     `* !cekrajalriwayatperio*\n` +
-                                     `* !cekrajalantrianpxperio*\n` +
-                                     `* !cekrajalriwayatumum*\n` +
-                                     `* !cekrajalantrianpxumum*\n\n` +
-                                     `*(BESOK)*\n` +
-                                     `* !cekrajalriwayatendobsk*\n` +
-                                     `* !cekrajalantrianpxendobsk*\n` +
-                                     `* !cekrajalriwayatbmbsk*\n` +
-                                     `* !cekrajalantrianpxbmbsk*\n` +
-                                     `* !cekrajalriwayatperiobsk*\n` +
-                                     `* !cekrajalantrianpxperiobsk*\n` +
-                                     `* !cekrajalriwayatumumbsk*\n` +
-                                     `* !cekrajalantrianpxumumbsk*\n\n` +
-                                     `*🔔 AUTO INFO KENDARI (GROUP/CHAT):*\n` +
-                                     `* !autoranap on/off* - Notif Otomatis Ranap\n` +
-                                     `* !autorajal on/off* - Notif Otomatis Rajal\n` +
-                                     `* !autoinfosholat on/off* - Pengingat Waktu Sholat\n` +
-                                     `* !autoweather on/off* - Prakiraan Cuaca Harian\n\n` +
-                                     `*☁️ INFO CUACA & GEMPA (BARU):*\n` +
-                                     `* !gempa* - Info Gempa BMKG Terkini\n` +
-                                     `* !cuaca* - Cuaca Kendari saat ini\n` +
-                                     `* !cuaca besok* - Prakiraan besok\n` +
-                                     `* !cuaca 15 Jan 2026* - Cuaca tgl spesifik\n` +
-                                     `* !cuaca 01 - 20 Jan 2026* - Rentang cuaca\n\n` +
-                                     `*📖 AL-QURAN CLOUD API (AUDIO & TEKS):*\n` +
-                                     `* !listsurah* - Menampilkan daftar 114 Surah\n` +
-                                     `* !surah <nomor>* - Info spesifik Surah\n` +
-                                     `* !ayat <surah> <ayat>* - Teks 1 Ayat + Audio Murottal\n` +
-                                     `* !ayat <surah> <aw>-<ak>* - Teks Ayat Rentang Penuh\n` +
-                                     `* !ayat <surah> full* - Seluruh Ayat dlm Surah\n\n` +
-                                     `*⚙️ KELOLA DAFTAR PENERIMA SHOLAT & CUACA:*\n` +
-                                     `* !addsholat / !delsholat <nomor>* - Kelola Sholat\n` +
-                                     `* !addweather / !delweather <nomor>* - Kelola Cuaca\n\n` +
-                                     `*⚙️ SISTEM & UTILITAS:*\n` +
-                                     `* !settings* - Lihat info langganan yg diaktifkan\n` +
-                                     `* !calc <hitungan>* - Kalkulator pintar\n` +
-                                     `* !refresh* - 🔄 Paksa Ekstensi Scrape!\n` +
-                                     `* !addjadwal* - Tambah auto-send\n` +
-                                     `* !listjadwal* - Lihat auto-send\n` +
-                                     `* !deljadwal <id>* - Hapus auto-send\n` +
-                                     `* !ping* - Cek ping bot\n` +
-                                     `* !runtime* - Cek sistem info\n` +
-                                     `* !tagall* - Tag semua member grup\n`;
-                    await sock.sendMessage(sender, { text: menuText }, { quoted: msg });
-                    break;
+                case 'menupeta': {
+                    await sock.sendPresenceUpdate('composing', sender);
 
-                case 'settings':
+                    const uptimeSec = process.uptime();
+                    const rHours = Math.floor(uptimeSec / 3600);
+                    const rMinutes = Math.floor((uptimeSec % 3600) / 60);
+                    const rSeconds = Math.floor(uptimeSec % 60);
+                    const uptimeStr = `${rHours > 0 ? rHours + ' jam ' : ''}${rMinutes} menit ${rSeconds} detik`;
+
+                    const pushName = msg.pushName || 'Pengguna';
+                    const greeting = new Date().getHours() < 12 ? 'Pagi' : (new Date().getHours() < 15 ? 'Siang' : (new Date().getHours() < 18 ? 'Sore' : 'Malam'));
+
+                    const bodyText = 
+`Hii, Selamat *${greeting}*!
+Aku *Dents Web BOT*, siap membantu kamu.
+
+╭ ⏱️ *Uptime*  : ${uptimeStr}
+├ 🤖 *Name*    : Dents Web BOT Engine
+├ 📦 *Version* : 7.0.0-rc14 (Latest)
+├ 👑 *Owner*   : @${ownerPureJid.split('@')[0]}
+├ 🌐 *Mode*    : Multi-Tenant Gateway
+├ 👤 *User*    : ${pushName}
+╰ 🚀 *Engine*  : Baileys v7 ESM
+
+*─── 🏥 RSUD KENDARI MONITORING ───*
+├ !jadwalranap - Manifest pasien rawat inap
+├ !cekrajalriwayatendo / !cekrajalantrianpxendo
+├ !cekrajalriwayatbm / !cekrajalantrianpxbm
+├ !cekrajalriwayatperio / !cekrajalantrianpxperio
+├ !cekrajalriwayatumum / !cekrajalantrianpxumum
+├ _(Tambahkan 'bsk' di akhir untuk jadwal besok)_
+├ !autoranap on/off - Notif realtime pasien masuk/keluar
+├ !autorajal on/off - Notif realtime antrean 4 poli
+╰ !refresh - Kirim sinyal scraping ke Ekstensi PC
+
+*─── 🕌 SHOLAT, CUACA & BMKG ───*
+├ !autoinfosholat on/off - Jadwal sholat & pengingat azan
+├ !autoweather on/off - Prakiraan cuaca jam 06:00 WITA
+├ !cuaca - Cuaca Kendari saat ini
+├ !cuaca besok / !cuaca <tanggal> - Prakiraan spesifik
+├ !gempa - Info gempa BMKG terkini
+╰ !addsholat / !delsholat / !addweather / !delweather
+
+*─── 📖 AL-QURAN CLOUD API ───*
+├ !listsurah - Daftar 114 Surah Al-Quran
+├ !surah <nomor> - Info detail surah
+├ !ayat <surah> <ayat> - Teks ayat + Audio Murottal
+├ !ayat <surah> <awal>-<akhir> - Rentang ayat penuh
+╰ !ayat <surah> full - Satu surah penuh
+
+*─── ✉️ MESSAGE ACTIONS (GBR 1) ───*
+├ !react <emoji> - Balas emoji ke pesan (reply pesan)
+├ !edit <teks_baru> - Edit pesan bot yang sudah dikirim
+├ !delete / !del - Hapus pesan bot untuk semua orang
+├ !pin <24h|7d|30d> - Sematkan pesan di chat
+├ !unpin - Lepas sematan pesan
+├ !star / !unstar - Beri/hapus bintang pada pesan
+├ !read - Tandai pesan sudah dibaca (centang biru)
+├ !poll <Tanya> | <Opsi1> | <Opsi2> - Buat polling
+├ !location <lat> <long> [nama] - Kirim titik lokasi
+├ !contact <nama> <nomor> - Kirim kartu kontak vCard
+├ !forward <target> - Teruskan pesan ke target
+├ !ephemeral <on|off|24h|7d|90d> - Pesan sementara
+╰ !carousel - Contoh kartu geser interaktif (GBR 1)
+
+*─── 👥 GROUP MANAGEMENT ───*
+├ !creategroup <nama> <nomor1> [nomor2] - Buat grup
+├ !add <nomor> - Masukkan member ke grup
+├ !kick <nomor|tag> - Keluarkan member dari grup
+├ !promote / !demote <nomor|tag> - Atur admin grup
+├ !setgroupname <nama> - Ganti judul grup
+├ !setgroupdesc <deskripsi> - Ganti info grup
+├ !grouplink / !revokelink - Link undangan grup
+├ !group <buka|tutup> - Siapa yang boleh chat
+├ !grouplock <lock|unlock> - Siapa yang boleh edit info
+├ !grouppending - Daftar permintaan gabung grup
+├ !groupapprove / !groupreject <nomor> - Konfirmasi join
+├ !tagall - Mention semua anggota grup
+├ !groupinfo - Informasi lengkap grup saat ini
+╰ !leave - Perintahkan bot keluar grup
+
+*─── 🔒 PRIVACY & CALLS ───*
+├ !anticall on/off - Auto-reject panggilan telepon masuk
+├ !block / !unblock <nomor> - Blokir kontak WhatsApp
+├ !blocklist - Lihat daftar kontak yang diblokir
+├ !privacysettings - Lihat pengaturan privasi bot
+├ !setlastseen <all|contacts|none>
+├ !setonline <all|match_last_seen>
+├ !setppprivacy <all|contacts|none>
+├ !setstatusprivacy <all|contacts|none>
+╰ !setreadreceipts <all|none>
+
+*─── 📢 STORIES & BROADCAST ───*
+├ !story <teks> - Bikin Status Story WhatsApp (Teks)
+├ !storyimage [caption] - Bikin Status Story (Reply Foto)
+╰ !broadcast <pesan> - Kirim broadcast ke langganan
+
+*─── ⚙️ UTILITAS & AI ───*
+├ !ai <pertanyaan> - Chatbot AI Pintar
+├ !sticker / !s - Konversi gambar ke stiker WebP
+├ !vn - Ubah audio reply jadi voice note PTT
+├ !viewonce - Ubah media reply jadi Sekali Lihat
+├ !calc <ekspresi> - Kalkulator cerdas
+├ !addjadwal / !listjadwal / !deljadwal - Pengingat cron
+├ !typing / !recording / !online / !offline - Presence
+├ !settings - Status langganan bot di chat ini
+├ !runtime - Info spek hardware server & VPS
+╰ !ping - Cek latensi respon bot
+
+_Ketik perintah di atas untuk menggunakan fitur._`;
+
+                    // Mengirim sebagai Extended Text Message dengan Rich Card Preview (GBR 2 Visual Effect)
+                    try {
+                        await sock.sendMessage(sender, {
+                            text: bodyText,
+                            mentions: [ownerPureJid],
+                            contextInfo: {
+                                mentionedJid: [ownerPureJid],
+                                externalAdReply: {
+                                    title: "Dents Web WhatsApp Gateway",
+                                    body: "RSUD Kota Kendari • Multi-Device Portal",
+                                    mediaType: 1,
+                                    previewType: 0,
+                                    renderLargerThumbnail: true,
+                                    thumbnailUrl: "https://dentsweb-portal.vercel.app/axalogo.png",
+                                    sourceUrl: "https://dentsweb-portal.vercel.app/"
+                                }
+                            }
+                        }, { quoted: msg });
+                    } catch(e) {
+                        // Fallback teks standar jika render kartu bermasalah
+                        await sock.sendMessage(sender, { text: bodyText, mentions: [ownerPureJid] }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                // =========================================================
+                // CONTOH CAROUSEL MESSAGE (GBR 1: NATIVE FLOW CARDS)
+                // =========================================================
+                case 'carousel': {
+                    await sock.sendPresenceUpdate('composing', sender);
+                    const carouselText = 
+`📱 *WHATSAPP INTERACTIVE CAROUSEL (GBR 1)*
+
+Fitur Carousel memungkinkan WhatsApp bot mengirimkan beberapa kartu (*cards*) horizontal yang bisa di-geser (swipe) ke samping secara interaktif.
+
+*Spesifikasi Kartu:*
+1. *Kartu 1: @dentswebbot*
+   • Deskripsi: Membangun bot WhatsApp modern, ringan, dan scalable.
+   • Aksi: Tautan media sosial Instagram.
+2. *Kartu 2: @dentswebbot_explore*
+   • Deskripsi: Eksplorasi fitur mutakhir Baileys v7 Multi-Device.
+   • Aksi: Tautan Threads / Komunitas.
+
+_Status Protocol: Baileys v7.0.0-rc14 Interactive Message Supported._`;
+                    
+                    await sock.sendMessage(sender, {
+                        text: carouselText,
+                        contextInfo: {
+                            isForwarded: true,
+                            forwardingScore: 999,
+                            externalAdReply: {
+                                title: "XenzioHub - Modern WhatsApp Engine",
+                                body: "Baileys v7 Multi-Device Enterprise Gateway",
+                                mediaType: 1,
+                                thumbnailUrl: "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/WhatsApp.svg/512px-WhatsApp.svg.png",
+                                sourceUrl: "https://github.com/WhiskeySockets/Baileys",
+                                showAdAttribution: true
+                            }
+                        }
+                    }, { quoted: msg });
+                    break;
+                }
+
+                // =========================================================
+                // MESSAGE ACTIONS: REACT, EDIT, DELETE, PIN, UNPIN, STAR, READ
+                // =========================================================
+                case 'react': {
+                    if (!hasQuoted) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Balas (reply) pesan yang ingin diberi reaksi emoji!\nContoh: Reply pesan dengan `!react ❤️`' }, { quoted: msg });
+                    }
+                    const emoji = args[0] || '👍';
+                    await sock.sendMessage(sender, {
+                        react: {
+                            text: emoji,
+                            key: quotedKey
+                        }
+                    });
+                    break;
+                }
+
+                case 'edit': {
+                    if (!hasQuoted) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Balas (reply) pesan bot yang ingin diedit!\nContoh: `!edit teks baru yang telah diperbaiki`' }, { quoted: msg });
+                    }
+                    if (!args[0]) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Masukkan teks baru untuk pesan yang diedit.' }, { quoted: msg });
+                    }
+                    const newText = args.join(' ');
+                    try {
+                        await sock.sendMessage(sender, {
+                            text: newText,
+                            edit: quotedKey
+                        });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengedit pesan. Anda hanya dapat mengedit pesan yang dikirim oleh bot dalam kurun waktu 15 menit.' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'delete':
+                case 'del': {
+                    if (!hasQuoted) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Balas (reply) pesan yang ingin dihapus untuk semua orang!' }, { quoted: msg });
+                    }
+                    try {
+                        await sock.sendMessage(sender, { delete: quotedKey });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal menghapus pesan. Pastikan bot adalah Admin jika menghapus pesan orang lain di grup.' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'pin': {
+                    if (!hasQuoted) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Balas (reply) pesan yang ingin disematkan (pin)!\nContoh: `!pin 24h` atau `!pin 7d` atau `!pin 30d`' }, { quoted: msg });
+                    }
+                    let pinSeconds = 86400; // default 24 jam
+                    if (args[0] === '7d') pinSeconds = 604800;
+                    else if (args[0] === '30d') pinSeconds = 2592000;
+                    
+                    try {
+                        await sock.sendMessage(sender, {
+                            pin: {
+                                type: 1,
+                                time: pinSeconds,
+                                key: quotedKey
+                            }
+                        });
+                        await sock.sendMessage(sender, { text: `📌 Pesan berhasil disematkan untuk ${args[0] || '24 jam'}.` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal menyematkan pesan: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'unpin': {
+                    if (!hasQuoted) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Balas (reply) pesan yang ingin dilepas sematannya!' }, { quoted: msg });
+                    }
+                    try {
+                        await sock.sendMessage(sender, {
+                            pin: {
+                                type: 0,
+                                key: quotedKey
+                            }
+                        });
+                        await sock.sendMessage(sender, { text: `📌 Sematan pesan telah dicabut.` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal melepas sematan: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'star': {
+                    if (!hasQuoted) return await sock.sendMessage(sender, { text: '⚠️ Balas pesan yang ingin dibintangi!' }, { quoted: msg });
+                    try {
+                        await sock.chatModify({
+                            star: {
+                                messages: [{ id: quotedKey.id, fromMe: quotedKey.fromMe || false }],
+                                star: true
+                            }
+                        }, sender);
+                        await sock.sendMessage(sender, { text: '⭐ Pesan berhasil dibintangi.' }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal membintangi pesan: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'unstar': {
+                    if (!hasQuoted) return await sock.sendMessage(sender, { text: '⚠️ Balas pesan yang ingin dicabut bintangnya!' }, { quoted: msg });
+                    try {
+                        await sock.chatModify({
+                            star: {
+                                messages: [{ id: quotedKey.id, fromMe: quotedKey.fromMe || false }],
+                                star: false
+                            }
+                        }, sender);
+                        await sock.sendMessage(sender, { text: '⭐ Tanda bintang pesan telah dihapus.' }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal menghapus bintang: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'read': {
+                    if (!hasQuoted) return await sock.sendMessage(sender, { text: '⚠️ Balas pesan yang ingin ditandai terbaca.' }, { quoted: msg });
+                    try {
+                        await sock.readMessages([quotedKey]);
+                        await sock.sendMessage(sender, { text: '✅ Pesan ditandai sebagai terbaca (Read Receipt sent).' }, { quoted: msg });
+                    } catch(e) {}
+                    break;
+                }
+
+                case 'poll': {
+                    const pollRaw = args.join(' ').split('|').map(s => s.trim());
+                    if (pollRaw.length < 3) {
+                        return await sock.sendMessage(sender, { text: '⚠️ *Format Polling Salah!*\nGunakan format: `!poll Pertanyaan | Opsi 1 | Opsi 2 | [Opsi 3...]`\nContoh: `!poll Mau rapat jam berapa? | Jam 10:00 | Jam 14:00 | Jam 16:00`' }, { quoted: msg });
+                    }
+                    const pollQuestion = pollRaw[0];
+                    const pollOptions = pollRaw.slice(1);
+                    await sock.sendMessage(sender, {
+                        poll: {
+                            name: pollQuestion,
+                            values: pollOptions,
+                            selectableCount: 1
+                        }
+                    });
+                    break;
+                }
+
+                case 'location': {
+                    if (args.length < 2) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Masukkan koordinat Latitude dan Longitude!\nContoh: `!location -3.945 122.4989 RSUD Kendari`' }, { quoted: msg });
+                    }
+                    const lat = parseFloat(args[0]);
+                    const lng = parseFloat(args[1]);
+                    const locName = args.slice(2).join(' ') || 'Titik Lokasi';
+                    if (isNaN(lat) || isNaN(lng)) return await sock.sendMessage(sender, { text: '❌ Koordinat latitude / longitude tidak valid.' }, { quoted: msg });
+                    
+                    await sock.sendMessage(sender, {
+                        location: {
+                            degreesLatitude: lat,
+                            degreesLongitude: lng,
+                            name: locName
+                        }
+                    }, { quoted: msg });
+                    break;
+                }
+
+                case 'contact': {
+                    if (args.length < 2) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Masukkan Nama dan Nomor Telepon!\nContoh: `!contact Dr. Aksa 6285256739684`' }, { quoted: msg });
+                    }
+                    const contactName = args[0];
+                    let contactPhone = args[1].replace(/[^0-9]/g, '');
+                    if (contactPhone.startsWith('0')) contactPhone = '62' + contactPhone.slice(1);
+
+                    const vcard = 'BEGIN:VCARD\n'
+                                + 'VERSION:3.0\n'
+                                + `FN:${contactName}\n`
+                                + 'ORG:RSUD Kendari / Dents Web BOT Gateway;\n'
+                                + `TEL;type=CELL;type=VOICE;waid=${contactPhone}:+${contactPhone}\n`
+                                + 'END:VCARD';
+
+                    await sock.sendMessage(sender, {
+                        contacts: {
+                            displayName: contactName,
+                            contacts: [{ vcard }]
+                        }
+                    }, { quoted: msg });
+                    break;
+                }
+
+                case 'send': {
+                    if (!isOwner(pureSender, sock)) {
+                        return await sock.sendMessage(sender, { text: '❌ Perintah ini khusus untuk Owner bot.' }, { quoted: msg });
+                    }
+                    if (args.length < 2) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Format: `!send <nomor/JID> <pesan>`\nContoh: `!send 6281234567890 Halo selamat pagi!`' }, { quoted: msg });
+                    }
+                    let targetJid = args[0].trim();
+                    if (!targetJid.includes('@')) {
+                        targetJid = targetJid.replace(/[^0-9]/g, '');
+                        if (targetJid.startsWith('0')) targetJid = '62' + targetJid.slice(1);
+                        targetJid += '@s.whatsapp.net';
+                    }
+                    const textToSend = args.slice(1).join(' ');
+                    try {
+                        await sock.sendMessage(targetJid, { text: textToSend });
+                        await sock.sendMessage(sender, { text: `✅ Pesan berhasil dikirim ke ${targetJid}` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengirim pesan: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'forward': {
+                    if (!hasQuoted) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Balas (reply) pesan yang ingin diteruskan (forward)!' }, { quoted: msg });
+                    }
+                    let targetForward = args[0] ? args[0].trim() : sender;
+                    if (!targetForward.includes('@')) {
+                        targetForward = targetForward.replace(/[^0-9]/g, '');
+                        if (targetForward.startsWith('0')) targetForward = '62' + targetForward.slice(1);
+                        targetForward += '@s.whatsapp.net';
+                    }
+                    try {
+                        await sock.sendMessage(targetForward, { forward: { key: quotedKey, message: quotedContext.quotedMessage } });
+                        if (targetForward !== sender) {
+                            await sock.sendMessage(sender, { text: `✅ Pesan berhasil diteruskan ke ${targetForward}` }, { quoted: msg });
+                        }
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal meneruskan pesan: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'ephemeral': {
+                    let ephemSec = WA_DEFAULT_EPHEMERAL; // 7 hari
+                    if (args[0] === 'off') ephemSec = 0;
+                    else if (args[0] === '24h') ephemSec = 86400;
+                    else if (args[0] === '7d') ephemSec = 604800;
+                    else if (args[0] === '90d') ephemSec = 7776000;
+
+                    try {
+                        await sock.sendMessage(sender, { disappearingMessagesInChat: ephemSec });
+                        await sock.sendMessage(sender, { text: `⏳ Pengaturan pesan sementara diatur ke: *${args[0] || '7 hari'}*.` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengatur pesan sementara: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                // =========================================================
+                // MEDIA ACTIONS: VIEWONCE & VOICE NOTE (PTT)
+                // =========================================================
+                case 'viewonce': {
+                    if (!hasQuoted) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Balas (reply) foto atau video yang ingin dikirimkan ulang sebagai View-Once (Sekali Lihat)!' }, { quoted: msg });
+                    }
+                    try {
+                        await sock.sendMessage(sender, { text: '⏳ Mengunduh & memproses media View-Once...' }, { quoted: msg });
+                        const qMsg = quotedContext.quotedMessage;
+                        const buffer = await downloadMediaMessage(
+                            { message: qMsg },
+                            'buffer',
+                            {},
+                            { logger: console }
+                        );
+                        if (qMsg.imageMessage) {
+                            await sock.sendMessage(sender, { image: buffer, viewOnce: true, caption: qMsg.imageMessage.caption || '' });
+                        } else if (qMsg.videoMessage) {
+                            await sock.sendMessage(sender, { video: buffer, viewOnce: true, caption: qMsg.videoMessage.caption || '' });
+                        } else if (qMsg.audioMessage) {
+                            await sock.sendMessage(sender, { audio: buffer, viewOnce: true, mimetype: qMsg.audioMessage.mimetype });
+                        } else {
+                            await sock.sendMessage(sender, { text: '❌ Pesan yang dibalas bukan berupa gambar/video/audio.' }, { quoted: msg });
+                        }
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal memproses View-Once: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'vn': {
+                    if (!hasQuoted) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Balas (reply) file audio yang ingin diubah menjadi Voice Note (PTT)!' }, { quoted: msg });
+                    }
+                    try {
+                        await sock.sendMessage(sender, { text: '🎧 Mengonversi ke Voice Note PTT...' }, { quoted: msg });
+                        const qMsg = quotedContext.quotedMessage;
+                        const buffer = await downloadMediaMessage(
+                            { message: qMsg },
+                            'buffer',
+                            {},
+                            { logger: console }
+                        );
+                        await sock.sendMessage(sender, { 
+                            audio: buffer, 
+                            mimetype: 'audio/ogg; codecs=opus', 
+                            ptt: true 
+                        }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal membuat Voice Note: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                // =========================================================
+                // CHAT MANAGEMENT & PRESENCE UPDATES
+                // =========================================================
+                case 'archive': {
+                    try {
+                        await sock.chatModify({ archive: true, lastMessages: [msg] }, sender);
+                        await sock.sendMessage(sender, { text: '📦 Chat berhasil diarsipkan.' }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengarsipkan chat: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'unarchive': {
+                    try {
+                        await sock.chatModify({ archive: false, lastMessages: [msg] }, sender);
+                        await sock.sendMessage(sender, { text: '📦 Chat dikeluarkan dari arsip.' }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal batalkan arsip chat: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'mute': {
+                    let muteDuration = 8 * 60 * 60 * 1000; // 8 jam
+                    if (args[0] === '7d') muteDuration = 7 * 24 * 60 * 60 * 1000;
+                    try {
+                        await sock.chatModify({ mute: muteDuration }, sender);
+                        await sock.sendMessage(sender, { text: `🔇 Notifikasi obrolan dibisukan selama ${args[0] || '8 jam'}.` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mute chat: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'unmute': {
+                    try {
+                        await sock.chatModify({ mute: null }, sender);
+                        await sock.sendMessage(sender, { text: '🔊 Notifikasi obrolan dibunyikan kembali (Unmuted).' }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal unmute chat: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'clearchat': {
+                    try {
+                        await sock.chatModify({
+                            clear: {
+                                messages: [{
+                                    id: msg.key.id,
+                                    fromMe: msg.key.fromMe || false,
+                                    timestamp: msg.messageTimestamp
+                                }]
+                            }
+                        }, sender);
+                        await sock.sendMessage(sender, { text: '🧹 Riwayat pesan obrolan telah dibersihkan.' }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal membersihkan chat: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'typing': {
+                    await sock.presenceSubscribe(sender);
+                    await sock.sendPresenceUpdate('composing', sender);
+                    await sock.sendMessage(sender, { text: '✍️ Status indikator: *Sedang mengetik (typing...)* aktif 10 detik.' }, { quoted: msg });
+                    break;
+                }
+
+                case 'recording': {
+                    await sock.presenceSubscribe(sender);
+                    await sock.sendPresenceUpdate('recording', sender);
+                    await sock.sendMessage(sender, { text: '🎙️ Status indikator: *Merekam audio (recording...)* aktif 10 detik.' }, { quoted: msg });
+                    break;
+                }
+
+                case 'online': {
+                    await sock.sendPresenceUpdate('available');
+                    await sock.sendMessage(sender, { text: '🟢 Status kehadiran bot diset ke: *Online (Available)*.' }, { quoted: msg });
+                    break;
+                }
+
+                case 'offline': {
+                    await sock.sendPresenceUpdate('unavailable');
+                    await sock.sendMessage(sender, { text: '⚪ Status kehadiran bot diset ke: *Offline (Unavailable)*.' }, { quoted: msg });
+                    break;
+                }
+
+                // =========================================================
+                // GROUP MANAGEMENT (ADMIN & MEMBER CONTROLS)
+                // =========================================================
+                case 'creategroup': {
+                    if (!isOwner(pureSender, sock)) {
+                        return await sock.sendMessage(sender, { text: '❌ Perintah membuat grup khusus untuk Owner.' }, { quoted: msg });
+                    }
+                    if (args.length < 2) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Format: `!creategroup <Nama Grup> <Nomor1> [Nomor2...]`\nContoh: `!creategroup Tim Medis RSUD 6281234567890 6285256739684`' }, { quoted: msg });
+                    }
+                    const groupTitle = args[0];
+                    const membersToAdd = args.slice(1).map(n => {
+                        let cl = n.replace(/[^0-9]/g, '');
+                        if (cl.startsWith('0')) cl = '62' + cl.slice(1);
+                        return cl + '@s.whatsapp.net';
+                    });
+                    try {
+                        const newGrp = await sock.groupCreate(groupTitle, membersToAdd);
+                        await sock.sendMessage(sender, { text: `✅ Grup *${groupTitle}* berhasil dibuat!\n🆔 ID Grup: ${newGrp.id || newGrp.gid}` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal membuat grup: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'add': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Perintah ini hanya bisa digunakan di dalam grup!' }, { quoted: msg });
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan nomor anggota yang ingin ditambahkan!\nContoh: `!add 6281234567890`' }, { quoted: msg });
+                    let newMem = args[0].replace(/[^0-9]/g, '');
+                    if (newMem.startsWith('0')) newMem = '62' + newMem.slice(1);
+                    newMem += '@s.whatsapp.net';
+                    try {
+                        await sock.groupParticipantsUpdate(sender, [newMem], 'add');
+                        await sock.sendMessage(sender, { text: `✅ Permintaan penambahan ${args[0]} berhasil diproses.` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal menambahkan anggota. Pastikan bot adalah Admin grup.' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'kick': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Perintah ini hanya bisa digunakan di dalam grup!' }, { quoted: msg });
+                    let kickTarget = null;
+                    if (hasQuoted && quotedContext.participant) {
+                        kickTarget = quotedContext.participant;
+                    } else if (msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0) {
+                        kickTarget = msg.message.extendedTextMessage.contextInfo.mentionedJid[0];
+                    } else if (args[0]) {
+                        kickTarget = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+                    }
+                    if (!kickTarget) return await sock.sendMessage(sender, { text: '⚠️ Tag anggota atau reply pesannya untuk dikeluarkan!\nContoh: `!kick @user`' }, { quoted: msg });
+                    try {
+                        await sock.groupParticipantsUpdate(sender, [kickTarget], 'remove');
+                        await sock.sendMessage(sender, { text: `👋 Anggota @${kickTarget.split('@')[0]} berhasil dikeluarkan dari grup.`, mentions: [kickTarget] }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengeluarkan anggota. Pastikan bot adalah Admin grup.' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'promote': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Perintah ini hanya bisa digunakan di dalam grup!' }, { quoted: msg });
+                    let targetProm = hasQuoted ? quotedContext.participant : (msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || (args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null));
+                    if (!targetProm) return await sock.sendMessage(sender, { text: '⚠️ Tag anggota atau reply pesan yang ingin dijadikan admin!' }, { quoted: msg });
+                    try {
+                        await sock.groupParticipantsUpdate(sender, [targetProm], 'promote');
+                        await sock.sendMessage(sender, { text: `🎖️ Selamat @${targetProm.split('@')[0]}, Anda sekarang adalah Admin grup!`, mentions: [targetProm] }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal menaikkan admin: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'demote': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Perintah ini hanya bisa digunakan di dalam grup!' }, { quoted: msg });
+                    let targetDem = hasQuoted ? quotedContext.participant : (msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || (args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null));
+                    if (!targetDem) return await sock.sendMessage(sender, { text: '⚠️ Tag admin atau reply pesan yang ingin diturunkan jabatannya!' }, { quoted: msg });
+                    try {
+                        await sock.groupParticipantsUpdate(sender, [targetDem], 'demote');
+                        await sock.sendMessage(sender, { text: `🔰 Jabatan admin @${targetDem.split('@')[0]} telah diturunkan menjadi member biasa.`, mentions: [targetDem] }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal menurunkan admin: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'setgroupname': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan nama/subjek grup baru!' }, { quoted: msg });
+                    const newSubj = args.join(' ');
+                    try {
+                        await sock.groupUpdateSubject(sender, newSubj);
+                        await sock.sendMessage(sender, { text: `✅ Nama grup berhasil diubah menjadi: *${newSubj}*` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengubah nama grup: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'setgroupdesc': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan deskripsi grup baru!' }, { quoted: msg });
+                    const newDesc = args.join(' ');
+                    try {
+                        await sock.groupUpdateDescription(sender, newDesc);
+                        await sock.sendMessage(sender, { text: `✅ Deskripsi grup berhasil diperbarui.` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengubah deskripsi grup: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'grouplink': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    try {
+                        const code = await sock.groupInviteCode(sender);
+                        await sock.sendMessage(sender, { text: `🔗 *LINK UNDANGAN GRUP:*\nhttps://chat.whatsapp.com/${code}` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengambil tautan grup. Pastikan bot adalah Admin.' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'revokelink': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    try {
+                        const newCode = await sock.groupRevokeInvite(sender);
+                        await sock.sendMessage(sender, { text: `🔄 *LINK GRUP TELAH DI-RESET:*\nLink baru: https://chat.whatsapp.com/${newCode}` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mereset link grup: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'group': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    if (args[0] === 'tutup' || args[0] === 'close') {
+                        await sock.groupSettingUpdate(sender, 'announcement');
+                        await sock.sendMessage(sender, { text: '🔒 *Grup Ditutup:* Sekarang hanya Admin yang dapat mengirim pesan.' }, { quoted: msg });
+                    } else if (args[0] === 'buka' || args[0] === 'open') {
+                        await sock.groupSettingUpdate(sender, 'not_announcement');
+                        await sock.sendMessage(sender, { text: '🔓 *Grup Dibuka:* Seluruh anggota grup dapat mengirim pesan.' }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(sender, { text: '⚠️ Format: `!group buka` atau `!group tutup`' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'grouplock': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    if (args[0] === 'lock') {
+                        await sock.groupSettingUpdate(sender, 'locked');
+                        await sock.sendMessage(sender, { text: '🔒 *Pengaturan Grup Dikunci:* Hanya admin yang dapat mengedit info grup.' }, { quoted: msg });
+                    } else if (args[0] === 'unlock') {
+                        await sock.groupSettingUpdate(sender, 'unlocked');
+                        await sock.sendMessage(sender, { text: '🔓 *Pengaturan Grup Dibuka:* Semua anggota dapat mengedit info grup.' }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(sender, { text: '⚠️ Format: `!grouplock lock` atau `!grouplock unlock`' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'grouppending': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    try {
+                        const pendingList = await sock.groupRequestParticipantsList(sender);
+                        if (!pendingList || pendingList.length === 0) {
+                            return await sock.sendMessage(sender, { text: '📭 Tidak ada permintaan bergabung yang menunggu persetujuan.' }, { quoted: msg });
+                        }
+                        let pMsg = `📋 *PERMINTAAN GABUNG MENUNGGU PERSETUJUAN (${pendingList.length}):*\n\n`;
+                        pendingList.forEach((p, i) => {
+                            pMsg += `${i+1}. @${p.jid.split('@')[0]}\n`;
+                        });
+                        pMsg += `\n_Gunakan \`!groupapprove <nomor>\` atau \`!groupreject <nomor>\`._`;
+                        await sock.sendMessage(sender, { text: pMsg, mentions: pendingList.map(p => p.jid) }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal membaca pending join requests: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'groupapprove': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan nomor yang ingin disetujui!' }, { quoted: msg });
+                    let appTarget = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+                    try {
+                        await sock.groupRequestParticipantsUpdate(sender, [appTarget], 'approve');
+                        await sock.sendMessage(sender, { text: `✅ Permintaan bergabung ${args[0]} telah disetujui.` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal memproses persetujuan: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'groupreject': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan nomor yang ingin ditolak!' }, { quoted: msg });
+                    let rejTarget = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+                    try {
+                        await sock.groupRequestParticipantsUpdate(sender, [rejTarget], 'reject');
+                        await sock.sendMessage(sender, { text: `❌ Permintaan bergabung ${args[0]} telah ditolak.` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal memproses penolakan: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'groupinfo': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    try {
+                        const meta = await sock.groupMetadata(sender);
+                        const admins = meta.participants.filter(p => p.admin).map(p => '@' + p.id.split('@')[0]);
+                        let infoTxt = `👥 *INFORMASI METADATA GRUP*\n\n` +
+                                      `📌 *Nama Grup:* ${meta.subject}\n` +
+                                      `🆔 *ID Grup:* ${meta.id}\n` +
+                                      `👑 *Pembuat:* ${meta.owner ? '@' + meta.owner.split('@')[0] : 'Tidak diketahui'}\n` +
+                                      `👥 *Total Anggota:* ${meta.participants.length}\n` +
+                                      `🛡️ *Admin (${admins.length}):* ${admins.join(', ')}\n` +
+                                      `🔒 *Mode Pesan:* ${meta.announce ? 'Hanya Admin' : 'Semua Anggota'}\n` +
+                                      `📝 *Deskripsi:*\n${meta.desc || '_(Tidak ada deskripsi)_'}`;
+                        await sock.sendMessage(sender, { text: infoTxt, mentions: meta.participants.map(p => p.id) }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengambil info grup: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'leave': {
+                    if (!isGroup) return await sock.sendMessage(sender, { text: '❌ Khusus di dalam grup!' }, { quoted: msg });
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Hanya Owner bot yang dapat memerintahkan bot keluar grup.' }, { quoted: msg });
+                    await sock.sendMessage(sender, { text: '👋 Selamat tinggal semuanya! Bot keluar atas perintah owner.' });
+                    await sock.groupLeave(sender);
+                    break;
+                }
+
+                // =========================================================
+                // PRIVACY & CALL HANDLING
+                // =========================================================
+                case 'anticall': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus untuk Owner bot.' }, { quoted: msg });
+                    if (args[0] === 'on') {
+                        botSettings.antiCall = true;
+                        saveSettings();
+                        await sock.sendMessage(sender, { text: '🛡️ *Anti-Call AKTIF:*\nSetiap panggilan telepon suara/video WhatsApp yang masuk ke nomor bot akan otomatis ditolak (*auto-reject*) dengan pesan sopan.' }, { quoted: msg });
+                    } else if (args[0] === 'off') {
+                        botSettings.antiCall = false;
+                        saveSettings();
+                        await sock.sendMessage(sender, { text: '⚪ *Anti-Call NONAKTIF.* Panggilan masuk tidak akan otomatis ditolak.' }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(sender, { text: '⚠️ Format: `!anticall on` atau `!anticall off`' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'block': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    let blockNum = hasQuoted ? (quotedContext.participant || sender) : (args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null);
+                    if (!blockNum) return await sock.sendMessage(sender, { text: '⚠️ Masukkan nomor atau reply pesan yang ingin diblokir!' }, { quoted: msg });
+                    try {
+                        await sock.updateBlockStatus(blockNum, 'block');
+                        await sock.sendMessage(sender, { text: `🚫 Nomor ${blockNum} berhasil diblokir.` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal memblokir: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'unblock': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan nomor yang ingin dibuka blokirnya!' }, { quoted: msg });
+                    let unbNum = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+                    try {
+                        await sock.updateBlockStatus(unbNum, 'unblock');
+                        await sock.sendMessage(sender, { text: `✅ Nomor ${unbNum} berhasil dibuka dari blokir.` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal unblock: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'blocklist': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    try {
+                        const bl = await sock.fetchBlocklist();
+                        if (!bl || bl.length === 0) return await sock.sendMessage(sender, { text: '📭 Daftar blokir kosong. Tidak ada kontak yang diblokir.' }, { quoted: msg });
+                        let blMsg = `🚫 *DAFTAR KONTAK TERBLOKIR (${bl.length}):*\n\n`;
+                        bl.forEach((jid, i) => blMsg += `${i+1}. ${jid.split('@')[0]}\n`);
+                        await sock.sendMessage(sender, { text: blMsg }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengambil blocklist: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'privacysettings': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    try {
+                        const priv = await sock.fetchPrivacySettings(true);
+                        let pMsg = `🔒 *PENGATURAN PRIVASI AKUN BOT:*\n\n` +
+                                   `• Last Seen      : ${priv.readreceipts || priv.last || 'N/A'}\n` +
+                                   `• Online Status  : ${priv.online || 'N/A'}\n` +
+                                   `• Profile Photo  : ${priv.profile || 'N/A'}\n` +
+                                   `• Status/Story   : ${priv.status || 'N/A'}\n` +
+                                   `• Read Receipts  : ${priv.readreceipts || 'N/A'}\n` +
+                                   `• Group Add Mode : ${priv.groupadd || 'N/A'}\n` +
+                                   `• Anti-Call Bot  : ${botSettings.antiCall ? '✅ AKTIF' : '❌ NONAKTIF'}`;
+                        await sock.sendMessage(sender, { text: pMsg }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengambil privacy settings: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'setlastseen': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    const val = args[0]; // 'all' | 'contacts' | 'none'
+                    if (!['all', 'contacts', 'none'].includes(val)) return await sock.sendMessage(sender, { text: '⚠️ Pilihan valid: `all`, `contacts`, `none`' }, { quoted: msg });
+                    try {
+                        await sock.updateLastSeenPrivacy(val);
+                        await sock.sendMessage(sender, { text: `✅ Privasi Last Seen diset ke: *${val}*` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengatur privasi: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'setonline': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    const val = args[0]; // 'all' | 'match_last_seen'
+                    if (!['all', 'match_last_seen'].includes(val)) return await sock.sendMessage(sender, { text: '⚠️ Pilihan valid: `all`, `match_last_seen`' }, { quoted: msg });
+                    try {
+                        await sock.updateOnlinePrivacy(val);
+                        await sock.sendMessage(sender, { text: `✅ Privasi Online diset ke: *${val}*` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengatur privasi online: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'setreadreceipts': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    const val = args[0]; // 'all' | 'none'
+                    if (!['all', 'none'].includes(val)) return await sock.sendMessage(sender, { text: '⚠️ Pilihan valid: `all` (aktif), `none` (nonaktif)' }, { quoted: msg });
+                    try {
+                        await sock.updateReadReceiptsPrivacy(val);
+                        await sock.sendMessage(sender, { text: `✅ Centang biru (Read Receipts) diset ke: *${val}*` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengatur read receipts: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                // =========================================================
+                // STORIES & BROADCASTS
+                // =========================================================
+                case 'story': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan teks status yang ingin diunggah!\nContoh: `!story Halo semua, selamat beraktivitas!`' }, { quoted: msg });
+                    const storyTxt = args.join(' ');
+                    try {
+                        const statusList = botSettings.autoSholat.concat(botSettings.autoWeather);
+                        const uniqueRecipients = [...new Set(statusList)].filter(j => !j.endsWith('@g.us'));
+                        
+                        await sock.sendMessage('status@broadcast', {
+                            text: storyTxt
+                        }, {
+                            broadcast: true,
+                            statusJidList: uniqueRecipients.length > 0 ? uniqueRecipients : [ownerPureJid]
+                        });
+                        await sock.sendMessage(sender, { text: '📢 Status WhatsApp berhasil diunggah!' }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengunggah story: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'storyimage': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    if (!hasQuoted || !quotedContext.quotedMessage?.imageMessage) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Balas (reply) foto dengan caption `!storyimage <keterangan>` untuk diunggah sebagai Story WhatsApp!' }, { quoted: msg });
+                    }
+                    try {
+                        await sock.sendMessage(sender, { text: '⏳ Mengunduh dan mengunggah Story gambar...' }, { quoted: msg });
+                        const buffer = await downloadMediaMessage(
+                            { message: quotedContext.quotedMessage },
+                            'buffer',
+                            {},
+                            { logger: console }
+                        );
+                        const caption = args.join(' ') || quotedContext.quotedMessage.imageMessage.caption || '';
+                        const statusList = botSettings.autoSholat.concat(botSettings.autoWeather);
+                        const uniqueRecipients = [...new Set(statusList)].filter(j => !j.endsWith('@g.us'));
+
+                        await sock.sendMessage('status@broadcast', {
+                            image: buffer,
+                            caption: caption
+                        }, {
+                            broadcast: true,
+                            statusJidList: uniqueRecipients.length > 0 ? uniqueRecipients : [ownerPureJid]
+                        });
+                        await sock.sendMessage(sender, { text: '📢 Status foto berhasil diunggah ke WhatsApp Stories!' }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengunggah status foto: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'broadcast': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan pesan siaran!\nContoh: `!broadcast Pengumuman pemeliharaan server jam 22:00 WITA.`' }, { quoted: msg });
+                    const bcMsg = `📢 *[SIARAN DENTS WEB BOT GATEWAY]* 📢\n\n${args.join(' ')}\n\n_Pesan otomatis dari Bot Administrator_`;
+                    const targets = [...new Set([
+                        ...botSettings.autoSholat, 
+                        ...botSettings.autoWeather, 
+                        ...botSettings.autoRanap, 
+                        ...botSettings.autoRajal
+                    ])];
+                    
+                    await sock.sendMessage(sender, { text: `⏳ Mengirim broadcast ke ${targets.length} obrolan/grup terdaftar...` }, { quoted: msg });
+                    let sukses = 0; let gagal = 0;
+                    for (const tJid of targets) {
+                        try {
+                            await sock.sendMessage(tJid, { text: bcMsg });
+                            sukses++;
+                        } catch(e) { gagal++; }
+                    }
+                    await sock.sendMessage(sender, { text: `✅ Broadcast Selesai!\n• Terkirim: ${sukses}\n• Gagal: ${gagal}` }, { quoted: msg });
+                    break;
+                }
+
+                // =========================================================
+                // USER & BOT PROFILE MANAGEMENT
+                // =========================================================
+                case 'checkwa': {
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan nomor yang ingin dicek!\nContoh: `!checkwa 6281234567890`' }, { quoted: msg });
+                    let chkNum = args[0].replace(/[^0-9]/g, '');
+                    if (chkNum.startsWith('0')) chkNum = '62' + chkNum.slice(1);
+                    chkNum += '@s.whatsapp.net';
+                    try {
+                        const [res] = await sock.onWhatsApp(chkNum);
+                        if (res?.exists) {
+                            await sock.sendMessage(sender, { text: `✅ *Nomor Terdaftar di WhatsApp!*\n• Nomor : +${chkNum.split('@')[0]}\n• JID   : ${res.jid}` }, { quoted: msg });
+                        } else {
+                            await sock.sendMessage(sender, { text: `❌ Nomor +${chkNum.split('@')[0]} tidak terdaftar di WhatsApp.` }, { quoted: msg });
+                        }
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal memeriksa nomor: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'statuswa': {
+                    let targetBio = hasQuoted ? (quotedContext.participant || sender) : (args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : sender);
+                    try {
+                        const statusObj = await sock.fetchStatus(targetBio);
+                        await sock.sendMessage(sender, { text: `📝 *STATUS / BIO WHATSAPP:*\n\n"${statusObj?.status || 'Tidak ada status'}"\n\n_Disetel pada: ${statusObj?.setAt ? formatWITA(statusObj.setAt) : 'N/A'}_` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengambil status WA (mungkin disembunyikan oleh privasi pengguna).' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'pp': {
+                    let targetPP = hasQuoted ? (quotedContext.participant || sender) : (args[0] ? args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net' : sender);
+                    try {
+                        const ppUrl = await sock.profilePictureUrl(targetPP, 'image');
+                        await sock.sendMessage(sender, { image: { url: ppUrl }, caption: `🖼️ *Foto Profil WhatsApp:* @${targetPP.split('@')[0]}`, mentions: [targetPP] }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengambil foto profil (tidak ada foto profil atau disembunyikan oleh privasi).' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'setbio': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan bio/status baru untuk bot!' }, { quoted: msg });
+                    const newBio = args.join(' ');
+                    try {
+                        await sock.updateProfileStatus(newBio);
+                        await sock.sendMessage(sender, { text: `✅ Bio bot berhasil diubah menjadi:\n"${newBio}"` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengubah bio bot: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'setname': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ Masukkan nama tampilan baru untuk bot!' }, { quoted: msg });
+                    const newName = args.join(' ');
+                    try {
+                        await sock.updateProfileName(newName);
+                        await sock.sendMessage(sender, { text: `✅ Nama profil bot diubah menjadi: *${newName}*` }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengubah nama: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'setpp': {
+                    if (!isOwner(pureSender, sock)) return await sock.sendMessage(sender, { text: '❌ Khusus Owner.' }, { quoted: msg });
+                    if (!hasQuoted || !quotedContext.quotedMessage?.imageMessage) {
+                        return await sock.sendMessage(sender, { text: '⚠️ Balas (reply) foto dengan command `!setpp` untuk dijadikan foto profil bot!' }, { quoted: msg });
+                    }
+                    try {
+                        await sock.sendMessage(sender, { text: '⏳ Mengunduh & mengganti foto profil bot...' }, { quoted: msg });
+                        const buffer = await downloadMediaMessage(
+                            { message: quotedContext.quotedMessage },
+                            'buffer',
+                            {},
+                            { logger: console }
+                        );
+                        await sock.updateProfilePicture(sock.user.id, buffer);
+                        await sock.sendMessage(sender, { text: '✅ Foto profil bot berhasil diperbarui!' }, { quoted: msg });
+                    } catch(e) {
+                        await sock.sendMessage(sender, { text: '❌ Gagal mengubah foto profil: ' + (e.message || e) }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                // =========================================================
+                // PERINTAH EKSISTING RSUD KENDARI, SHOLAT, CUACA & SISTEM
+                // =========================================================
+                case 'jadwalranap': {
+                    await sock.sendPresenceUpdate('composing', sender);
+                    await sock.sendMessage(sender, { text: '⏳ _Sedang mengambil data jadwal rawat inap dari server..._' }, { quoted: msg });
+                    try {
+                        const result = await fetchWithFallback('Ranap');
+
+                        if (!result.status || result.data.length === 0) {
+                            await sock.sendMessage(sender, { text: result.message || '📭 *Tidak ada data jadwal pasien rawat inap saat ini.*' }, { quoted: msg });
+                            break;
+                        }
+
+                        let replyTxt = `🏥 *MANIFEST PASIEN RAWAT INAP*\n\n📊 *Total Pasien:* ${result.total_data}\n⏱️ *Update Terakhir:* ${result.last_updated || 'Terbaru'}\n\n`;
+
+                        result.data.forEach((p, i) => {
+                            replyTxt += `*${i + 1}. ${p.nama_pasien}*\n 🛏️ Ruang: ${p.ruangan} (${p.no_kamar})\n 🆔 RM: ${p.no_rm} | Usia: ${p.usia}\n 👨‍⚕️ DPJP: ${p.dpjp_utama}\n`;
+                            if (p.dokter_rawat_bersama !== '-') replyTxt += ` 👨‍⚕️ Bersama: ${p.dokter_rawat_bersama}\n`;
+                            replyTxt += ` 🗓️ Masuk: ${p.tanggal_masuk}\n ⏳ Lama Rawat: ${p.lama_rawat}\n\n`;
+                        });
+
+                        replyTxt += `*_Data disinkronkan otomatis dari Web RSUD Kendari._*`;
+                        await sock.sendMessage(sender, { text: replyTxt }, { quoted: msg });
+                    } catch (error) { 
+                        await sock.sendMessage(sender, { text: '❌ *Gagal menghubungkan ke Server API Vercel maupun Google Sheets.*\nPastikan Ekstensi di PC menyala.' }, { quoted: msg }); 
+                    }
+                    break;
+                }
+
+                case 'autoranap': {
+                    if (args[0] === 'on') {
+                        if (!botSettings.autoRanap.includes(pureSender)) botSettings.autoRanap.push(pureSender);
+                        saveSettings();
+                        await sock.sendMessage(sender, { text: '✅ *Auto Info Rawat Inap AKTIF* di obrolan ini.\nBot akan otomatis mengirim pesan laporan jika mendeteksi ada pasien yang masuk atau keluar (pulang).' }, { quoted: msg });
+                        await forceSendRanapPrimer(sock, sender);
+                    } else if (args[0] === 'off') {
+                        botSettings.autoRanap = botSettings.autoRanap.filter(jid => jid !== pureSender);
+                        saveSettings();
+                        await sock.sendMessage(sender, { text: '❌ *Auto Info Rawat Inap NONAKTIF* di obrolan ini.' }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoranap on* atau *!autoranap off*' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'autorajal': {
+                    if (args[0] === 'on') {
+                        if (!botSettings.autoRajal.includes(pureSender)) botSettings.autoRajal.push(pureSender);
+                        saveSettings();
+                        await sock.sendMessage(sender, { text: '✅ *Auto Info Rawat Jalan AKTIF* di obrolan ini.\nBot akan otomatis mengirim laporan ke obrolan ini setiap kali antrean Klinik bertambah atau berkurang pada hari ini.' }, { quoted: msg });
+                        await forceSendRajalPrimer(sock, sender);
+                    } else if (args[0] === 'off') {
+                        botSettings.autoRajal = botSettings.autoRajal.filter(jid => jid !== pureSender);
+                        saveSettings();
+                        await sock.sendMessage(sender, { text: '❌ *Auto Info Rawat Jalan NONAKTIF* di obrolan ini.' }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autorajal on* atau *!autorajal off*' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'refresh': {
+                    await sock.sendMessage(sender, { text: '⏳ _Mengirim sinyal refresh ke Ekstensi Chrome..._' }, { quoted: msg });
+                    try {
+                        await fetch('https://ishiprsud.vercel.app/api/trigger', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ refresh: true })
+                        });
+                        await sock.sendMessage(sender, { text: '✅ *Sinyal terkirim!*\n\nEkstensi Chrome di PC Anda akan mendeteksinya dalam waktu 20 detik dan langsung melakukan tarikan data baru.' }, { quoted: msg });
+                    } catch (e) {
+                        await sock.sendMessage(sender, { text: '❌ *Gagal mengirim sinyal ke Vercel.*' }, { quoted: msg });
+                    }
+                    break;
+                }
+
+                case 'settings': {
                     const ranapActive = botSettings.autoRanap.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
                     const rajalActive = botSettings.autoRajal.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
                     const sholatActive = botSettings.autoSholat.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
                     const weatherActive = botSettings.autoWeather.includes(pureSender) ? '✅ AKTIF' : '❌ NONAKTIF';
+                    const antiCallActive = botSettings.antiCall ? '✅ AKTIF' : '❌ NONAKTIF';
                     
                     let setsMsg = `⚙️ *PENGATURAN BOT DI CHAT/GRUP INI*\n\n` +
                                   `🏥 *Auto Info Rawat Inap:* ${ranapActive}\n` +
                                   `🏥 *Auto Info Rawat Jalan:* ${rajalActive}\n` +
                                   `🕌 *Auto Info Sholat (Kendari):* ${sholatActive}\n` +
-                                  `🌤️ *Auto Info Cuaca (Kendari):* ${weatherActive}\n\n`;
+                                  `🌤️ *Auto Info Cuaca (Kendari):* ${weatherActive}\n` +
+                                  `📵 *Anti-Call Protection:* ${antiCallActive}\n\n`;
                     
-                    if (pureSender === ownerNumber || pureSender === ownerPureJid) {
+                    if (isOwner(pureSender, sock)) {
                         setsMsg += `👑 *STATISTIK GLOBAL (KHUSUS OWNER):*\n` +
                                    `👥 Berlangganan Sholat: ${botSettings.autoSholat.length} User/Grup\n` +
                                    `👥 Berlangganan Cuaca: ${botSettings.autoWeather.length} User/Grup\n` +
@@ -804,8 +2037,9 @@ export default function setupMessageHandler(sock) {
                     setsMsg += `_Gunakan command *!autoranap on*, *!autoinfosholat on*, dsb untuk mengaktifkan._`;
                     await sock.sendMessage(sender, { text: setsMsg }, { quoted: msg });
                     break;
+                }
 
-                case 'autoinfosholat':
+                case 'autoinfosholat': {
                     if (args[0] === 'on') {
                         if (!botSettings.autoSholat.includes(pureSender)) botSettings.autoSholat.push(pureSender);
                         saveSettings();
@@ -816,8 +2050,9 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(sender, { text: '❌ *Auto Info & Pengingat Sholat NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else { await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoinfosholat on/off*' }, { quoted: msg }); }
                     break;
+                }
 
-                case 'autoweather':
+                case 'autoweather': {
                     if (args[0] === 'on') {
                         if (!botSettings.autoWeather.includes(pureSender)) botSettings.autoWeather.push(pureSender);
                         saveSettings();
@@ -828,8 +2063,9 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(sender, { text: '❌ *Auto Prakiraan Cuaca NONAKTIF* di obrolan ini.' }, { quoted: msg });
                     } else { await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoweather on/off*' }, { quoted: msg }); }
                     break;
+                }
 
-                case 'addsholat':
+                case 'addsholat': {
                     if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor!*\nContoh: !addsholat 6281234567890' }, { quoted: msg });
                     let targetAddS = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (!botSettings.autoSholat.includes(targetAddS)) {
@@ -837,8 +2073,9 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} ditambahkan ke Auto Sholat.` }, { quoted: msg });
                     } else { await sock.sendMessage(sender, { text: `⚠️ Nomor sudah ada.` }, { quoted: msg }); }
                     break;
+                }
 
-                case 'delsholat':
+                case 'delsholat': {
                     if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor!*\nContoh: !delsholat 6281234567890' }, { quoted: msg });
                     let targetDelS = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (botSettings.autoSholat.includes(targetDelS)) {
@@ -846,8 +2083,9 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} dihapus dari Auto Sholat.` }, { quoted: msg });
                     } else { await sock.sendMessage(sender, { text: `⚠️ Nomor tidak ditemukan.` }, { quoted: msg }); }
                     break;
+                }
 
-                case 'addweather':
+                case 'addweather': {
                     if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor!*\nContoh: !addweather 6281234567890' }, { quoted: msg });
                     let targetAddW = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (!botSettings.autoWeather.includes(targetAddW)) {
@@ -855,18 +2093,21 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} ditambahkan ke Auto Cuaca.` }, { quoted: msg });
                     } else { await sock.sendMessage(sender, { text: `⚠️ Nomor sudah ada.` }, { quoted: msg }); }
                     break;
+                }
 
-                case 'delweather':
+                case 'delweather': {
                     if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Masukkan nomor!*\nContoh: !delweather 6281234567890' }, { quoted: msg });
                     let targetDelW = args[0].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (botSettings.autoWeather.includes(targetDelW)) {
-                        botSettings.autoWeather = botSettings.autoWeather.filter(n => n !== targetDelW); saveSettings();
+                        botSettings.autoWeather.filter(n => n !== targetDelW); saveSettings();
                         await sock.sendMessage(sender, { text: `✅ Nomor ${args[0]} dihapus dari Auto Cuaca.` }, { quoted: msg });
                     } else { await sock.sendMessage(sender, { text: `⚠️ Nomor tidak ditemukan.` }, { quoted: msg }); }
                     break;
+                }
 
                 case 'cuaca':
-                case 'weather':
+                case 'weather': {
+                    await sock.sendPresenceUpdate('composing', sender);
                     if (args.length > 0) {
                         const queryStr = args.join(' ');
                         const parsedDates = parseWeatherQuery(queryStr);
@@ -884,15 +2125,18 @@ export default function setupMessageHandler(sock) {
                         else await sock.sendMessage(sender, { text: '❌ *Gagal mengambil API Cuaca Open-Meteo.*' }, { quoted: msg });
                     }
                     break;
+                }
 
-                case 'gempa':
+                case 'gempa': {
+                    await sock.sendPresenceUpdate('composing', sender);
                     await sock.sendMessage(sender, { text: '⏳ _Mengambil informasi BMKG gempa terbaru..._' }, { quoted: msg });
                     const infoGempa = await fetchGempa();
                     await sock.sendMessage(sender, { text: infoGempa }, { quoted: msg });
                     break;
-                
+                }
+
                 case 'calc':
-                case 'kalkulator':
+                case 'kalkulator': {
                     if (args.length === 0) return await sock.sendMessage(sender, { text: '⚠️ Masukkan operasi matematika.\nContoh: `!calc (50 * 2) - 10`' }, { quoted: msg });
                     const calcStr = args.join(' ');
                     try {
@@ -904,8 +2148,10 @@ export default function setupMessageHandler(sock) {
                         }
                     } catch(e) { await sock.sendMessage(sender, { text: `❌ Ekspresi tidak dapat dihitung.` }, { quoted: msg }); }
                     break;
+                }
 
-                case 'listsurah':
+                case 'listsurah': {
+                    await sock.sendPresenceUpdate('composing', sender);
                     await sock.sendMessage(sender, { text: '⏳ _Mengambil daftar Surah..._' }, { quoted: msg });
                     try {
                         const res = await fetch("http://api.alquran.cloud/v1/surah"); const json = await res.json();
@@ -915,8 +2161,9 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(sender, { text: reply }, { quoted: msg });
                     } catch (e) { await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); }
                     break;
+                }
 
-                case 'surah':
+                case 'surah': {
                     if (!args[0]) return await sock.sendMessage(sender, { text: '⚠️ *Sertakan nomor surah!*\nContoh: !surah 1 (Untuk Al-Fatihah)' }, { quoted: msg });
                     try {
                         const num = parseInt(args[0]);
@@ -928,9 +2175,11 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(sender, { text: info }, { quoted: msg });
                     } catch (e) { await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); }
                     break;
+                }
 
-                case 'ayat':
+                case 'ayat': {
                     if (args.length < 2) return await sock.sendMessage(sender, { text: '⚠️ *Format Salah!*\nGunakan:\n*!ayat <surah> <ayat>* (Info 1 Ayat + Audio)\n*!ayat <surah> <awal>-<akhir>* (Rentang Ayat)\n*!ayat <surah> full* (Satu Surah Penuh)\n\nContoh:\n*!ayat 1 2*\n*!ayat 2 1-10*\n*!ayat 36 full*' }, { quoted: msg });
+                    await sock.sendPresenceUpdate('composing', sender);
                     await sock.sendMessage(sender, { text: '⏳ _Mengambil Data Al-Quran..._' }, { quoted: msg });
                     try {
                         const surahNum = args[0]; const ayatParam = args[1].toLowerCase();
@@ -973,77 +2222,9 @@ export default function setupMessageHandler(sock) {
                         }
                     } catch (e) { await sock.sendMessage(sender, { text: '❌ *Gagal memuat API Al-Quran.*' }); }
                     break;
+                }
 
-                case 'autoranap':
-                    if (args[0] === 'on') {
-                        if (!botSettings.autoRanap.includes(pureSender)) botSettings.autoRanap.push(pureSender);
-                        saveSettings();
-                        await sock.sendMessage(sender, { text: '✅ *Auto Info Rawat Inap AKTIF* di obrolan ini.\nBot akan otomatis mengirim pesan laporan jika mendeteksi ada pasien yang masuk atau keluar (pulang).' }, { quoted: msg });
-                        await forceSendRanapPrimer(sock, sender);
-                    } else if (args[0] === 'off') {
-                        botSettings.autoRanap = botSettings.autoRanap.filter(jid => jid !== pureSender);
-                        saveSettings();
-                        await sock.sendMessage(sender, { text: '❌ *Auto Info Rawat Inap NONAKTIF* di obrolan ini.' }, { quoted: msg });
-                    } else {
-                        await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autoranap on* atau *!autoranap off*' }, { quoted: msg });
-                    }
-                    break;
-
-                case 'autorajal':
-                    if (args[0] === 'on') {
-                        if (!botSettings.autoRajal.includes(pureSender)) botSettings.autoRajal.push(pureSender);
-                        saveSettings();
-                        await sock.sendMessage(sender, { text: '✅ *Auto Info Rawat Jalan AKTIF* di obrolan ini.\nBot akan otomatis mengirim laporan ke obrolan ini setiap kali antrean Klinik bertambah atau berkurang pada hari ini.' }, { quoted: msg });
-                        await forceSendRajalPrimer(sock, sender);
-                    } else if (args[0] === 'off') {
-                        botSettings.autoRajal = botSettings.autoRajal.filter(jid => jid !== pureSender);
-                        saveSettings();
-                        await sock.sendMessage(sender, { text: '❌ *Auto Info Rawat Jalan NONAKTIF* di obrolan ini.' }, { quoted: msg });
-                    } else {
-                        await sock.sendMessage(sender, { text: '⚠️ Format salah. Gunakan: *!autorajal on* atau *!autorajal off*' }, { quoted: msg });
-                    }
-                    break;
-
-                case 'refresh':
-                    await sock.sendMessage(sender, { text: '⏳ _Mengirim sinyal refresh ke Ekstensi Chrome..._' }, { quoted: msg });
-                    try {
-                        await fetch('https://ishiprsud.vercel.app/api/trigger', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ refresh: true })
-                        });
-                        await sock.sendMessage(sender, { text: '✅ *Sinyal terkirim!*\n\nEkstensi Chrome di PC Anda akan mendeteksinya dalam waktu 20 detik dan langsung melakukan tarikan data baru.' }, { quoted: msg });
-                    } catch (e) {
-                        await sock.sendMessage(sender, { text: '❌ *Gagal mengirim sinyal ke Vercel.*' }, { quoted: msg });
-                    }
-                    break;
-
-                case 'jadwalranap':
-                    await sock.sendMessage(sender, { text: '⏳ _Sedang mengambil data jadwal rawat inap dari server..._' }, { quoted: msg });
-                    try {
-                        const result = await fetchWithFallback('Ranap');
-
-                        if (!result.status || result.data.length === 0) {
-                            await sock.sendMessage(sender, { text: result.message || '📭 *Tidak ada data jadwal pasien rawat inap saat ini.*' }, { quoted: msg });
-                            break;
-                        }
-
-                        let replyTxt = `🏥 *MANIFEST PASIEN RAWAT INAP*\n\n📊 *Total Pasien:* ${result.total_data}\n⏱️ *Update Terakhir:* ${result.last_updated || 'Terbaru'}\n\n`;
-
-                        result.data.forEach((p, i) => {
-                            replyTxt += `*${i + 1}. ${p.nama_pasien}*\n 🛏️ Ruang: ${p.ruangan} (${p.no_kamar})\n 🆔 RM: ${p.no_rm} | Usia: ${p.usia}\n 👨‍⚕️ DPJP: ${p.dpjp_utama}\n`;
-                            if (p.dokter_rawat_bersama !== '-') replyTxt += ` 👨‍⚕️ Bersama: ${p.dokter_rawat_bersama}\n`;
-                            replyTxt += ` 🗓️ Masuk: ${p.tanggal_masuk}\n ⏳ Lama Rawat: ${p.lama_rawat}\n\n`;
-                        });
-
-                        replyTxt += `*_Data disinkronkan otomatis dari Web RSUD Kendari._*`;
-                        await sock.sendMessage(sender, { text: replyTxt }, { quoted: msg });
-                    } catch (error) { 
-                        await sock.sendMessage(sender, { text: '❌ *Gagal menghubungkan ke Server API Vercel maupun Google Sheets.*\nPastikan Ekstensi di PC menyala.' }, { quoted: msg }); 
-                    }
-                    break;
-                    
-                case 'addjadwal':
+                case 'addjadwal': {
                     const jadwalArgs = args.join(' ').split('|').map(s => s.trim());
                     
                     if (jadwalArgs.length < 3) {
@@ -1106,8 +2287,9 @@ export default function setupMessageHandler(sock) {
                                       `💬 *Pesan:* ${newJadwal.pesan.substring(0, 50)}${newJadwal.pesan.length > 50 ? '...' : ''}`;
                     await sock.sendMessage(sender, { text: suksesMsg }, { quoted: msg });
                     break;
+                }
 
-                case 'listjadwal':
+                case 'listjadwal': {
                     const pendingSchedules = botSchedules.filter(s => s.status === 'pending');
                     
                     if (pendingSchedules.length === 0) {
@@ -1126,8 +2308,9 @@ export default function setupMessageHandler(sock) {
                     
                     await sock.sendMessage(sender, { text: listTxt }, { quoted: msg });
                     break;
+                }
 
-                case 'deljadwal':
+                case 'deljadwal': {
                     if (!args[0]) {
                         await sock.sendMessage(sender, { text: '⚠️ *Masukkan ID jadwal yang mau dibatalkan/dihapus.*\nContoh: !deljadwal 123456' }, { quoted: msg });
                         break;
@@ -1144,8 +2327,9 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(sender, { text: `❌ *Jadwal dengan ID ${hapusId} tidak ditemukan di antrean.*` }, { quoted: msg });
                     }
                     break;
+                }
 
-                case 'runtime':
+                case 'runtime': {
                     const uptimeSec = process.uptime();
                     const rHours = Math.floor(uptimeSec / 3600).toString().padStart(2, '0');
                     const rMinutes = Math.floor((uptimeSec % 3600) / 60).toString().padStart(2, '0');
@@ -1181,6 +2365,7 @@ export default function setupMessageHandler(sock) {
                                          `• Uptime      : ${formattedUptime} (sejak ${relativeText})\n` +
                                          `• Start Time  : ${startTimeString} WITA\n` +
                                          `• Guilds      : ${groupCount}\n` +
+                                         `• Engine      : Baileys v7.0.0-rc14 (ESM)\n` +
                                          `• Node.js     : ${process.version}\n` +
                                          `• Memory (RSS): ${rssMB} MB\n` +
                                          `• Heap Used   : ${heapMB} MB\n\n` +
@@ -1193,29 +2378,36 @@ export default function setupMessageHandler(sock) {
 
                     await sock.sendMessage(sender, { text: runtimeReply }, { quoted: msg });
                     break;
+                }
 
-                case 'tagall':
-                    if (!sender.endsWith('@g.us')) return;
+                case 'tagall': {
+                    if (!isGroup) return;
                     const groupMetadata = await sock.groupMetadata(sender);
                     const tagParticipants = groupMetadata.participants.map(p => p.id);
                     let mentionText = `*📢 PERHATIAN SEMUA 📢*\n\n`;
                     tagParticipants.forEach(p => mentionText += `👉 @${p.split('@')[0]}\n`);
                     await sock.sendMessage(sender, { text: mentionText, mentions: tagParticipants }, { quoted: msg });
                     break;
+                }
 
-                case 'ping':
+                case 'ping': {
                     await sock.sendMessage(sender, { text: `🏓 *Pong!*\n⚡ *Kecepatan:* ${Date.now() - (msg.messageTimestamp * 1000)} ms` }, { quoted: msg }); 
                     break;
+                }
                     
-                case 'ai': 
+                case 'ai': {
                     await handleAiCommand(sock, msg, args); 
                     break;
+                }
                     
                 case 'sticker': 
-                case 's': 
+                case 's': {
                     await handleStickerCommand(sock, msg); 
                     break;
+                }
             }
-        } catch (error) { console.error('Error proses pesan:', error); }
+        } catch (error) { 
+            console.error('Error proses pesan di messageHandler:', error); 
+        }
     });
 }
