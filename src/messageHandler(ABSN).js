@@ -311,6 +311,7 @@ function getWitaTimeGreeting() {
     const dateNum = witaDate.getUTCDate();
     const monthName = monthNames[witaDate.getUTCMonth()];
     const monthNum = witaDate.getUTCMonth() + 1;
+    const yearNum = witaDate.getUTCFullYear();
 
     return {
         greeting,
@@ -1489,12 +1490,18 @@ function startOutboxQueueWorker(sock) {
                     // Cek sinyal kontrol instan (SYNC_SCHEDULE) dari Web Dashboard
                     if (item.type === 'SYNC_SCHEDULE' || item.action === 'reload_sessions') {
                         console.log("⚡ [Live-Trigger] 🔔 Menerima sinyal instan update jadwal dari Admin Web! Memuat ulang cache sesi...");
-                        await refreshMemoryCacheFromRedis(true);
-                        sentEventsToday.clear(); // Hapus flag event lama agar sesi yang sedang aktif langsung dievaluasi ulang
-                        if (currentSock) {
-                            await autonomousWitaSchedulerTick(currentSock);
+                        try {
+                            await refreshMemoryCacheFromRedis(true);
+                            sentEventsToday.clear(); // Hapus flag event lama agar sesi yang sedang aktif langsung dievaluasi ulang
+                            if (currentSock) {
+                                await autonomousWitaSchedulerTick(currentSock);
+                            }
+                        } catch (syncErr) {
+                            console.error("[Live-Trigger Error]", syncErr.message);
+                        } finally {
+                            // Selalu acknowledge item sinyal kontrol agar antrean bersih dan tidak memicu perulangan
+                            processedIds.push(item.id);
                         }
-                        processedIds.push(item.id);
                         continue;
                     }
 
