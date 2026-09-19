@@ -404,19 +404,28 @@ async function restartBot(botId) {
     await startBot(botId, scriptName);
 }
 
+// Helper Sanitasi JID WhatsApp (Mendukung PN, LID, & Group)
+function cleanJid(jid) {
+    if (!jid) return '';
+    let clean = String(jid).trim().replace(/:[0-9]+/g, '');
+    if (clean.includes('@lid')) return clean.split('@lid')[0] + '@lid';
+    if (clean.includes('@s.whatsapp.net')) return clean.split('@s.whatsapp.net')[0] + '@s.whatsapp.net';
+    if (clean.includes('@g.us')) return clean.split('@g.us')[0] + '@g.us';
+    if (!clean.includes('@')) {
+        clean = clean.replace(/[^0-9]/g, '');
+        if (clean.startsWith('0')) clean = '62' + clean.slice(1);
+        return clean + '@s.whatsapp.net';
+    }
+    return jidNormalizedUser(clean);
+}
+
 // Kirim pesan WhatsApp melalui bot tertentu (Fitur Dents Web BOT Gateway)
 async function sendBotMessage(botId, target, message) {
     const bot = bots.get(botId);
     if (!bot || !bot.sock || bot.status !== 'connected') {
         throw new Error(`Bot [${botId}] tidak ditemukan atau belum berstatus connected.`);
     }
-    let cleanTarget = String(target).trim();
-    if (!cleanTarget.includes('@')) {
-        cleanTarget = cleanTarget.replace(/[^0-9]/g, '');
-        if (cleanTarget.startsWith('0')) cleanTarget = '62' + cleanTarget.slice(1);
-        cleanTarget += '@s.whatsapp.net';
-    }
-    
+    const cleanTarget = cleanJid(target);
     return await bot.sock.sendMessage(cleanTarget, { text: message });
 }
 
