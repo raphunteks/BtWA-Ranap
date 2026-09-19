@@ -310,12 +310,16 @@ function getWitaTimeGreeting() {
     const dayName = dayNames[witaDate.getUTCDay()];
     const dateNum = witaDate.getUTCDate();
     const monthName = monthNames[witaDate.getUTCMonth()];
-    const yearNum = witaDate.getUTCFullYear();
+    const monthNum = witaDate.getUTCMonth() + 1;
 
     return {
         greeting,
         hours,
         minutes,
+        dateNum,
+        monthNum,
+        yearNum,
+        dateIso: `${yearNum}-${String(monthNum).padStart(2, '0')}-${String(dateNum).padStart(2, '0')}`,
         timeStr: `${String(hours).padStart(2, '0')}:${minutes} WITA`,
         fullWitaStr: `${dayName}, ${dateNum} ${monthName} ${yearNum} Pukul ${String(hours).padStart(2, '0')}:${minutes} WITA`
     };
@@ -1113,31 +1117,322 @@ ${studentProfile}
 }
 
 // =========================================================================
+// AUTONOMOUS WITA ATTENDANCE SCHEDULER & ZERO-SPAM IN-MEMORY CRON ENGINE
+// (Murni Berjalan di Bot WA, Nol Spam ke Redis, Beban Server Web 0%)
+// =========================================================================
+let cachedSessions = [];
+let cachedGeofence = null;
+let cachedFormats = [];
+let lastKnownSessionsHash = "";
+let lastKnownGeofenceHash = "";
+const sentEventsToday = new Set();
+let isSchedulerRunning = false;
+
+// Format Template Fallback Darurat jika Redis lambat merespons
+const fallbackFormatsMap = {
+    1: "🔔 *NOTIFIKASI ABSENSI DIBUKA* 🔔\n\nHalo *[Nama Lengkap]*, sesi absensi untuk *[Shift]* Dept. RKG hari ini telah resmi *DIBUKA*.\n\n📋 *Detail Sesi Absensi:*\n• Kelompok: *[Kelompok]*\n• Jam Tepat Waktu: *[Jam Sesi]* WITA\n• Batas Tutup Sesi: *[Jam Tutup]* WITA\n\nYuk, segera lakukan validasi kehadiran Anda sekarang melalui portal resmi kami:\n[Link]\n\nSelamat bertugas! 🏥",
+    2: "⚠️ *PENGINGAT TERAKHIR ABSENSI* ⚠️\n\nPanggilan kepada *[Nama Lengkap]*! Sistem mendeteksi Anda *BELUM* melakukan absensi untuk *[Shift]* hari ini.\n\nWaktu absensi Anda hampir habis. Sesi ini akan ditutup secara permanen pada pukul *[Jam Tutup]* WITA.\n\nMohon segera menuju area batas kampus dan selesaikan absen Anda di sini:\n[Link]",
+    4: "📊 *STATUS AKHIR KEHADIRAN* 📊\n\nHalo *[Nama Lengkap]*, batas waktu absensi untuk *[Shift]* telah resmi *DITUTUP* pada pukul *[Jam Tutup]* WITA.\n\nBerikut adalah rekapan status kehadiran Anda untuk sesi ini:\n*[Status Kehadiran]*\n\nTransparansi data Anda bisa diakses kembali melalui:\n[Link]",
+    8: "🔄 *INFO PERUBAHAN JADWAL ABSENSI* 🔄\n\nPerhatian *[Nama Lengkap]*, terdapat penyesuaian jadwal pada sistem absensi Dept. RKG untuk *[Shift]*.\n\nJadwal absensi terbaru Anda:\n⏳ Mulai Buka: *[Jam Sesi]* WITA\n⏳ Jam Berakhir: *[Jam Selesai]* WITA\n⏳ Batas Akhir Toleransi: *[Jam Tutup]* WITA\n\nMohon sesuaikan jam kedatangan Anda dengan jadwal terbaru ini.\nPortal Presensi: [Link]\nTerima kasih atas perhatiannya!",
+    13: "📍 *PEMBARUAN TITIK LOKASI ABSENSI* 📍\n\nHalo rekan-rekan mahasiswa Dept. RKG!\nTerdapat pembaruan pada titik pusat radar Lokasi Absensi (Geofence) yang berlaku mulai hari ini.\n\n• Titik Lokasi Baru: *[Nama Lokasi Geofence]*\n• Jangkauan Radar: *[Radius]* Meter\n\nPastikan Anda berada di area gedung tersebut dan selalu mengizinkan akses GPS pada browser Anda sebelum melakukan absensi di: [Link]",
+    22: "⏳ *PERINGATAN SISA WAKTU TOLERANSI* ⏳\n\nPerhatian *[Nama Lengkap]*! Waktu toleransi untuk *[Shift]* tersisa *[Sisa Waktu]* lagi.\n\nGerbang absensi akan ditutup permanen tepat pada pukul *[Jam Tutup]* WITA. Jika Anda belum menyelesaikan selfie lokasi, segera lakukan validasi sekarang di: [Link]"
+};
+
+function compileScenarioTemplate(templateStr, dataObj = {}) {
+    if (!templateStr) return "";
+    return templateStr
+        .replace(/\[Nama Lengkap\]/g, dataObj.namaLengkap || '')
+        .replace(/\[NIM\]/g, dataObj.nim || '')
+        .replace(/\[Kelompok\]/g, dataObj.kelompok || '')
+        .replace(/\[Shift\]/g, String(dataObj.shift || ''))
+        .replace(/\[Jam Sesi\]/g, String(dataObj.jamSesi || ''))
+        .replace(/\[Jam Selesai\]/g, String(dataObj.jamSelesai || dataObj.jamTutup || ''))
+        .replace(/\[Jam Tutup\]/g, String(dataObj.jamTutup || ''))
+        .replace(/\[Jam Absen\]/g, String(dataObj.jamAbsen || ''))
+        .replace(/\[Sisa Waktu\]/g, String(dataObj.sisaWaktu || '15 Menit'))
+        .replace(/\[Tanggal Mulai\]/g, String(dataObj.tanggalMulai || ''))
+        .replace(/\[Tanggal Akhir\]/g, String(dataObj.tanggalAkhir || ''))
+        .replace(/\[Tanggal\]/g, String(dataObj.tanggal || ''))
+        .replace(/\[Password\]/g, String(dataObj.password || ''))
+        .replace(/\[Pesan Custom\]/g, String(dataObj.pesanCustom || ''))
+        .replace(/\[Radius\]/g, String(dataObj.radius || '50'))
+        .replace(/\[Nama Lokasi Geofence\]/g, String(dataObj.lokasiGeofence || 'Gedung FKG UMI'))
+        .replace(/\[Status Kehadiran\]/g, String(dataObj.statusKehadiran || 'Sesi Ditutup'))
+        .replace(/\[Link\]/g, String(dataObj.link || WEB_PORTAL_URL));
+}
+
+function calculateCloseTimeStr(eH, eM, tolMins = 0) {
+    const total = Number(eH) * 60 + Number(eM) + Number(tolMins);
+    const cH = Math.floor((total / 60) % 24);
+    const cM = total % 60;
+    return `${String(cH).padStart(2, '0')}:${String(cM).padStart(2, '0')}`;
+}
+
+// Refresh lambat data sesi & geofence dari Redis (Setiap 3 Menit)
+// Menjamin Nol Spam Request ke Upstash Redis
+async function refreshMemoryCacheFromRedis() {
+    try {
+        const [sessions, geofence, formats] = await Promise.all([
+            callDbGet('axaxyz_sessions'),
+            callDbGet('axaxyz_geofence'),
+            callDbGet('axaxyz_formats')
+        ]);
+
+        if (Array.isArray(sessions) && sessions.length > 0) {
+            const newHash = JSON.stringify(sessions);
+            if (lastKnownSessionsHash && lastKnownSessionsHash !== newHash && currentSock) {
+                console.log("⏰ [Auto-Scheduler] 🔄 Terdeteksi perubahan jadwal sesi praktikum dari Admin! Menyiarkan Skenario 8...");
+                broadcastScheduleChange(currentSock, sessions).catch(() => {});
+            }
+            lastKnownSessionsHash = newHash;
+            cachedSessions = sessions;
+        }
+
+        if (geofence && typeof geofence === 'object') {
+            const newGfHash = JSON.stringify(geofence);
+            if (lastKnownGeofenceHash && lastKnownGeofenceHash !== newGfHash && currentSock) {
+                console.log("📍 [Auto-Scheduler] 🌐 Terdeteksi pembaruan koordinat geofence kampus dari Admin! Menyiarkan Skenario 13...");
+                broadcastGeofenceChange(currentSock, geofence).catch(() => {});
+            }
+            lastKnownGeofenceHash = newGfHash;
+            cachedGeofence = geofence;
+        }
+
+        if (Array.isArray(formats) && formats.length > 0) {
+            cachedFormats = formats;
+        }
+    } catch (e) {
+        // Abaikan error jaringan sementara
+    }
+}
+
+// Broadcast skenario umum ke seluruh mahasiswa dengan throttling aman (350ms antar pesan)
+async function broadcastScenarioToStudents(sock, scenarioId, dataObj = {}) {
+    if (!sock) return;
+    const students = await callDbGet('axaxyz_students') || [];
+    if (!Array.isArray(students) || students.length === 0) return;
+
+    let templateStr = fallbackFormatsMap[scenarioId] || "";
+    if (cachedFormats && cachedFormats.length > 0) {
+        const found = cachedFormats.find(f => f.id === scenarioId);
+        if (found && found.template) templateStr = found.template;
+    }
+
+    let sentCount = 0;
+    for (const st of students) {
+        const phone = st.noHp || st.phone;
+        if (!phone) continue;
+        const cleanDigits = sanitizeNumber(phone);
+        if (!cleanDigits) continue;
+
+        const textMsg = compileScenarioTemplate(templateStr, {
+            ...dataObj,
+            namaLengkap: st.name || '',
+            nim: st.nim || '',
+            kelompok: st.clusterId || st.cluster || '',
+            password: st.password || '',
+            link: WEB_PORTAL_URL
+        });
+
+        try {
+            await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, {
+                text: formatForWhatsApp(textMsg)
+            });
+            sentCount++;
+        } catch (e) {}
+
+        // Jeda 350ms antar kirim pesan untuk memproteksi sesi Baileys
+        await new Promise(r => setTimeout(r, 350));
+    }
+    console.log(`📢 [Auto-Scheduler WITA] ✅ Sukses mengirim siaran Skenario ${scenarioId} ke ${sentCount} mahasiswa.`);
+}
+
+// Broadcast khusus sisa toleransi (Skenario 22/2) kepada mahasiswa yang belum absen
+async function broadcastWarningToUnloggedStudents(sock, session, closeStr) {
+    if (!sock) return;
+    const [students, logs] = await Promise.all([
+        callDbGet('axaxyz_students') || [],
+        callDbGet('axaxyz_logs') || []
+    ]);
+
+    if (!Array.isArray(students) || students.length === 0) return;
+
+    const wita = getWitaTimeGreeting();
+    const todayDateStr = wita.dateIso;
+
+    // Filter mahasiswa yang sudah absen hari ini pada sesi ini
+    const loggedNims = new Set();
+    if (Array.isArray(logs)) {
+        logs.forEach(l => {
+            if (l.date === todayDateStr || (l.timestamp && l.timestamp.includes(todayDateStr))) {
+                if (l.session === session.name || !l.session) {
+                    loggedNims.add(l.nim);
+                    if (l.studentId) loggedNims.add(l.studentId);
+                }
+            }
+        });
+    }
+
+    const unloggedStudents = students.filter(st => !loggedNims.has(st.nim) && !loggedNims.has(st.id));
+    const targets = unloggedStudents.length > 0 ? unloggedStudents : students;
+
+    let templateStr = fallbackFormatsMap[22] || fallbackFormatsMap[2] || "";
+    if (cachedFormats && cachedFormats.length > 0) {
+        const found = cachedFormats.find(f => f.id === 22 || f.id === 2);
+        if (found && found.template) templateStr = found.template;
+    }
+
+    let sentCount = 0;
+    for (const st of targets) {
+        const phone = st.noHp || st.phone;
+        if (!phone) continue;
+        const cleanDigits = sanitizeNumber(phone);
+        if (!cleanDigits) continue;
+
+        const textMsg = compileScenarioTemplate(templateStr, {
+            shift: session.name,
+            jamSesi: session.startTime || session.start,
+            jamTutup: closeStr,
+            sisaWaktu: "15 Menit",
+            namaLengkap: st.name || '',
+            nim: st.nim || '',
+            kelompok: st.clusterId || st.cluster || '',
+            link: WEB_PORTAL_URL
+        });
+
+        try {
+            await sock.sendMessage(`${cleanDigits}@s.whatsapp.net`, {
+                text: formatForWhatsApp(textMsg)
+            });
+            sentCount++;
+        } catch (e) {}
+
+        await new Promise(r => setTimeout(r, 350));
+    }
+    console.log(`⏳ [Auto-Scheduler WITA] ⚠️ Sukses mengirim pengingat sisa waktu sesi [${session.name}] ke ${sentCount} mahasiswa belum absen.`);
+}
+
+// Broadcast otomatis saat koordinat geofence kampus diubah di Admin
+async function broadcastGeofenceChange(sock, geofence) {
+    if (!sock || !geofence) return;
+    await broadcastScenarioToStudents(sock, 13, {
+        lokasiGeofence: geofence.name || 'Gedung FKG Kampus 2 UMI',
+        radius: String(geofence.radius || '50')
+    });
+}
+
+// Broadcast otomatis saat jam shift sesi diubah di Admin
+async function broadcastScheduleChange(sock, sessions) {
+    if (!sock || !Array.isArray(sessions) || sessions.length === 0) return;
+    const active = sessions.find(s => s.active || s.isActive !== false) || sessions[0];
+    const tolMins = typeof active.toleranceMinutes === 'number' ? active.toleranceMinutes : 15;
+    const [eH, eM] = (active.endTime || active.end || "16:00").split(':').map(Number);
+    const closeStr = calculateCloseTimeStr(eH, eM, tolMins);
+
+    await broadcastScenarioToStudents(sock, 8, {
+        shift: active.name || active.title || 'Sesi Praktikum',
+        jamSesi: active.startTime || active.start || '08:00',
+        jamSelesai: active.endTime || active.end || '16:00',
+        jamTutup: closeStr
+    });
+}
+
+// Tick lokal dalam memori RAM (Dieksekusi setiap 30 detik tanpa spam request ke Redis)
+async function autonomousWitaSchedulerTick(sock) {
+    if (!sock || !Array.isArray(cachedSessions) || cachedSessions.length === 0) return;
+
+    const wita = getWitaTimeGreeting();
+    const currentTotalMin = wita.hours * 60 + parseInt(wita.minutes, 10);
+    const todayDateStr = wita.dateIso;
+
+    for (const session of cachedSessions) {
+        if (!session.active && session.isActive === false) continue;
+
+        const startStr = session.startTime || session.start || "08:00";
+        const endStr = session.endTime || session.end || "16:00";
+        const tolMins = typeof session.toleranceMinutes === 'number' ? session.toleranceMinutes : 15;
+
+        const [sH, sM] = startStr.split(':').map(Number);
+        const [eH, eM] = endStr.split(':').map(Number);
+
+        if (isNaN(sH) || isNaN(eH)) continue;
+
+        const startMin = sH * 60 + sM;
+        const closeMin = eH * 60 + eM + tolMins;
+        const remainingMinutes = closeMin - currentTotalMin;
+        const closeStr = calculateCloseTimeStr(eH, eM, tolMins);
+        const sessionId = session.id || session.name || "default";
+
+        // 1. EVENT: PEMBUKAAN SESI PRESENSI (Tepat jam startTime WITA)
+        const openEventKey = `open_${todayDateStr}_${sessionId}`;
+        if (currentTotalMin >= startMin && currentTotalMin <= startMin + 2) {
+            if (!sentEventsToday.has(openEventKey)) {
+                sentEventsToday.add(openEventKey);
+                console.log(`⏰ [Auto-Scheduler WITA] 🔔 Memasuki jam buka sesi [${session.name}] (${startStr} WITA). Menyiarkan Skenario 1...`);
+                broadcastScenarioToStudents(sock, 1, {
+                    shift: session.name,
+                    jamSesi: startStr,
+                    jamSelesai: endStr,
+                    jamTutup: closeStr
+                }).catch(e => console.error('[Auto-Scheduler Error]', e.message));
+            }
+        }
+
+        // 2. EVENT: PERINGATAN SISA WAKTU TOLERANSI 15 MENIT
+        const warnEventKey = `warn_${todayDateStr}_${sessionId}`;
+        if (remainingMinutes <= 15 && remainingMinutes >= 12 && currentTotalMin > startMin) {
+            if (!sentEventsToday.has(warnEventKey)) {
+                sentEventsToday.add(warnEventKey);
+                console.log(`⏰ [Auto-Scheduler WITA] ⏳ Toleransi sesi [${session.name}] tersisa 15 menit. Menyiarkan Skenario 22/2...`);
+                broadcastWarningToUnloggedStudents(sock, session, closeStr).catch(e => console.error('[Auto-Scheduler Error]', e.message));
+            }
+        }
+
+        // 3. EVENT: PENUTUPAN SESI RESMI (Tepat jam closingTime WITA)
+        const closeEventKey = `close_${todayDateStr}_${sessionId}`;
+        if (currentTotalMin >= closeMin && currentTotalMin <= closeMin + 2) {
+            if (!sentEventsToday.has(closeEventKey)) {
+                sentEventsToday.add(closeEventKey);
+                console.log(`⏰ [Auto-Scheduler WITA] 🔴 Batas waktu toleransi sesi [${session.name}] telah berakhir (${closeStr} WITA). Menyiarkan Skenario 4...`);
+                broadcastScenarioToStudents(sock, 4, {
+                    shift: session.name,
+                    jamTutup: closeStr,
+                    statusKehadiran: "Sesi telah resmi ditutup."
+                }).catch(e => console.error('[Auto-Scheduler Error]', e.message));
+            }
+        }
+    }
+}
+
+// Inisialisasi Mesin Scheduler Otonom (Hanya di Bot WA)
+function startAutonomousAttendanceScheduler(sock) {
+    if (isSchedulerRunning) return;
+    isSchedulerRunning = true;
+    currentSock = sock;
+
+    console.log("⏰ [Auto-Scheduler WITA] Mesin cron penjadwal presensi otonom AKTIF (Memory-First, Zero-Spam Redis, 30s Local Ticker).");
+
+    // Inisialisasi cache memori pertama kali
+    refreshMemoryCacheFromRedis().catch(() => {});
+
+    // Refresh lambat data sesi & geofence dari Redis setiap 3 Menit (180.000 ms)
+    setInterval(() => {
+        refreshMemoryCacheFromRedis().catch(() => {});
+    }, 180000);
+
+    // Pengecekan jam WITA lokal murni di memori RAM setiap 30 detik (Nol request Redis)
+    setInterval(() => {
+        if (currentSock) {
+            autonomousWitaSchedulerTick(currentSock).catch(() => {});
+        }
+    }, 30000);
+}
+
+// =========================================================================
 // BACKGROUND WORKER: DISPATCHER ANTRIAN OUTBOX CLOUD (axaxyz_wa_queue)
-// & REAL-TIME SESSION OBSERVER (AUTO-DETECT JAM SESI & JADWAL)
 // =========================================================================
 let isOutboxWorkerRunning = false;
 let currentSock = null;
-let lastKnownSessionsHash = "";
-let lastKnownSessions = [];
-
-async function checkAndObserveSessions(sock) {
-    try {
-        const raw = await callDbGet('axaxyz_sessions');
-        if (!raw || !Array.isArray(raw)) return;
-
-        const currentHash = JSON.stringify(raw);
-        if (lastKnownSessionsHash && lastKnownSessionsHash !== currentHash) {
-            console.log("⏰ [Jadwal Auto-Sync] 🔔 Terdeteksi sinkronisasi/perubahan jadwal sesi praktikum dari Admin Portal!");
-            const activeNow = raw.filter(s => s.active);
-            console.log(`⏰ [Jadwal Auto-Sync] ℹ️ Total sesi: ${raw.length} | Sesi aktif: ${activeNow.map(s => s.name || s.title).join(', ') || 'Tidak ada'}`);
-        }
-        lastKnownSessionsHash = currentHash;
-        lastKnownSessions = raw;
-    } catch (e) {
-        // Abaikan error koneksi sementara
-    }
-}
 
 function startOutboxQueueWorker(sock) {
     if (isOutboxWorkerRunning) return;
@@ -1148,9 +1443,6 @@ function startOutboxQueueWorker(sock) {
 
     setInterval(async () => {
         if (!currentSock) return;
-
-        // 1. Observer sinkronisasi otomatis jadwal sesi dari Upstash Redis
-        await checkAndObserveSessions(currentSock);
 
         try {
             const pendingMessages = await callWaPull();
@@ -1212,7 +1504,10 @@ async function messageHandler(sock) {
     // 1. Inisialisasi background dispatcher antrian outbox Web Absensi V7
     startOutboxQueueWorker(sock);
 
-    // 2. Pre-warming LID admin di latar belakang
+    // 2. Inisialisasi mesin cron penjadwal presensi otonom berbasis WITA (Zero-Spam Redis)
+    startAutonomousAttendanceScheduler(sock);
+
+    // 3. Pre-warming LID admin di latar belakang
     setTimeout(() => {
         prewarmAdminAndOwnerLids(sock);
     }, 2000);
