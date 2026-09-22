@@ -758,20 +758,52 @@ async function prewarmDoctorAndOwnerLids(sock) {
     } catch (e) { }
 }
 
-// CONVERT ALL PATIENTS TO LID & SAVE TO COLUMN 18 (NO LID)
+// =========================================================================
+// SISTEM KONVERSI LID CERDAS & ANTI-SPAM LOGS (KOLOM 18)
+// - Concurrency Lock: Mencegah 2 proses konversi berjalan bersamaan
+// - One-Time Boot Guard: Cukup 1x saat bot pertama kali running/hidup
+// - Double-Guard Skip: Pasien ber-LID & cache lokal dilewati instan (0ms)
+// =========================================================================
+let isLidConverterRunning = false;
+let hasInitialLidConvertExecuted = false;
+
+// CONVERT UNLINKED PATIENTS TO LID & SAVE TO COLUMN 18 (NO LID)
+// Cerdas: Hanya memproses pasien yang belum memiliki LID (masih '-') dan tidak mengulang dari pasien awal
 async function convertAllPatientsToLid(sock, forceAll = false) {
-    console.log(`[Auto-Converter] Memulai konversi satu-satu No WA ke Kolom 18 (No LID)...`);
+    if (isLidConverterRunning) {
+        if (forceAll) {
+            console.log(`[Auto-Converter] Konversi LID sedang berjalan di latar belakang, permintaan diabaikan.`);
+        }
+        return { total: 0, matched: 0, inProgress: true };
+    }
+
+    isLidConverterRunning = true;
     try {
         const actionToCall = forceAll ? "get_all_patient_phones" : "get_unlinked_patients";
         const res = await callSimgosApi(actionToCall);
 
         if (res.status !== "success" || !Array.isArray(res.data) || res.data.length === 0) {
-            console.log(`[Auto-Converter] Semua pasien di spreadsheet telah memiliki No LID resmi.`);
-            return { total: 0, matched: 0 };
+            if (forceAll) {
+                console.log(`[Auto-Converter] Semua pasien di spreadsheet telah memiliki No LID resmi.`);
+            }
+            return { total: 0, matched: 0, alreadySynced: true };
         }
 
-        const patientList = res.data;
-        console.log(`[Auto-Converter] Memproses ${patientList.length} pasien untuk konversi LID resmi...`);
+        // Filter ketat: HANYA pasien yang LID-nya masih kosong, '-', atau tidak valid (< 10 digit atau berawalan 62)
+        const patientList = res.data.filter(p => {
+            const rawLid = String(p.noLid || p.existingLid || "").trim();
+            const phone = formatToInternational(p.cleanPhone || p.noHp);
+            return !rawLid || rawLid === "-" || rawLid.length < 10 || rawLid.startsWith("62") || rawLid === phone;
+        });
+
+        if (patientList.length === 0) {
+            if (forceAll) {
+                console.log(`[Auto-Converter] Semua pasien di spreadsheet telah memiliki No LID resmi.`);
+            }
+            return { total: 0, matched: 0, alreadySynced: true };
+        }
+
+        console.log(`[Auto-Converter] Ditemukan ${patientList.length} pasien baru/belum ber-LID untuk dikonversi...`);
 
         const batchUpdates = [];
         let matchedCount = 0;
@@ -780,6 +812,41 @@ async function convertAllPatientsToLid(sock, forceAll = false) {
             const phoneFull = formatToInternational(p.cleanPhone || p.noHp);
             if (!phoneFull || phoneFull.length < 8) continue;
 
+            // Guard 1: Jika di database pasien ternyata sudah memiliki LID valid, lewati (skip) seketika!
+            const existingLid = String(p.noLid || p.existingLid || "").trim();
+            if (existingLid && existingLid !== "-" && existingLid.length >= 10 && !existingLid.startsWith("62") && existingLid !== phoneFull) {
+                registerIdentityMapping(existingLid, phoneFull);
+                cachePatientObject(existingLid, p);
+                cachePatientObject(phoneFull, p);
+                cachePatientObject(p.noRm, p);
+                continue;
+            }
+
+            // Guard 2: Cek apakah sudah pernah tersimpan di phoneToLidMap lokal (0ms, anti-request WA)
+            if (phoneToLidMap.has(phoneFull)) {
+                const cachedLid = phoneToLidMap.get(phoneFull);
+                if (cachedLid && cachedLid.length >= 10 && !cachedLid.startsWith("62")) {
+                    registerIdentityMapping(cachedLid, phoneFull);
+                    p.noLid = cachedLid;
+                    p.noSender = phoneFull;
+                    cachePatientObject(cachedLid, p);
+                    cachePatientObject(phoneFull, p);
+                    cachePatientObject(p.noRm, p);
+
+                    batchUpdates.push({
+                        noRm: p.noRm,
+                        phone: phoneFull,
+                        lid: cachedLid,
+                        rowNumber: p.rowNumber
+                    });
+
+                    matchedCount++;
+                    console.log(`[LID Cache Match] ${p.namaPasien} (RM: ${p.noRm}): No WA ${phoneFull} -> LID (Cache): ${cachedLid}`);
+                    continue;
+                }
+            }
+
+            // Guard 3: Query ke WhatsApp USync hanya untuk pasien yang benar-benar belum memiliki LID
             try {
                 const resolvedLid = await resolveLidFromWhatsAppServer(sock, phoneFull);
                 if (resolvedLid) {
@@ -812,12 +879,16 @@ async function convertAllPatientsToLid(sock, forceAll = false) {
                 updates: batchUpdates
             });
             console.log(`[Auto-Converter] Sukses menyimpan ${batchUpdates.length} data ke Kolom 18 (No LID) Spreadsheet!`);
+        } else if (forceAll) {
+            console.log(`[Auto-Converter] Pemeriksaan selesai, tidak ada pembaruan LID baru yang diperlukan.`);
         }
 
         return { total: patientList.length, matched: matchedCount };
     } catch (errSync) {
         console.error("[Auto-Converter Error]", errSync.message);
         return { total: 0, matched: 0, error: errSync.message };
+    } finally {
+        isLidConverterRunning = false;
     }
 }
 
@@ -998,7 +1069,7 @@ async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") 
                 row: matchedPatient.rowNumber,
                 type: "lid_only",
                 no_lid: senderInfo.id
-            }).catch(() => {});
+            }).catch(() => { });
         }
     }
 
@@ -1278,11 +1349,11 @@ ${hasResched ? `
    • PERNYATAAN BIROKRATIS WAJIB:
      Jelaskan secara formal dan tegas bahwa jadwal kontrol semula pada tanggal ${patientContext.tglKontrol} telah resmi dialihkan/dijadwalkan ulang ke tanggal *${finalReschedDate}* bersama DPJP Utama (${sysConfig.dpjpUtama}). Nomor Rekam Medis (RM) pasien adalah ${patientContext.noRm}.
    • LARANGAN KERAS: DILARANG KERAS mengatakan "jadwal kontrol tetap dan tidak ada perubahan pada tanggal ${patientContext.tglKontrol}" karena jadwal tersebut telah resmi diperbarui di sistem SIMGOS!` :
-isJknCanceled ? `
+                isJknCanceled ? `
    • STATUS: PASIEN TERBATALKAN OTOMATIS OLEH SISTEM APLIKASI MOBILE JKN!
    • PERNYATAAN BIROKRATIS WAJIB:
      Sampaikan bahwa jadwal kontrol semula pada tanggal ${patientContext.tglKontrol} telah tercatat terbatalkan oleh sistem aplikasi Mobile JKN. Laporan tersebut telah diteruskan secara kedinasan kepada DPJP Utama (${sysConfig.dpjpUtama}) untuk penerbitan jadwal kontrol pengganti. Pasien dimohon menunggu konfirmasi jadwal baru melalui saluran komunikasi ini.` :
-isConfirmedHadir ? `
+                    isConfirmedHadir ? `
    • STATUS KONFIRMASI: PASIEN TELAH RESMI MENGONFIRMASI *HADIR (TERKONFIRMASI)* DI SISTEM RSKDGM!
    • LARANGAN MUTLAK (SANGAT PENTING): DILARANG KERAS menyuruh, meminta, atau mengulang perintah "Balas hadir konfirmasi kedatangan" kepada pasien ini! Pasien SUDAH mengonfirmasi hadir!
    • PANDUAN RESPON: Akui dengan hangat bahwa jadwal kehadiran kontrol pada tanggal *${patientContext.tglKontrol}* bersama ${sysConfig.dpjpUtama} (No. RM: ${patientContext.noRm}) telah tercatat rapi di Poli Konservasi. Jawab langsung, fokus, cerdas, dan tuntas apa yang ditanyakan atau dikonsultasikan oleh pasien.` : `
@@ -1537,7 +1608,7 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
 
             let pesanLaporanDokter = px.pesan_wa_laporan_dokter;
             if (!pesanLaporanDokter) {
-                const docTplKey = modeH === "h1" 
+                const docTplKey = modeH === "h1"
                     ? (sysConfig.templates?.["WA_LAPORAN_DOKTER_H1"] ? "WA_LAPORAN_DOKTER_H1" : "WA_LAPORAN_DOKTER")
                     : (sysConfig.templates?.["WA_LAPORAN_DOKTER_H2"] ? "WA_LAPORAN_DOKTER_H2" : "WA_LAPORAN_DOKTER");
                 const docTpl = sysConfig.templates?.[docTplKey] || sysConfig.templates?.["WA_LAPORAN_DOKTER"] || "";
@@ -1615,20 +1686,25 @@ async function executeFollowupBlast(sock, replyTargetJid = null, tglParam = "aut
 export default function setupMessageHandler(sock) {
     currentSock = sock;
 
-    prewarmDoctorAndOwnerLids(sock);
+    // CUKUP 1X LAKUKAN BOOT ROUTINES SAAT PERTAMA KALI BOT RUNNING/HIDUP
+    if (!hasInitialLidConvertExecuted) {
+        hasInitialLidConvertExecuted = true;
 
-    setTimeout(() => {
-        convertAllPatientsToLid(sock, false);
-    }, 3000);
+        prewarmDoctorAndOwnerLids(sock);
 
-    setTimeout(async () => {
-        try {
-            const fixRes = await callSimgosApi("fix_sender_columns");
-            if (fixRes && fixRes.fixedCount > 0) {
-                console.log(`[Auto-Sync Kolom O] Sukses menstandarisasi ${fixRes.fixedCount} baris Kolom O menjadi No WA Asli (628xxx)!`);
-            }
-        } catch (e) { }
-    }, 5000);
+        setTimeout(() => {
+            convertAllPatientsToLid(sock, false);
+        }, 4000);
+
+        setTimeout(async () => {
+            try {
+                const fixRes = await callSimgosApi("fix_sender_columns");
+                if (fixRes && fixRes.fixedCount > 0) {
+                    console.log(`[Auto-Sync Kolom O] Sukses menstandarisasi ${fixRes.fixedCount} baris Kolom O menjadi No WA Asli (628xxx)!`);
+                }
+            } catch (e) { }
+        }, 8000);
+    }
 
     if (!isIntervalStarted) {
         // 1. Scheduler Auto Blast Jam 08:30 WITA
@@ -1677,9 +1753,9 @@ export default function setupMessageHandler(sock) {
             }
         }, 30000);
 
-        // 2. Scheduler Rutin Sinkronisasi Pasien Setiap 30 Menit
+        // 2. Scheduler Rutin Cek Pasien Baru Tanpa LID Setiap 30 Menit
         setInterval(() => {
-            if (currentSock) {
+            if (currentSock && !isLidConverterRunning) {
                 convertAllPatientsToLid(currentSock, false);
             }
         }, 30 * 60 * 1000);
@@ -1812,15 +1888,23 @@ export default function setupMessageHandler(sock) {
                     case 'syncalldb':
                     case 'synclids':
                     case 'syncpasien':
-                        await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Memulai konversi satu-satu No WA database ke Kolom 18 (No LID) via USync Server WhatsApp... Mohon tunggu sebentar._" }, { quoted: msg });
-                        const syncResult = await convertAllPatientsToLid(sock, true);
-                        await sock.sendMessage(senderInfo.targetJid, {
-                            text: `✅ *SINKRONISASI KOLOM 18 (NO LID) SELESAI!*\n\n` +
-                                `📁 Total Nomor WA Diperiksa: *${syncResult.total} Pasien*\n` +
-                                `🎯 Berhasil Dikonversi ke LID: *${syncResult.matched} Pasien*\n` +
-                                `💾 Status: Tersimpan permanen ke Kolom 18 (No LID) & Kolom 15 di Spreadsheet.\n\n` +
-                                `_Sekarang pasien yang chat melalui LID langsung dikenali nama & No RM aslinya secara akurat!_ 🚀`
-                        }, { quoted: msg });
+                        await sock.sendMessage(senderInfo.targetJid, { text: "⏳ _Memeriksa data pasien yang belum memiliki LID (masih '-') di database... Mohon tunggu sebentar._" }, { quoted: msg });
+                        const syncResult = await convertAllPatientsToLid(sock, false);
+                        if (syncResult.total === 0 || syncResult.alreadySynced) {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `✅ *SELURUH PASIEN TELAH MEMILIKI NO LID RESMI!*\n\n` +
+                                    `Semua data pasien di database sudah memiliki No LID di Kolom 18 (tidak ada yang kosong/-).\n` +
+                                    `Tidak ada pasien baru yang perlu dikonversi ulang! 🚀`
+                            }, { quoted: msg });
+                        } else {
+                            await sock.sendMessage(senderInfo.targetJid, {
+                                text: `✅ *SINKRONISASI KOLOM 18 (NO LID) SELESAI!*\n\n` +
+                                    `📁 Total Pasien Belum Ber-LID: *${syncResult.total} Pasien*\n` +
+                                    `🎯 Berhasil Dikonversi ke LID: *${syncResult.matched} Pasien*\n` +
+                                    `💾 Status: Tersimpan permanen ke Kolom 18 (No LID) & Kolom 15 di Spreadsheet.\n\n` +
+                                    `_Pasien yang sudah memiliki LID sebelumnya otomatis dilewati._ 🚀`
+                            }, { quoted: msg });
+                        }
                         return;
 
                     case 'reschedulepx':
@@ -2147,8 +2231,8 @@ export default function setupMessageHandler(sock) {
 
                         const sysCfgGass = await fetchSystemAIConfig();
                         const delaySecGass = sysCfgGass.delayChat || 60;
-                        await sock.sendMessage(senderInfo.targetJid, { 
-                            text: `🚀 _Memulai pengiriman pesan WhatsApp massal (${modeHGass.toUpperCase()}) secara *Satu-Satu* (Pesan Pasien ➔ Laporan DPJP)..._\n⏳ *Jeda Anti-Spam:* ${delaySecGass} detik / pasien agar aman dari pemblokiran WA.` 
+                        await sock.sendMessage(senderInfo.targetJid, {
+                            text: `🚀 _Memulai pengiriman pesan WhatsApp massal (${modeHGass.toUpperCase()}) secara *Satu-Satu* (Pesan Pasien ➔ Laporan DPJP)..._\n⏳ *Jeda Anti-Spam:* ${delaySecGass} detik / pasien agar aman dari pemblokiran WA.`
                         }, { quoted: msg });
                         try {
                             const blastResult = await executeFollowupBlast(sock, remoteJid, tglKirim, toSenderGass, modeHGass);
@@ -2405,7 +2489,7 @@ export default function setupMessageHandler(sock) {
                             try { fs.unlinkSync(lidCacheFile); } catch (e) { }
                         }
                         await prewarmDoctorAndOwnerLids(sock);
-                        await convertAllPatientsToLid(sock, true);
+                        await convertAllPatientsToLid(sock, false);
                         await sock.sendMessage(senderInfo.targetJid, { text: "🔄 Seluruh Cache Prompt, Template, Data Pasien & Konfigurasi 9Router VPS (Gemini & Antigravity) berhasil disegarkan!" }, { quoted: msg });
                         return;
 
