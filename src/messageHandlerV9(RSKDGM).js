@@ -167,11 +167,13 @@ function getCachedPatientObject(key) {
 function parseSenderInfo(rawJid) {
     if (!rawJid) return { rawJid: '', id: '', isLid: false, targetJid: '', resolvedPhone: '', resolvedLid: '' };
     const jidStr = String(rawJid).trim();
-    const isLid = jidStr.toLowerCase().endsWith('@lid');
-    const isGroup = jidStr.toLowerCase().endsWith('@g.us');
+    const isLid = jidStr.toLowerCase().includes('@lid');
+    const isGroup = jidStr.toLowerCase().includes('@g.us');
     const isBroadcast = jidStr.toLowerCase().includes('broadcast');
 
-    const cleanId = jidStr.replace(/@(lid|s\.whatsapp\.net|broadcast|g\.us)$/i, '').replace(/\D/g, '');
+    const withoutDomain = jidStr.split('@')[0];
+    const baseId = withoutDomain.split(':')[0];
+    const cleanId = baseId.replace(/\D/g, '');
 
     let targetJid = jidStr;
     let resolvedPhone = '';
@@ -769,7 +771,7 @@ let hasInitialLidConvertExecuted = false;
 
 // CONVERT UNLINKED PATIENTS TO LID & SAVE TO COLUMN 18 (NO LID)
 // Cerdas: Hanya memproses pasien yang belum memiliki LID (masih '-') dan tidak mengulang dari pasien awal
-async function convertAllPatientsToLid(sock, forceAll = false) {
+async function convertAllPatientsToLid(sock, forceAll = false, isBoot = false) {
     if (isLidConverterRunning) {
         if (forceAll) {
             console.log(`[Auto-Converter] Konversi LID sedang berjalan di latar belakang, permintaan diabaikan.`);
@@ -783,8 +785,8 @@ async function convertAllPatientsToLid(sock, forceAll = false) {
         const res = await callSimgosApi(actionToCall);
 
         if (res.status !== "success" || !Array.isArray(res.data) || res.data.length === 0) {
-            if (forceAll) {
-                console.log(`[Auto-Converter] Semua pasien di spreadsheet telah memiliki No LID resmi.`);
+            if (forceAll || isBoot) {
+                console.log(`[Auto-Converter] Status: Seluruh pasien di database telah memiliki No LID resmi (0 pasien tertunda).`);
             }
             return { total: 0, matched: 0, alreadySynced: true };
         }
@@ -797,8 +799,8 @@ async function convertAllPatientsToLid(sock, forceAll = false) {
         });
 
         if (patientList.length === 0) {
-            if (forceAll) {
-                console.log(`[Auto-Converter] Semua pasien di spreadsheet telah memiliki No LID resmi.`);
+            if (forceAll || isBoot) {
+                console.log(`[Auto-Converter] Status: Seluruh pasien di database telah memiliki No LID resmi (0 pasien tertunda).`);
             }
             return { total: 0, matched: 0, alreadySynced: true };
         }
@@ -906,13 +908,24 @@ function extractRmFromText(text) {
     return null;
 }
 
+// Helper: Normalisasi data response API agar selalu menjadi Array of Patients (Resilient terhadap format Array maupun Object Tunggal)
+function normalizePatientData(resData) {
+    if (!resData) return [];
+    if (Array.isArray(resData)) return resData;
+    if (typeof resData === 'object' && (resData.namaPasien || resData.noRm || resData.rowNumber)) {
+        return [resData];
+    }
+    return [];
+}
+
 // Helper: Memilih kandidat pasien terbaik jika query menghasilkan lebih dari 1 data kontrol
 function selectBestPatientCandidate(candidates) {
-    if (!Array.isArray(candidates) || candidates.length === 0) return null;
-    if (candidates.length === 1) return candidates[0];
+    const list = normalizePatientData(candidates);
+    if (list.length === 0) return null;
+    if (list.length === 1) return list[0];
 
     // 1. Prioritaskan yang status kontrolnya masih 'Pending'
-    const pending = candidates.find(c => {
+    const pending = list.find(c => {
         const sH2 = String(c.statusWaH2 || c.statusWa || "").toLowerCase();
         const sH1 = String(c.statusWaH1 || "").toLowerCase();
         return sH2 === "pending" || sH2 === "" || sH1 === "pending" || sH1 === "";
@@ -920,7 +933,7 @@ function selectBestPatientCandidate(candidates) {
     if (pending) return pending;
 
     // 2. Ambil kandidat paling baru (indeks terakhir)
-    return candidates[candidates.length - 1];
+    return list[list.length - 1];
 }
 
 // SMART VERIFIED RESOLVER: Verifikasi Instan Identitas Pasien (LID, Phone, RM di Chat, Nama Lengkap & Auto-Bind LID)
@@ -954,13 +967,14 @@ async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") 
                 query: extractedRm,
                 lid: senderInfo.id
             });
-            if (rmRes.status === "success" && Array.isArray(rmRes.data) && rmRes.data.length > 0) {
-                matchedPatient = selectBestPatientCandidate(rmRes.data);
+            const cand = normalizePatientData(rmRes?.data);
+            if (cand.length > 0) {
+                matchedPatient = selectBestPatientCandidate(cand);
             }
         } catch (e) { }
     }
 
-    // 3. Pencarian via Phone atau LID pengirim di Google Sheets
+    // 3. Pencarian via Phone atau LID pengirim di Database SIMGOS
     if (!matchedPatient) {
         let lookupPhone = senderInfo.resolvedPhone;
         if (!lookupPhone && senderInfo.isLid && lidToPhoneMap.has(senderInfo.id)) {
@@ -981,8 +995,9 @@ async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") 
                 query: cleanLookupPhone || lookupLid || senderInfo.id
             });
 
-            if (searchRes.status === "success" && Array.isArray(searchRes.data) && searchRes.data.length > 0) {
-                matchedPatient = selectBestPatientCandidate(searchRes.data);
+            const cand = normalizePatientData(searchRes?.data);
+            if (cand.length > 0) {
+                matchedPatient = selectBestPatientCandidate(cand);
             }
         } catch (e) { }
     }
@@ -998,8 +1013,9 @@ async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") 
                     lid: senderInfo.id,
                     query: resolvedPhone
                 });
-                if (searchRev.status === "success" && Array.isArray(searchRev.data) && searchRev.data.length > 0) {
-                    matchedPatient = selectBestPatientCandidate(searchRev.data);
+                const cand = normalizePatientData(searchRev?.data);
+                if (cand.length > 0) {
+                    matchedPatient = selectBestPatientCandidate(cand);
                 }
             }
         } catch (e) { }
@@ -1013,8 +1029,10 @@ async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") 
                 callSimgosApi("get_followup", { mode: "h2", tgl: "auto" }).catch(() => null)
             ]);
             const candidatePatients = [];
-            if (h1Res?.status === "success" && Array.isArray(h1Res.data)) candidatePatients.push(...h1Res.data);
-            if (h2Res?.status === "success" && Array.isArray(h2Res.data)) candidatePatients.push(...h2Res.data);
+            const candH1 = normalizePatientData(h1Res?.data);
+            const candH2 = normalizePatientData(h2Res?.data);
+            if (candH1.length > 0) candidatePatients.push(...candH1);
+            if (candH2.length > 0) candidatePatients.push(...candH2);
 
             for (const cp of candidatePatients) {
                 const phoneCandidate = formatToInternational(cp.noHp);
@@ -1034,13 +1052,36 @@ async function smartVerifyPatient(sock, senderInfo, pushName, messageText = "") 
         } catch (e) { }
     }
 
+    // 4c. Deep Full-Scan Fallback: Jika masih belum cocok, cocokkan terhadap seluruh pasien di database SIMGOS
+    if (senderInfo.isLid && !matchedPatient) {
+        try {
+            const allPxRes = await callSimgosApi("get_all_patient_phones").catch(() => null);
+            const allPxList = normalizePatientData(allPxRes?.data);
+            const cleanSenderDigits = String(senderInfo.id).replace(/\D/g, '');
+
+            for (const px of allPxList) {
+                const pxLidDigits = String(px.noLid || px.existingLid || "").replace(/\D/g, '');
+                const pxSenderDigits = String(px.noSender || "").replace(/\D/g, '');
+                if ((pxLidDigits && pxLidDigits === cleanSenderDigits) || (pxSenderDigits && pxSenderDigits.length >= 13 && pxSenderDigits === cleanSenderDigits)) {
+                    console.log(`[Full-Scan LID Match] Pengirim ${senderInfo.id} teridentifikasi sebagai ${px.namaPasien} (RM: ${px.noRm})`);
+                    matchedPatient = px;
+                    if (px.cleanPhone || px.noHp) {
+                        registerIdentityMapping(senderInfo.id, px.cleanPhone || px.noHp);
+                    }
+                    break;
+                }
+            }
+        } catch (e) { }
+    }
+
     // 5. Pencarian Cerdas via Nama Lengkap (PushName atau Teks Pesan)
     if (!matchedPatient && pushName && pushName.length >= 3 && pushName !== "Pasien") {
         try {
             const cleanName = pushName.replace(/[^a-zA-Z0-9\s.,]/g, '').trim();
             const nameCheck = await callSimgosApi("search_patient", { query: cleanName, lid: senderInfo.id });
-            if (nameCheck.status === "success" && Array.isArray(nameCheck.data) && nameCheck.data.length > 0) {
-                matchedPatient = selectBestPatientCandidate(nameCheck.data);
+            const cand = normalizePatientData(nameCheck?.data);
+            if (cand.length > 0) {
+                matchedPatient = selectBestPatientCandidate(cand);
             }
         } catch (e) { }
     }
@@ -1370,8 +1411,8 @@ ${hasResched ? `
     } else {
         systemPromptText += `\n\n[DATA PENGIRIM CHAT]:
 - Nama Profil: ${senderPushName}
-- Status: Nomor WhatsApp belum terhubung dengan antrean kontrol aktif.
-PETUNJUK: Berikan salam formal birokratis dan persilakan pengirim menginformasikan Nama Lengkap serta Tanggal Lahir guna verifikasi data rekam medis di sistem SIMGOS.`;
+- Status: Nomor WhatsApp ini belum terpetakan langsung dengan data rekam medis aktif di SIMGOS RSKDGM.
+PETUNJUK: Berikan salam formal birokratis RSKD Gigi dan Mulut Prov. Sulsel. Jika pengirim menanyakan Nomor RM, jadwal kontrol, atau status berobat, persilakan mereka menginformasikan Nama Lengkap sesuai KTP/kartu berobat serta Tanggal Lahir (atau No. RM jika ingat) agar petugas sistem kami dapat segera memverifikasi dan mencocokkan jadwal perawatannya di Poli Konservasi.`;
     }
 
     let finalReply = "";
@@ -1693,7 +1734,7 @@ export default function setupMessageHandler(sock) {
         prewarmDoctorAndOwnerLids(sock);
 
         setTimeout(() => {
-            convertAllPatientsToLid(sock, false);
+            convertAllPatientsToLid(sock, false, true);
         }, 4000);
 
         setTimeout(async () => {
@@ -1938,14 +1979,15 @@ export default function setupMessageHandler(sock) {
 
                         try {
                             const searchTarget = await callSimgosApi("search_patient", { query: targetIdentifier });
-                            if (searchTarget.status !== "success" || !Array.isArray(searchTarget.data) || searchTarget.data.length === 0) {
+                            const targetCand = normalizePatientData(searchTarget?.data);
+                            if (searchTarget.status !== "success" || targetCand.length === 0) {
                                 await sock.sendMessage(senderInfo.targetJid, {
                                     text: `❌ Data pasien dengan kata kunci *"${targetIdentifier}"* tidak ditemukan di spreadsheet.`
                                 }, { quoted: msg });
                                 break;
                             }
 
-                            const targetPx = searchTarget.data[0];
+                            const targetPx = targetCand[0];
                             const sysCfg = await fetchSystemAIConfig();
 
                             await callSimgosApi("reschedule_patient", {
@@ -2063,11 +2105,15 @@ export default function setupMessageHandler(sock) {
                             });
 
                             const searchCheck = await callSimgosApi("search_patient", { query: targetRmBind, lid: senderInfo.id });
-                            const pxName = (searchCheck.status === "success" && searchCheck.data?.[0]?.namaPasien) ? searchCheck.data[0].namaPasien : targetRmBind;
+                            const bindCand = normalizePatientData(searchCheck?.data);
+                            const matchedPx = bindCand.length > 0 ? bindCand[0] : null;
+                            const pxName = matchedPx?.namaPasien || targetRmBind;
 
-                            if (searchCheck.data?.[0]?.noHp) {
-                                registerIdentityMapping(senderInfo.id, searchCheck.data[0].noHp);
-                                cachePatientObject(senderInfo.id, searchCheck.data[0]);
+                            if (matchedPx) {
+                                if (matchedPx.noHp) registerIdentityMapping(senderInfo.id, matchedPx.noHp);
+                                cachePatientObject(senderInfo.id, matchedPx);
+                                if (matchedPx.noHp) cachePatientObject(formatToInternational(matchedPx.noHp), matchedPx);
+                                if (matchedPx.noRm) cachePatientObject(matchedPx.noRm, matchedPx);
                             }
 
                             await sock.sendMessage(senderInfo.targetJid, {
@@ -2271,13 +2317,14 @@ export default function setupMessageHandler(sock) {
                         await sock.sendMessage(senderInfo.targetJid, { text: `🔍 _Mencari data pasien "${queryCari}"..._` }, { quoted: msg });
                         try {
                             const hasilCari = await callSimgosApi("search_patient", { query: queryCari });
-                            if (hasilCari.status !== "success" || !hasilCari.data || hasilCari.data.length === 0) {
+                            const candList = normalizePatientData(hasilCari?.data);
+                            if (hasilCari.status !== "success" || candList.length === 0) {
                                 await sock.sendMessage(senderInfo.targetJid, { text: `❌ Data pasien dengan kata kunci *"${queryCari}"* tidak ditemukan.` }, { quoted: msg });
                                 break;
                             }
 
-                            let txtMatch = `🎯 *HASIL PENCARIAN PASIEN (${hasilCari.total}):*\n\n`;
-                            hasilCari.data.slice(0, 5).forEach((p, idx) => {
+                            let txtMatch = `🎯 *HASIL PENCARIAN PASIEN (${candList.length}):*\n\n`;
+                            candList.slice(0, 5).forEach((p, idx) => {
                                 const iconRujuk = String(p.statusRujukan || "").toLowerCase().includes("habis") ? "🚫 Rujukan Habis" : "✅ Rujukan Aktif";
                                 txtMatch += `${idx + 1}. *${p.namaPasien}*\n` +
                                     `   🔖 No. RM: ${p.noRm}\n` +
